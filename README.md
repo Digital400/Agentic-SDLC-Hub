@@ -32,19 +32,28 @@ features yet.
 
 ## 3. How to run the frontend
 
+This is a Yarn workspaces monorepo — run `yarn install` once from the
+**repo root** (not inside `apps/web`), then run the dev server from
+`apps/web`:
+
 ```bash
+yarn install          # from the repo root, once
 cd apps/web
-npm install
-npm run dev
+yarn dev
 ```
 
 Visit http://localhost:3000.
 
 Stack: Next.js (App Router) + TypeScript + Tailwind CSS, with a
 shadcn/ui-ready structure (`components.json` configured, `components/ui/`
-ready for generated components — run `npx shadcn@latest init` /
-`npx shadcn@latest add <component>` from `apps/web` when you start adding
-UI components).
+ready for generated components — run `yarn dlx shadcn@latest init` /
+`yarn dlx shadcn@latest add <component>` from `apps/web` when you start
+adding UI components).
+
+> Package manager: this repo uses **Yarn (Berry, PnP)** — pinned via
+> `packageManager` in the root `package.json`. Don't use `npm`/`npx` here;
+> it will generate a conflicting `node_modules`/`package-lock.json` next to
+> Yarn's PnP setup (`.pnp.cjs`, `.yarn/`, `yarn.lock`).
 
 ## 4. How to run the backend
 

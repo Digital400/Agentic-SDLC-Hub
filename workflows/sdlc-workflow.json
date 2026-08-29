@@ -2,69 +2,176 @@
   "$schema": "./sdlc-workflow.schema.json",
   "id": "default-sdlc-workflow",
   "name": "Default SDLC Workflow",
-  "version": "0.1.0",
-  "description": "Baseline graph-based SDLC workflow. Each node is a stage that produces an artifact; edges define allowed transitions. This is data, not code — the workflow engine (LangGraph, later) will interpret it.",
+  "version": "0.2.0",
+  "description": "Baseline graph-based SDLC workflow, from initial intake through maintenance. Each node is a stage that produces an artifact; nextNodes defines allowed forward/rework transitions. This is data, not code — the workflow engine (LangGraph, later) will interpret it.",
+  "startNode": "requirement_intake",
+  "statuses": [
+    "NOT_STARTED",
+    "IN_PROGRESS",
+    "WAITING_FOR_REVIEW",
+    "APPROVED",
+    "NEEDS_CHANGES",
+    "REJECTED",
+    "BLOCKED",
+    "COMPLETED",
+    "FAILED"
+  ],
   "nodes": [
     {
-      "id": "requirements",
+      "id": "requirement_intake",
       "type": "stage",
-      "data": {
-        "label": "Requirements",
-        "artifactType": "requirements_doc",
-        "requiresHumanApproval": true,
-        "agentAssisted": true
-      },
+      "name": "Requirement Intake",
+      "description": "Capture the initial stakeholder request, desired outcome, and any known constraints before analysis begins.",
+      "agentKey": "requirement-intake-agent",
+      "requiredInputs": ["stakeholder_request"],
+      "outputArtifactType": "intake_summary",
+      "requiresHumanApproval": true,
+      "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
+      "nextNodes": ["problem_discovery"],
       "position": { "x": 0, "y": 0 }
     },
     {
-      "id": "design",
+      "id": "problem_discovery",
       "type": "stage",
-      "data": {
-        "label": "Design",
-        "artifactType": "design_doc",
-        "requiresHumanApproval": true,
-        "agentAssisted": true
-      },
-      "position": { "x": 250, "y": 0 }
+      "name": "Problem Discovery",
+      "description": "Investigate the underlying problem, its impact, and constraints, and state it clearly enough to design against.",
+      "agentKey": "problem-discovery-agent",
+      "requiredInputs": ["intake_summary"],
+      "outputArtifactType": "problem_statement",
+      "requiresHumanApproval": true,
+      "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
+      "nextNodes": ["solution_discovery"],
+      "position": { "x": 220, "y": 0 }
+    },
+    {
+      "id": "solution_discovery",
+      "type": "stage",
+      "name": "Solution Discovery",
+      "description": "Explore candidate solution approaches, weigh trade-offs, and recommend one to move forward with.",
+      "agentKey": "solution-discovery-agent",
+      "requiredInputs": ["problem_statement"],
+      "outputArtifactType": "solution_options_doc",
+      "requiresHumanApproval": true,
+      "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
+      "nextNodes": ["hld"],
+      "position": { "x": 440, "y": 0 }
+    },
+    {
+      "id": "hld",
+      "type": "stage",
+      "name": "High-Level Design",
+      "description": "Define the system-level architecture and major components for the chosen solution.",
+      "agentKey": "hld-agent",
+      "requiredInputs": ["solution_options_doc"],
+      "outputArtifactType": "hld_document",
+      "requiresHumanApproval": true,
+      "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
+      "nextNodes": ["story_crafting"],
+      "position": { "x": 660, "y": 0 }
+    },
+    {
+      "id": "story_crafting",
+      "type": "stage",
+      "name": "Story Crafting",
+      "description": "Break the approved high-level design into implementable stories/tasks with acceptance criteria.",
+      "agentKey": "story-crafting-agent",
+      "requiredInputs": ["hld_document"],
+      "outputArtifactType": "story_backlog",
+      "requiresHumanApproval": true,
+      "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
+      "nextNodes": ["lld"],
+      "position": { "x": 880, "y": 0 }
+    },
+    {
+      "id": "lld",
+      "type": "stage",
+      "name": "Low-Level Design",
+      "description": "Detail module/component-level design, data models, and interfaces for the stories in scope.",
+      "agentKey": "lld-agent",
+      "requiredInputs": ["story_backlog"],
+      "outputArtifactType": "lld_document",
+      "requiresHumanApproval": true,
+      "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
+      "nextNodes": ["implementation"],
+      "position": { "x": 1100, "y": 0 }
     },
     {
       "id": "implementation",
       "type": "stage",
-      "data": {
-        "label": "Implementation",
-        "artifactType": "code_change",
-        "requiresHumanApproval": false,
-        "agentAssisted": true
-      },
-      "position": { "x": 500, "y": 0 }
+      "name": "Implementation",
+      "description": "Write the code changes that satisfy the low-level design and the in-scope stories' acceptance criteria.",
+      "agentKey": "implementation-agent",
+      "requiredInputs": ["lld_document", "story_backlog"],
+      "outputArtifactType": "code_change",
+      "requiresHumanApproval": false,
+      "allowedActions": ["draft", "edit", "submit_for_review", "complete"],
+      "nextNodes": ["testing"],
+      "position": { "x": 1320, "y": 0 }
     },
     {
       "id": "testing",
       "type": "stage",
-      "data": {
-        "label": "Testing",
-        "artifactType": "test_report",
-        "requiresHumanApproval": true,
-        "agentAssisted": true
-      },
-      "position": { "x": 750, "y": 0 }
+      "name": "Testing",
+      "description": "Validate the implementation against acceptance criteria and produce a test report.",
+      "agentKey": "testing-agent",
+      "requiredInputs": ["code_change"],
+      "outputArtifactType": "test_report",
+      "requiresHumanApproval": true,
+      "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
+      "nextNodes": ["infrastructure", "implementation"],
+      "position": { "x": 1540, "y": 0 }
     },
     {
-      "id": "deployment",
+      "id": "infrastructure",
       "type": "stage",
-      "data": {
-        "label": "Deployment",
-        "artifactType": "deployment_record",
-        "requiresHumanApproval": true,
-        "agentAssisted": false
-      },
-      "position": { "x": 1000, "y": 0 }
+      "name": "Infrastructure Provisioning",
+      "description": "Provision and configure the infrastructure and environments required to release the change.",
+      "agentKey": "infrastructure-agent",
+      "requiredInputs": ["test_report"],
+      "outputArtifactType": "infrastructure_plan",
+      "requiresHumanApproval": true,
+      "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
+      "nextNodes": ["release"],
+      "position": { "x": 1760, "y": 0 }
+    },
+    {
+      "id": "release",
+      "type": "stage",
+      "name": "Release",
+      "description": "Deploy the change to production and record the deployment outcome.",
+      "agentKey": "release-agent",
+      "requiredInputs": ["infrastructure_plan"],
+      "outputArtifactType": "deployment_record",
+      "requiresHumanApproval": true,
+      "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
+      "nextNodes": ["maintenance"],
+      "position": { "x": 1980, "y": 0 }
+    },
+    {
+      "id": "maintenance",
+      "type": "stage",
+      "name": "Maintenance",
+      "description": "Monitor the released change, capture incidents and feedback, and feed learnings back into future intake.",
+      "agentKey": "maintenance-agent",
+      "requiredInputs": ["deployment_record"],
+      "outputArtifactType": "maintenance_log",
+      "requiresHumanApproval": false,
+      "allowedActions": ["draft", "edit", "submit_for_review", "complete"],
+      "nextNodes": [],
+      "position": { "x": 2200, "y": 0 }
     }
   ],
   "edges": [
-    { "id": "e-requirements-design", "source": "requirements", "target": "design" },
-    { "id": "e-design-implementation", "source": "design", "target": "implementation" },
+    { "id": "e-requirement_intake-problem_discovery", "source": "requirement_intake", "target": "problem_discovery" },
+    { "id": "e-problem_discovery-solution_discovery", "source": "problem_discovery", "target": "solution_discovery" },
+    { "id": "e-solution_discovery-hld", "source": "solution_discovery", "target": "hld" },
+    { "id": "e-hld-story_crafting", "source": "hld", "target": "story_crafting" },
+    { "id": "e-story_crafting-lld", "source": "story_crafting", "target": "lld" },
+    { "id": "e-lld-implementation", "source": "lld", "target": "implementation" },
     { "id": "e-implementation-testing", "source": "implementation", "target": "testing" },
-    { "id": "e-testing-deployment", "source": "testing", "target": "deployment" }
+    { "id": "e-testing-infrastructure", "source": "testing", "target": "infrastructure" },
+    { "id": "e-testing-implementation", "source": "testing", "target": "implementation", "label": "rework" },
+    { "id": "e-infrastructure-release", "source": "infrastructure", "target": "release" },
+    { "id": "e-release-maintenance", "source": "release", "target": "maintenance" }
   ]
 }

@@ -1,8 +1,19 @@
-# Node
+# Node / Yarn (Berry, PnP)
 node_modules/
 .next/
 out/
 npm-debug.log*
+yarn-error.log*
+.pnp.*.bak
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz.bak
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
 
 # Python
 __pycache__/
