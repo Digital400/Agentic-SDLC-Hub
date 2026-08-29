@@ -13,6 +13,7 @@ from app.models.base import Base
 from app.models.enums import (
     AgentPromptRole,
     AgentRunStatus,
+    ArtifactStatus,
     ProjectRole,
     ProjectStatus,
     ReviewStatus,
@@ -34,6 +35,7 @@ __all__ = [
     "ProjectStatus",
     "ProjectRole",
     "ReviewStatus",
+    "ArtifactStatus",
     "AgentPromptRole",
     "AgentRunStatus",
     "User",

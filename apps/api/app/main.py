@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
-from app.api.routes import health, projects
+from app.api.routes import artifacts, health, projects
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -33,3 +33,4 @@ async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSON
 
 app.include_router(health.router, tags=["health"])
 app.include_router(projects.router)
+app.include_router(artifacts.router)

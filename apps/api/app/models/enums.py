@@ -44,6 +44,18 @@ class ProjectRole(str, enum.Enum):
     VIEWER = "VIEWER"
 
 
+class ArtifactStatus(str, enum.Enum):
+    """An artifact's own review lifecycle — distinct from WorkflowStatus,
+    which tracks the broader lifecycle of the WorkflowNode that owns it
+    (which also covers non-artifact states like NOT_STARTED/BLOCKED)."""
+
+    DRAFT = "DRAFT"
+    READY_FOR_REVIEW = "READY_FOR_REVIEW"
+    APPROVED = "APPROVED"
+    NEEDS_CHANGES = "NEEDS_CHANGES"
+    REJECTED = "REJECTED"
+
+
 class ReviewStatus(str, enum.Enum):
     PENDING = "PENDING"
     APPROVED = "APPROVED"

@@ -70,6 +70,7 @@ const RAW_RUNTIME_STATE =
       ["workspace:apps/web", {\
         "packageLocation": "./apps/web/",\
         "packageDependencies": [\
+          ["@agentic-sdlc-hub/shared", "workspace:packages/shared"],\
           ["@agentic-sdlc-hub/web", "workspace:apps/web"],\
           ["@types/node", "npm:20.19.43"],\
           ["@types/react", "npm:18.3.31"],\

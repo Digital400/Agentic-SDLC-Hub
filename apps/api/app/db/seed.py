@@ -35,6 +35,7 @@ from app.models import (
     AgentRun,
     AgentRunStatus,
     Artifact,
+    ArtifactStatus,
     ArtifactVersion,
     AuditLog,
     Project,
@@ -224,7 +225,8 @@ def seed(db: Session) -> None:
         workflow_node=intake_node,
         artifact_type=intake_node.output_artifact_type,
         title=f"Requirement Intake Summary — {SAMPLE_PROJECT_NAME}",
-        status=WorkflowStatus.WAITING_FOR_REVIEW,
+        status=ArtifactStatus.READY_FOR_REVIEW,
+        created_by=contributor,
     )
     db.add(artifact)
     db.flush()
@@ -232,8 +234,11 @@ def seed(db: Session) -> None:
     v1 = ArtifactVersion(
         artifact=artifact,
         version_number=1,
-        content=agent_run.output_text,
-        authored_by_agent_run=agent_run,
+        content_markdown=agent_run.output_text,
+        # No agent-authorship link yet (AI drafting isn't wired up — see
+        # docs/mvp-plan.md); recorded as created by whoever triggered the
+        # draft request.
+        created_by=contributor,
         change_summary="Initial AI-drafted intake summary.",
         created_at=drafted_at,
     )
@@ -245,9 +250,9 @@ def seed(db: Session) -> None:
     v2 = ArtifactVersion(
         artifact=artifact,
         version_number=2,
-        content=v1.content
+        content_markdown=v1.content_markdown
         + "\n**Success metric:** +15% repeat purchase rate within 2 quarters of launch.\n",
-        authored_by_user=contributor,
+        created_by=contributor,
         change_summary="Clarified success metrics after stakeholder sync.",
         created_at=edited_at,
     )
@@ -292,7 +297,7 @@ def seed(db: Session) -> None:
         )
     )
 
-    artifact.status = WorkflowStatus.APPROVED
+    artifact.status = ArtifactStatus.APPROVED
     intake_node.status = WorkflowStatus.COMPLETED
     problem_discovery_node.status = WorkflowStatus.IN_PROGRESS
     project.current_stage = problem_discovery_node.node_key

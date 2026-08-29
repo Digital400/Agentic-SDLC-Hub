@@ -11,7 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models import Project, ProjectMember, ProjectRole, ProjectStatus, User, WorkflowNode
+from app.models import Artifact, Project, ProjectMember, ProjectRole, ProjectStatus, User, WorkflowNode
+from app.schemas.artifact import ArtifactRead
 from app.schemas.project import ProjectCreate, ProjectListResponse, ProjectRead, ProjectUpdate
 from app.schemas.workflow import WorkflowNodeRead, WorkflowNodeStatusUpdate
 from app.services.audit import record_audit_log
@@ -196,6 +197,20 @@ def list_project_workflow_nodes(project_id: uuid.UUID, db: Session = Depends(get
         db.query(WorkflowNode)
         .filter(WorkflowNode.project_id == project_id)
         .order_by(WorkflowNode.order_index)
+        .all()
+    )
+
+
+# List artifacts by project ---------------------------------------------------
+
+
+@router.get("/{project_id}/artifacts", response_model=list[ArtifactRead])
+def list_project_artifacts(project_id: uuid.UUID, db: Session = Depends(get_db)) -> list[Artifact]:
+    _get_project_or_404(db, project_id)
+    return (
+        db.query(Artifact)
+        .filter(Artifact.project_id == project_id)
+        .order_by(Artifact.created_at.desc())
         .all()
     )
 

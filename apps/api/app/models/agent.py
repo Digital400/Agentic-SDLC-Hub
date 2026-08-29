@@ -98,6 +98,6 @@ class AgentRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     agent_definition: Mapped["AgentDefinition"] = relationship("AgentDefinition", back_populates="runs")
     agent_prompt: Mapped["AgentPrompt | None"] = relationship("AgentPrompt", back_populates="runs")
     triggered_by_user: Mapped["User | None"] = relationship("User")
-    produced_versions: Mapped[list["ArtifactVersion"]] = relationship(
-        "ArtifactVersion", back_populates="authored_by_agent_run", foreign_keys="ArtifactVersion.authored_by_agent_run_id"
-    )
+    # No link to ArtifactVersion yet — AI drafting isn't wired up (see
+    # docs/mvp-plan.md); every version is human-created for now. Re-add
+    # once an agent can actually produce one.
