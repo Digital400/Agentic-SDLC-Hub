@@ -4,14 +4,29 @@ import { notFound } from "next/navigation";
 import { PageHeader } from "@/components/layout/page-header";
 import { WorkspaceTabs } from "@/components/projects/workspace-tabs";
 import { WorkflowCanvas } from "@/components/workflow/workflow-canvas";
-import { getProjectById, mockWorkflowEdgesByProject, mockWorkflowNodesByProject } from "@/lib/mock-data";
+import { api, ApiError } from "@/lib/api";
+import { toDocumentArtifact, toProject, toReviewItem, toWorkflowEdge, toWorkflowNode } from "@/lib/mappers";
 
-export default function ProjectWorkflowPage({ params }: { params: { projectId: string } }) {
-  const project = getProjectById(params.projectId);
-  if (!project) notFound();
+export default async function ProjectWorkflowPage({ params }: { params: { projectId: string } }) {
+  let project;
+  try {
+    project = toProject(await api.projects.get(params.projectId));
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) notFound();
+    throw err;
+  }
 
-  const nodes = mockWorkflowNodesByProject[project.id] ?? [];
-  const edges = mockWorkflowEdgesByProject[project.id] ?? [];
+  const [apiNodes, apiEdges, apiArtifacts, apiReviews] = await Promise.all([
+    api.projects.workflowNodes(project.id),
+    api.projects.workflowEdges(project.id),
+    api.projects.artifacts(project.id),
+    api.reviews.listAll(),
+  ]);
+
+  const nodes = apiNodes.map(toWorkflowNode);
+  const edges = apiEdges.map(toWorkflowEdge);
+  const documents = apiArtifacts.map(toDocumentArtifact);
+  const reviews = apiReviews.filter((r) => r.project_id === project.id).map(toReviewItem);
 
   return (
     <div>
@@ -19,7 +34,7 @@ export default function ProjectWorkflowPage({ params }: { params: { projectId: s
       <Suspense fallback={null}>
         <WorkspaceTabs projectId={project.id} />
       </Suspense>
-      <WorkflowCanvas projectId={project.id} nodes={nodes} edges={edges} />
+      <WorkflowCanvas projectId={project.id} nodes={nodes} edges={edges} documents={documents} reviews={reviews} />
     </div>
   );
 }

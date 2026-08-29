@@ -6,7 +6,7 @@ import "reactflow/dist/style.css";
 
 import { NodeDetailsPanel } from "@/components/workflow/node-details-panel";
 import { StageNode, type StageNodeData } from "@/components/workflow/stage-node";
-import type { ProjectWorkflowEdge, ProjectWorkflowNode } from "@/lib/types";
+import type { DocumentArtifact, ProjectWorkflowEdge, ProjectWorkflowNode, ReviewItem } from "@/lib/types";
 
 const nodeTypes = { stage: StageNode };
 
@@ -14,10 +14,14 @@ export function WorkflowCanvas({
   projectId,
   nodes,
   edges,
+  documents,
+  reviews,
 }: {
   projectId: string;
   nodes: ProjectWorkflowNode[];
   edges: ProjectWorkflowEdge[];
+  documents: DocumentArtifact[];
+  reviews: ReviewItem[];
 }) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? null;
@@ -77,7 +81,13 @@ export function WorkflowCanvas({
       </div>
 
       {selectedNode ? (
-        <NodeDetailsPanel projectId={projectId} node={selectedNode} onClose={() => setSelectedNodeId(null)} />
+        <NodeDetailsPanel
+          projectId={projectId}
+          node={selectedNode}
+          documents={documents}
+          reviews={reviews}
+          onClose={() => setSelectedNodeId(null)}
+        />
       ) : null}
     </div>
   );

@@ -4,5 +4,6 @@ pydantic==2.8.2
 pydantic-settings==2.3.4
 sqlalchemy==2.0.31
 alembic==1.13.2
+anthropic==1.2.0
 psycopg2-binary==2.9.10
 python-dotenv==1.0.1

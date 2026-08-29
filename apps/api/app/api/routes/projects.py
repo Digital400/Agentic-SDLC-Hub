@@ -11,10 +11,21 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models import Artifact, Project, ProjectMember, ProjectRole, ProjectStatus, User, WorkflowNode
+from app.models import (
+    AgentRun,
+    Artifact,
+    Project,
+    ProjectMember,
+    ProjectRole,
+    ProjectStatus,
+    User,
+    WorkflowEdge,
+    WorkflowNode,
+)
+from app.schemas.agent_run import AgentRunRead
 from app.schemas.artifact import ArtifactRead
 from app.schemas.project import ProjectCreate, ProjectListResponse, ProjectRead, ProjectUpdate
-from app.schemas.workflow import WorkflowNodeRead, WorkflowNodeStatusUpdate
+from app.schemas.workflow import WorkflowEdgeRead, WorkflowNodeRead, WorkflowNodeStatusUpdate
 from app.services.audit import record_audit_log
 from app.services.workflow_templates import WorkflowTemplateError, generate_workflow_graph, load_workflow_template
 
@@ -201,18 +212,40 @@ def list_project_workflow_nodes(project_id: uuid.UUID, db: Session = Depends(get
     )
 
 
+# Get project workflow edges ---------------------------------------------------
+
+
+@router.get("/{project_id}/workflow-edges", response_model=list[WorkflowEdgeRead])
+def list_project_workflow_edges(project_id: uuid.UUID, db: Session = Depends(get_db)) -> list[WorkflowEdge]:
+    """Needed alongside workflow-nodes to render the graph — an edge list
+    with no nodes (or vice versa) can't be drawn."""
+    _get_project_or_404(db, project_id)
+    return db.query(WorkflowEdge).filter(WorkflowEdge.project_id == project_id).all()
+
+
 # List artifacts by project ---------------------------------------------------
 
 
 @router.get("/{project_id}/artifacts", response_model=list[ArtifactRead])
-def list_project_artifacts(project_id: uuid.UUID, db: Session = Depends(get_db)) -> list[Artifact]:
+def list_project_artifacts(project_id: uuid.UUID, db: Session = Depends(get_db)) -> list[ArtifactRead]:
     _get_project_or_404(db, project_id)
-    return (
+    artifacts = (
         db.query(Artifact)
         .filter(Artifact.project_id == project_id)
         .order_by(Artifact.created_at.desc())
         .all()
     )
+    return [ArtifactRead.from_orm_artifact(a) for a in artifacts]
+
+
+# 3. List agent runs by project -----------------------------------------------------
+
+
+@router.get("/{project_id}/agent-runs", response_model=list[AgentRunRead])
+def list_project_agent_runs(project_id: uuid.UUID, db: Session = Depends(get_db)) -> list[AgentRunRead]:
+    _get_project_or_404(db, project_id)
+    runs = db.query(AgentRun).filter(AgentRun.project_id == project_id).order_by(AgentRun.created_at.desc()).all()
+    return [AgentRunRead.from_orm_run(r) for r in runs]
 
 
 # 7. Update workflow node status ---------------------------------------------------

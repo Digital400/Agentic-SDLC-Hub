@@ -4,21 +4,36 @@ import { notFound } from "next/navigation";
 
 import { PageHeader } from "@/components/layout/page-header";
 import { WorkspaceTabs } from "@/components/projects/workspace-tabs";
-import { ProjectStatusBadge, WorkflowStatusBadge } from "@/components/status-badge";
+import { ArtifactStatusBadge, ProjectStatusBadge } from "@/components/status-badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatDate } from "@/lib/format";
-import { getProjectById, mockDocuments, mockReviews, mockWorkflowNodesByProject } from "@/lib/mock-data";
+import { api, ApiError } from "@/lib/api";
+import { toDocumentArtifact, toProject, toReviewItem, toWorkflowNode } from "@/lib/mappers";
 
-export default function ProjectWorkspacePage({ params }: { params: { projectId: string } }) {
-  const project = getProjectById(params.projectId);
-  if (!project) notFound();
+export default async function ProjectWorkspacePage({ params }: { params: { projectId: string } }) {
+  let project;
+  try {
+    project = toProject(await api.projects.get(params.projectId));
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) notFound();
+    throw err;
+  }
 
-  const nodes = mockWorkflowNodesByProject[project.id] ?? [];
+  const [apiNodes, apiArtifacts, apiReviews] = await Promise.all([
+    api.projects.workflowNodes(project.id),
+    api.projects.artifacts(project.id),
+    api.reviews.listAll(),
+  ]);
+
+  const nodes = apiNodes.map(toWorkflowNode);
   const completedCount = nodes.filter((n) => n.status === "COMPLETED").length;
   const progressPct = nodes.length > 0 ? Math.round((completedCount / nodes.length) * 100) : 0;
 
-  const documents = mockDocuments.filter((d) => d.projectId === project.id).slice(0, 4);
-  const reviews = mockReviews.filter((r) => r.projectId === project.id).slice(0, 4);
+  const documents = apiArtifacts.map(toDocumentArtifact).slice(0, 4);
+  const reviews = apiReviews
+    .filter((r) => r.project_id === project.id)
+    .map(toReviewItem)
+    .slice(0, 4);
 
   return (
     <div>
@@ -69,10 +84,14 @@ export default function ProjectWorkspacePage({ params }: { params: { projectId: 
               <p className="text-xs text-muted-foreground">No documents yet.</p>
             ) : (
               documents.map((doc) => (
-                <div key={doc.id} className="flex items-center justify-between gap-2 text-sm">
+                <Link
+                  key={doc.id}
+                  href={`/documents/${doc.id}`}
+                  className="flex items-center justify-between gap-2 text-sm hover:underline"
+                >
                   <span className="truncate">{doc.title}</span>
-                  <WorkflowStatusBadge status={doc.status} className="shrink-0" />
-                </div>
+                  <ArtifactStatusBadge status={doc.status} className="shrink-0" />
+                </Link>
               ))
             )}
           </CardContent>

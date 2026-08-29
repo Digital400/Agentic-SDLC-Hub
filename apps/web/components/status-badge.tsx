@@ -1,6 +1,6 @@
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import type { WorkflowStatus } from "@agentic-sdlc-hub/shared";
-import type { AgentRunStatus, ProjectStatus, ReviewStatus } from "@/lib/types";
+import type { AgentRunStatus, ArtifactStatus, ProjectStatus, ReviewStatus } from "@/lib/types";
 
 // Central place mapping every status enum used across the app to a label +
 // Badge color, so a status reads the same way everywhere it appears
@@ -87,6 +87,31 @@ export function ReviewStatusBadge({ status, className }: { status: ReviewStatus;
   return (
     <Badge variant={REVIEW_STATUS_VARIANT[status]} className={className}>
       {REVIEW_STATUS_LABEL[status]}
+    </Badge>
+  );
+}
+
+// Matches apps/api/app/models/enums.py's ArtifactStatus.
+const ARTIFACT_STATUS_VARIANT: Record<ArtifactStatus, BadgeProps["variant"]> = {
+  DRAFT: "gray",
+  READY_FOR_REVIEW: "warning",
+  APPROVED: "success",
+  NEEDS_CHANGES: "warning",
+  REJECTED: "destructive",
+};
+
+const ARTIFACT_STATUS_LABEL: Record<ArtifactStatus, string> = {
+  DRAFT: "Draft",
+  READY_FOR_REVIEW: "Ready for review",
+  APPROVED: "Approved",
+  NEEDS_CHANGES: "Needs changes",
+  REJECTED: "Rejected",
+};
+
+export function ArtifactStatusBadge({ status, className }: { status: ArtifactStatus; className?: string }) {
+  return (
+    <Badge variant={ARTIFACT_STATUS_VARIANT[status]} className={className}>
+      {ARTIFACT_STATUS_LABEL[status]}
     </Badge>
   );
 }

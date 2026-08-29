@@ -46,7 +46,7 @@ def _get_user_or_400(db: Session, user_id: uuid.UUID, field_name: str) -> User:
 
 
 @router.post("", response_model=ArtifactRead, status_code=status.HTTP_201_CREATED)
-def create_artifact(payload: ArtifactCreate, db: Session = Depends(get_db)) -> Artifact:
+def create_artifact(payload: ArtifactCreate, db: Session = Depends(get_db)) -> ArtifactRead:
     """Create an artifact container — no content yet.
 
     Content is added afterwards via `POST /artifacts/{id}/versions`; this
@@ -93,15 +93,15 @@ def create_artifact(payload: ArtifactCreate, db: Session = Depends(get_db)) -> A
 
     db.commit()
     db.refresh(artifact)
-    return artifact
+    return ArtifactRead.from_orm_artifact(artifact)
 
 
 # 2. Get artifact by id ---------------------------------------------------------
 
 
 @router.get("/{artifact_id}", response_model=ArtifactRead)
-def get_artifact(artifact_id: uuid.UUID, db: Session = Depends(get_db)) -> Artifact:
-    return _get_artifact_or_404(db, artifact_id)
+def get_artifact(artifact_id: uuid.UUID, db: Session = Depends(get_db)) -> ArtifactRead:
+    return ArtifactRead.from_orm_artifact(_get_artifact_or_404(db, artifact_id))
 
 
 # 4. Create artifact version -----------------------------------------------------
@@ -110,7 +110,7 @@ def get_artifact(artifact_id: uuid.UUID, db: Session = Depends(get_db)) -> Artif
 @router.post("/{artifact_id}/versions", response_model=ArtifactVersionRead, status_code=status.HTTP_201_CREATED)
 def create_artifact_version(
     artifact_id: uuid.UUID, payload: ArtifactVersionCreate, db: Session = Depends(get_db)
-) -> ArtifactVersion:
+) -> ArtifactVersionRead:
     """Create a brand-new immutable version and make it current.
 
     Any existing review verdict (NEEDS_CHANGES/REJECTED) no longer applies
@@ -161,21 +161,22 @@ def create_artifact_version(
 
     db.commit()
     db.refresh(version)
-    return version
+    return ArtifactVersionRead.from_orm_version(version)
 
 
 # 5. Get artifact version history --------------------------------------------------
 
 
 @router.get("/{artifact_id}/versions", response_model=list[ArtifactVersionRead])
-def list_artifact_versions(artifact_id: uuid.UUID, db: Session = Depends(get_db)) -> list[ArtifactVersion]:
+def list_artifact_versions(artifact_id: uuid.UUID, db: Session = Depends(get_db)) -> list[ArtifactVersionRead]:
     _get_artifact_or_404(db, artifact_id)
-    return (
+    versions = (
         db.query(ArtifactVersion)
         .filter(ArtifactVersion.artifact_id == artifact_id)
         .order_by(ArtifactVersion.version_number)
         .all()
     )
+    return [ArtifactVersionRead.from_orm_version(v) for v in versions]
 
 
 # 6. Update artifact content ------------------------------------------------------
@@ -184,7 +185,7 @@ def list_artifact_versions(artifact_id: uuid.UUID, db: Session = Depends(get_db)
 @router.patch("/{artifact_id}", response_model=ArtifactVersionRead)
 def update_artifact_content(
     artifact_id: uuid.UUID, payload: ArtifactContentUpdate, db: Session = Depends(get_db)
-) -> ArtifactVersion:
+) -> ArtifactVersionRead:
     """Edit the CURRENT version's content in place — no new version number.
 
     Only allowed while the artifact is still DRAFT: once it's submitted
@@ -221,14 +222,14 @@ def update_artifact_content(
 
     db.commit()
     db.refresh(version)
-    return version
+    return ArtifactVersionRead.from_orm_version(version)
 
 
 # 7. Mark artifact as ready for review ----------------------------------------------
 
 
 @router.post("/{artifact_id}/submit-for-review", response_model=ArtifactRead)
-def submit_artifact_for_review(artifact_id: uuid.UUID, db: Session = Depends(get_db)) -> Artifact:
+def submit_artifact_for_review(artifact_id: uuid.UUID, db: Session = Depends(get_db)) -> ArtifactRead:
     artifact = _get_artifact_or_404(db, artifact_id)
 
     if artifact.current_version_id is None:
@@ -254,4 +255,4 @@ def submit_artifact_for_review(artifact_id: uuid.UUID, db: Session = Depends(get
 
     db.commit()
     db.refresh(artifact)
-    return artifact
+    return ArtifactRead.from_orm_artifact(artifact)

@@ -6,18 +6,51 @@ import { PendingReviewsTable } from "@/components/dashboard/pending-reviews-tabl
 import { RecentActivityList, type RecentActivityItem } from "@/components/dashboard/recent-activity-list";
 import { StageProgressSummary } from "@/components/dashboard/stage-progress-summary";
 import { StatCard } from "@/components/dashboard/stat-card";
-import { AgentRunStatusBadge, WorkflowStatusBadge } from "@/components/status-badge";
+import { AgentRunStatusBadge, ArtifactStatusBadge } from "@/components/status-badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatRelativeTime } from "@/lib/format";
-import { getBlockedProjectCount, mockAgentRuns, mockDocuments, mockProjects, mockReviews } from "@/lib/mock-data";
+import { api } from "@/lib/api";
+import { toAgentRunSummary, toDocumentArtifact, toProject, toReviewItem, toWorkflowNode } from "@/lib/mappers";
 
-export default function DashboardPage() {
-  const totalProjects = mockProjects.length;
-  const projectsInProgress = mockProjects.filter((p) => p.status === "ACTIVE").length;
-  const pendingReviewsCount = mockReviews.filter((r) => r.status === "PENDING").length;
-  const blockedWorkflowsCount = getBlockedProjectCount();
+function formatAgentName(agentKey: string): string {
+  return agentKey
+    .split("-")
+    .map((word) => (word === "agent" ? "Agent" : word.charAt(0).toUpperCase() + word.slice(1)))
+    .join(" ");
+}
 
-  const recentAgentRuns: RecentActivityItem[] = [...mockAgentRuns]
+export default async function DashboardPage() {
+  // No global "list all X across projects" endpoints exist yet for
+  // agent-runs/workflow-nodes, so this aggregates per-project — fine at
+  // today's scale (a handful of projects); revisit with a dedicated
+  // dashboard endpoint if that stops being true.
+  const { items: apiProjects } = await api.projects.list();
+  const projects = apiProjects.map(toProject);
+
+  const [perProjectNodes, perProjectArtifacts, perProjectRuns, apiReviews] = await Promise.all([
+    Promise.all(projects.map((p) => api.projects.workflowNodes(p.id).then((nodes) => nodes.map(toWorkflowNode)))),
+    Promise.all(projects.map((p) => api.projects.artifacts(p.id).then((a) => a.map(toDocumentArtifact)))),
+    Promise.all(projects.map((p) => api.projects.agentRuns(p.id))),
+    api.reviews.listAll(),
+  ]);
+
+  const reviews = apiReviews.map(toReviewItem);
+  const documents = perProjectArtifacts.flat();
+  const blockedWorkflowsCount = perProjectNodes.filter((nodes) => nodes.some((n) => n.status === "BLOCKED")).length;
+
+  const totalProjects = projects.length;
+  const projectsInProgress = projects.filter((p) => p.status === "ACTIVE").length;
+  const pendingReviewsCount = reviews.filter((r) => r.status === "PENDING").length;
+
+  const agentRuns = projects.flatMap((project, i) => {
+    const nodesByAgentKey = new Map(perProjectNodes[i].map((n) => [n.agentKey, n]));
+    return perProjectRuns[i].map((run) => {
+      const node = nodesByAgentKey.get(run.agent_key);
+      return toAgentRunSummary(run, project.name, formatAgentName(run.agent_key), node?.name ?? "Unknown stage");
+    });
+  });
+
+  const recentAgentRuns: RecentActivityItem[] = [...agentRuns]
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
     .slice(0, 5)
     .map((run) => ({
@@ -29,7 +62,7 @@ export default function DashboardPage() {
       badge: <AgentRunStatusBadge status={run.status} />,
     }));
 
-  const recentArtifacts: RecentActivityItem[] = [...mockDocuments]
+  const recentArtifacts: RecentActivityItem[] = [...documents]
     .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
     .slice(0, 5)
     .map((doc) => ({
@@ -37,8 +70,8 @@ export default function DashboardPage() {
       title: doc.title,
       subtitle: doc.projectName,
       timestamp: formatRelativeTime(doc.updatedAt),
-      href: `/documents?project=${doc.projectId}`,
-      badge: <WorkflowStatusBadge status={doc.status} />,
+      href: `/documents/${doc.id}`,
+      badge: <ArtifactStatusBadge status={doc.status} />,
     }));
 
   return (
@@ -59,7 +92,7 @@ export default function DashboardPage() {
             <CardDescription>Artifacts waiting on a human approval right now.</CardDescription>
           </CardHeader>
           <CardContent className="p-0">
-            <PendingReviewsTable reviews={mockReviews} />
+            <PendingReviewsTable reviews={reviews} />
           </CardContent>
         </Card>
 
@@ -70,7 +103,7 @@ export default function DashboardPage() {
               <CardDescription>Where active projects currently sit.</CardDescription>
             </CardHeader>
             <CardContent className="p-0">
-              <StageProgressSummary projects={mockProjects} />
+              <StageProgressSummary projects={projects} />
             </CardContent>
           </Card>
 

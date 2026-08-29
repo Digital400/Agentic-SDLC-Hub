@@ -8,18 +8,18 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { api, ApiError } from "@/lib/api";
 
 interface FormErrors {
   name?: string;
   businessOwner?: string;
+  submit?: string;
 }
 
-// Mock-only for now: validates client-side and simulates creation. Swap
-// the submit handler for a real `POST /projects` call (see
-// apps/api/app/api/routes/projects.py) once the frontend is wired to the
-// live API — the required fields here already match that endpoint's
-// validation (name, business_owner).
-export function CreateProjectForm() {
+// Calls the real `POST /projects` (see apps/api/app/api/routes/projects.py)
+// — the workflow graph is generated server-side, with the first node
+// ("Requirement Intake") set IN_PROGRESS and every other node NOT_STARTED.
+export function CreateProjectForm({ createdById }: { createdById: string | null }) {
   const router = useRouter();
   const [name, setName] = useState("");
   const [businessOwner, setBusinessOwner] = useState("");
@@ -27,22 +27,30 @@ export function CreateProjectForm() {
   const [errors, setErrors] = useState<FormErrors>({});
   const [submitting, setSubmitting] = useState(false);
 
-  function handleSubmit(e: FormEvent) {
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault();
 
     const nextErrors: FormErrors = {};
     if (name.trim() === "") nextErrors.name = "Project name is required.";
     if (businessOwner.trim() === "") nextErrors.businessOwner = "Business owner is required.";
+    if (createdById === null) nextErrors.submit = "No users exist yet to attribute this project to.";
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0) return;
 
     setSubmitting(true);
-    // Simulated create — the real workflow graph is generated server-side
-    // on POST /projects, with the first node ("Requirement Intake") set
-    // IN_PROGRESS and every other node NOT_STARTED.
-    window.setTimeout(() => {
-      router.push("/projects");
-    }, 400);
+    try {
+      const project = await api.projects.create({
+        name: name.trim(),
+        business_owner: businessOwner.trim(),
+        description: description.trim() || undefined,
+        created_by_id: createdById as string,
+      });
+      router.push(`/projects/${project.id}`);
+      router.refresh();
+    } catch (err) {
+      setErrors({ submit: err instanceof ApiError ? err.message : "Failed to create project." });
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -104,6 +112,8 @@ export function CreateProjectForm() {
               Only one workflow template exists for now — every project starts at Requirement Intake.
             </p>
           </div>
+
+          {errors.submit ? <p className="text-sm text-destructive">{errors.submit}</p> : null}
 
           <div className="mt-2 flex justify-end gap-2">
             <Button type="button" variant="outline" onClick={() => router.push("/projects")}>

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { X } from "lucide-react";
 
-import { WorkflowStatusBadge } from "@/components/status-badge";
+import { ArtifactStatusBadge } from "@/components/status-badge";
 import { buttonVariants } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
@@ -64,7 +64,11 @@ export function DocumentsTable({ documents }: { documents: DocumentArtifact[] })
           <TableBody>
             {filtered.map((doc) => (
               <TableRow key={doc.id}>
-                <TableCell className="font-medium">{doc.title}</TableCell>
+                <TableCell className="font-medium">
+                  <Link href={`/documents/${doc.id}`} className="hover:underline">
+                    {doc.title}
+                  </Link>
+                </TableCell>
                 <TableCell className="text-muted-foreground">
                   <Link href={`/projects/${doc.projectId}`} className="hover:underline">
                     {doc.projectName}
@@ -72,7 +76,7 @@ export function DocumentsTable({ documents }: { documents: DocumentArtifact[] })
                 </TableCell>
                 <TableCell className="text-muted-foreground">{doc.artifactType.replaceAll("_", " ")}</TableCell>
                 <TableCell>
-                  <WorkflowStatusBadge status={doc.status} />
+                  <ArtifactStatusBadge status={doc.status} />
                 </TableCell>
                 <TableCell className="text-muted-foreground">v{doc.versionNumber}</TableCell>
                 <TableCell className="text-muted-foreground">{formatDate(doc.updatedAt)}</TableCell>

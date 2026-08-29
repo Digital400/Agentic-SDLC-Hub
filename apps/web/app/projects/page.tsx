@@ -4,9 +4,13 @@ import { Plus } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { ProjectsTable } from "@/components/projects/projects-table";
 import { buttonVariants } from "@/components/ui/button";
-import { mockProjects } from "@/lib/mock-data";
+import { api } from "@/lib/api";
+import { toProject } from "@/lib/mappers";
 
-export default function ProjectsPage() {
+export default async function ProjectsPage() {
+  const { items } = await api.projects.list();
+  const projects = items.map(toProject);
+
   return (
     <div>
       <PageHeader
@@ -19,7 +23,7 @@ export default function ProjectsPage() {
           </Link>
         }
       />
-      <ProjectsTable projects={mockProjects} />
+      <ProjectsTable projects={projects} />
     </div>
   );
 }

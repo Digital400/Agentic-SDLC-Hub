@@ -26,3 +26,13 @@ class WorkflowNodeRead(BaseModel):
 
 class WorkflowNodeStatusUpdate(BaseModel):
     status: WorkflowStatus
+
+
+class WorkflowEdgeRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    source_node_id: uuid.UUID
+    target_node_id: uuid.UUID
+    label: str | None

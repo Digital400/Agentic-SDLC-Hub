@@ -56,20 +56,84 @@ export interface DocumentArtifact {
   projectName: string;
   title: string;
   artifactType: string;
-  status: WorkflowStatus;
+  status: ArtifactStatus;
   versionNumber: number;
   updatedAt: string;
+}
+
+export interface ArtifactSection {
+  id: string;
+  title: string;
+  contentMarkdown: string;
+}
+
+export interface ArtifactVersionSummary {
+  id: string;
+  versionNumber: number;
+  changeSummary: string | null;
+  createdByName: string;
+  createdAt: string;
+}
+
+export interface ArtifactCommentItem {
+  id: string;
+  authorName: string;
+  body: string;
+  createdAt: string;
+  /** If set, the section this comment is anchored to. */
+  sectionId?: string;
+}
+
+/** The full editable document, as loaded by the artifact editor — a
+ * superset of DocumentArtifact's list-row shape. */
+export interface ArtifactDocument {
+  id: string;
+  projectId: string;
+  projectName: string;
+  workflowStageName: string;
+  artifactType: string;
+  title: string;
+  status: ArtifactStatus;
+  currentVersionNumber: number;
+  sections: ArtifactSection[];
+  versions: ArtifactVersionSummary[];
+  comments: ArtifactCommentItem[];
 }
 
 export interface ReviewItem {
   id: string;
   projectId: string;
   projectName: string;
+  artifactId: string;
   artifactTitle: string;
   workflowStageName: string;
+  reviewerId: string;
   reviewerName: string;
   status: ReviewStatus;
   submittedAt: string;
+}
+
+export interface ReviewChecklistItem {
+  id: string;
+  label: string;
+}
+
+/** One past, already-decided round for an artifact under review — not the
+ * current pending round, which is ReviewItem/ReviewDetail itself. */
+export interface ReviewDecisionHistoryEntry {
+  id: string;
+  versionNumber: number;
+  status: Exclude<ReviewStatus, "PENDING">;
+  reviewerName: string;
+  comment: string | null;
+  decidedAt: string;
+}
+
+/** Full detail for the Review Detail screen — the current round (from
+ * ReviewItem) plus the artifact being reviewed and any prior rounds. */
+export interface ReviewDetail extends ReviewItem {
+  artifact: ArtifactDocument;
+  history: ReviewDecisionHistoryEntry[];
 }
 
 export interface AgentDefinitionSummary {
@@ -80,6 +144,25 @@ export interface AgentDefinitionSummary {
   modelName: string;
   isActive: boolean;
   totalRuns: number;
+}
+
+export type AgentPromptRole = "draft" | "improve" | "validate";
+
+/** Matches apps/api/app/models/agent.py's AgentPrompt — one version in a
+ * (agentKey, role) lineage; exactly one version per lineage is active. */
+export interface AgentPromptVersion {
+  id: string;
+  agentKey: string;
+  role: AgentPromptRole;
+  name: string;
+  stage: string;
+  systemPrompt: string;
+  outputFormat: string;
+  validationChecklist: string[];
+  version: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AgentRunSummary {

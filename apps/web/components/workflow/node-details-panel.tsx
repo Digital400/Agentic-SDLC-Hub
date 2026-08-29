@@ -6,21 +6,24 @@ import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { formatRelativeTime, formatSnakeCase } from "@/lib/format";
-import { mockDocuments, mockReviews } from "@/lib/mock-data";
-import type { ProjectWorkflowNode } from "@/lib/types";
+import type { DocumentArtifact, ProjectWorkflowNode, ReviewItem } from "@/lib/types";
 
 export function NodeDetailsPanel({
   projectId,
   node,
+  documents,
+  reviews,
   onClose,
 }: {
   projectId: string;
   node: ProjectWorkflowNode;
+  documents: DocumentArtifact[];
+  reviews: ReviewItem[];
   onClose: () => void;
 }) {
-  const artifact = mockDocuments.find((d) => d.projectId === projectId && d.artifactType === node.outputArtifactType);
+  const artifact = documents.find((d) => d.projectId === projectId && d.artifactType === node.outputArtifactType);
 
-  const review = mockReviews
+  const review = reviews
     .filter((r) => r.projectId === projectId && r.workflowStageName === node.name)
     .sort((a, b) => (a.submittedAt < b.submittedAt ? 1 : -1))[0];
 

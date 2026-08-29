@@ -29,6 +29,30 @@ class ArtifactRead(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # Denormalized for list/detail views — avoids the frontend needing a
+    # separate project/node/version fetch just to render a document row.
+    project_name: str
+    workflow_stage_name: str
+    current_version_number: int | None
+
+    @classmethod
+    def from_orm_artifact(cls, artifact) -> "ArtifactRead":
+        return cls(
+            id=artifact.id,
+            project_id=artifact.project_id,
+            workflow_node_id=artifact.workflow_node_id,
+            artifact_type=artifact.artifact_type,
+            title=artifact.title,
+            current_version_id=artifact.current_version_id,
+            status=artifact.status,
+            created_by_id=artifact.created_by_id,
+            created_at=artifact.created_at,
+            updated_at=artifact.updated_at,
+            project_name=artifact.project.name,
+            workflow_stage_name=artifact.workflow_node.name,
+            current_version_number=artifact.current_version.version_number if artifact.current_version else None,
+        )
+
 
 class ArtifactVersionCreate(BaseModel):
     content_markdown: str = Field(..., min_length=1)
@@ -48,6 +72,23 @@ class ArtifactVersionRead(BaseModel):
     change_summary: str | None
     created_by_id: uuid.UUID
     created_at: datetime
+
+    # Denormalized for version-history display.
+    created_by_name: str
+
+    @classmethod
+    def from_orm_version(cls, version) -> "ArtifactVersionRead":
+        return cls(
+            id=version.id,
+            artifact_id=version.artifact_id,
+            version_number=version.version_number,
+            content_markdown=version.content_markdown,
+            content_json=version.content_json,
+            change_summary=version.change_summary,
+            created_by_id=version.created_by_id,
+            created_at=version.created_at,
+            created_by_name=version.created_by.full_name,
+        )
 
 
 class ArtifactContentUpdate(BaseModel):

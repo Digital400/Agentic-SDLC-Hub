@@ -71,25 +71,93 @@ def _get_or_create_user(db: Session, *, email: str, full_name: str) -> User:
     return user
 
 
-def seed(db: Session) -> None:
-    existing = db.query(Project).filter(Project.name == SAMPLE_PROJECT_NAME).first()
-    if existing is not None:
-        print(f"Sample project '{SAMPLE_PROJECT_NAME}' already exists (id={existing.id}); skipping seed.")
-        return
+# Hand-authored default prompts for the five agents named in the Prompt
+# Library spec — real prompt-engineering content, not placeholders. Every
+# other agent still gets a generic, template-derived prompt (see
+# _ensure_agent_definitions_and_prompts) so all 11 stages have one.
+RICH_DEFAULT_PROMPTS: dict[str, dict] = {
+    "requirement_intake": {
+        "system_prompt": (
+            "You are the Requirement Intake agent for Agentic SDLC Hub. Given a stakeholder's raw request, "
+            "produce a concise Requirement Intake Summary that captures the stakeholder, the request, any known "
+            "constraints, and a measurable success metric if one is available. Do not invent constraints or "
+            "metrics that weren't stated — flag them as open questions instead."
+        ),
+        "output_format": "Markdown with headings: Stakeholder & Request, Constraints, Success Metric (or Open Questions if not yet known).",
+        "validation_checklist": [
+            "States who the stakeholder is",
+            "Captures the request in one clear sentence",
+            "Lists constraints or explicitly says none are known",
+            "Includes a success metric or flags it as an open question",
+        ],
+    },
+    "problem_discovery": {
+        "system_prompt": (
+            "You are the Problem Discovery agent. Given an approved Requirement Intake Summary, investigate and "
+            "state the underlying problem clearly enough to design a solution against it: its impact, who it "
+            "affects, and any constraints. Do not propose solutions — that's the next stage's job."
+        ),
+        "output_format": "Markdown with headings: Problem Statement, Impact, Affected Users, Constraints.",
+        "validation_checklist": [
+            "Problem is stated as a problem, not a solution",
+            "Impact is quantified or clearly qualified",
+            "Affected users/systems are named",
+            "Traces back to the intake summary's request",
+        ],
+    },
+    "solution_discovery": {
+        "system_prompt": (
+            "You are the Solution Discovery agent. Given an approved Problem Statement, propose 2-3 candidate "
+            "solution approaches, weigh their trade-offs, and recommend one. Be explicit about why the "
+            "recommended option was chosen over the alternatives."
+        ),
+        "output_format": "Markdown with headings: Candidate Options, Trade-offs, Recommendation.",
+        "validation_checklist": [
+            "At least two real alternatives are considered",
+            "Trade-offs reference cost, risk, or timeline",
+            "A single option is clearly recommended with rationale",
+            "Recommendation directly addresses the problem statement",
+        ],
+    },
+    "hld": {
+        "system_prompt": (
+            "You are the High-Level Design agent. Given the recommended solution option, define the "
+            "system-level architecture: major components, how they interact, the data model at a high level, "
+            "and key security considerations. Flag open questions rather than guessing at unresolved decisions."
+        ),
+        "output_format": "Markdown with headings: Overview, Architecture, Data Model, Security Considerations, Open Questions.",
+        "validation_checklist": [
+            "Every major component has a stated responsibility",
+            "Component interactions are described, not just listed",
+            "Security considerations are addressed explicitly",
+            "Unresolved decisions are listed as open questions, not silently assumed",
+        ],
+    },
+    "story_crafting": {
+        "system_prompt": (
+            "You are the Story Crafting agent. Given an approved High-Level Design, break it into implementable "
+            "stories with clear acceptance criteria, sized so each can reasonably be completed within one "
+            "implementation pass. Do not include design details already settled in the HLD — reference them "
+            "instead."
+        ),
+        "output_format": "Markdown list of stories, each with a title, description, and acceptance criteria as a checklist.",
+        "validation_checklist": [
+            "Every story has explicit acceptance criteria",
+            "Stories are independently completable",
+            "No story silently re-decides something already settled in the HLD",
+            "Together, the stories cover the full HLD scope",
+        ],
+    },
+}
 
-    now = _now()
 
-    # --- Users -----------------------------------------------------------
-    owner = _get_or_create_user(db, email="sampathisuru516@gmail.com", full_name="Suru Sampathi")
-    contributor = _get_or_create_user(db, email="priya.dev@agentic-sdlc-hub.local", full_name="Priya Dev")
-    approver = _get_or_create_user(db, email="alex.reviewer@agentic-sdlc-hub.local", full_name="Alex Reviewer")
+def _ensure_agent_definitions_and_prompts(db: Session, template: dict) -> dict[str, AgentDefinition]:
+    """Ensure all 11 AgentDefinitions + an active v1 DRAFT AgentPrompt exist.
 
-    # --- Agent definitions + one draft prompt per default-workflow stage --
-    # Same reasoning as users: AgentDefinition/AgentPrompt aren't
-    # project-owned, so a re-run must reuse existing ones (agent_key and
-    # (agent_definition, role, version) are both unique) rather than
-    # re-insert them.
-    template = load_workflow_template()
+    Not project-owned data, so this runs unconditionally (unlike the rest
+    of seed(), which is skipped once the sample project exists) and is
+    idempotent by agent_key / (agent_definition, role, version).
+    """
     agent_definitions: dict[str, AgentDefinition] = {}
     for node_data in template["nodes"]:
         agent_key = node_data["agentKey"]
@@ -107,22 +175,54 @@ def seed(db: Session) -> None:
         agent_definitions[agent_key] = agent
 
     for node_data in template["nodes"]:
+        stage_key = node_data["id"]
         agent = agent_definitions[node_data["agentKey"]]
         has_draft_prompt = any(p.role == AgentPromptRole.DRAFT and p.version == 1 for p in agent.prompts)
-        if not has_draft_prompt:
-            db.add(
-                AgentPrompt(
-                    agent_definition=agent,
-                    role=AgentPromptRole.DRAFT,
-                    version=1,
-                    template=(
-                        f"You are the {node_data['name']} agent. Given the following inputs: "
-                        f"{', '.join(node_data['requiredInputs']) or 'none'}, draft a "
-                        f"{node_data['outputArtifactType']}. {node_data['description']}"
-                    ),
-                )
+        if has_draft_prompt:
+            continue
+
+        rich = RICH_DEFAULT_PROMPTS.get(stage_key)
+        db.add(
+            AgentPrompt(
+                agent_definition=agent,
+                role=AgentPromptRole.DRAFT,
+                version=1,
+                name=f"{node_data['name']} — Draft Prompt",
+                stage=stage_key,
+                system_prompt=rich["system_prompt"] if rich else (
+                    f"You are the {node_data['name']} agent. Given the following inputs: "
+                    f"{', '.join(node_data['requiredInputs']) or 'none'}, draft a "
+                    f"{node_data['outputArtifactType']}. {node_data['description']}"
+                ),
+                output_format=rich["output_format"] if rich else "Markdown document.",
+                validation_checklist=rich["validation_checklist"] if rich else [
+                    "Addresses all of the stage's required inputs",
+                    "Uses valid Markdown formatting",
+                ],
+                is_active=True,  # the only version so far — active by definition
             )
+        )
     db.flush()
+    return agent_definitions
+
+
+def seed(db: Session) -> None:
+    template = load_workflow_template()
+    agent_definitions = _ensure_agent_definitions_and_prompts(db, template)
+
+    existing = db.query(Project).filter(Project.name == SAMPLE_PROJECT_NAME).first()
+    if existing is not None:
+        db.commit()
+        print(f"Sample project '{SAMPLE_PROJECT_NAME}' already exists (id={existing.id}); skipping project seed.")
+        print(f"Agent definitions ensured: {len(agent_definitions)}.")
+        return
+
+    now = _now()
+
+    # --- Users -----------------------------------------------------------
+    owner = _get_or_create_user(db, email="sampathisuru516@gmail.com", full_name="Suru Sampathi")
+    contributor = _get_or_create_user(db, email="priya.dev@agentic-sdlc-hub.local", full_name="Priya Dev")
+    approver = _get_or_create_user(db, email="alex.reviewer@agentic-sdlc-hub.local", full_name="Alex Reviewer")
 
     # --- Project + membership + generated workflow graph ------------------
     project = Project(
