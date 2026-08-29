@@ -53,4 +53,29 @@ circular foreign keys (like `Artifact.current_version_id` <->
 `ArtifactVersion.artifact_id`) need the deferred-FK pattern already used in
 the initial migration (`op.batch_alter_table(...).create_foreign_key(...)`
 after both tables exist), which autogenerate does not produce correctly on
-its own.
+its own. Likewise, a new NOT NULL column on a table that already has rows
+needs the add-nullable → backfill → tighten sequence used in the
+`business_owner`/`current_stage` migration, not a plain `nullable=False`
+add.
+
+## API: project management
+
+Routes live in [app/api/routes/projects.py](app/api/routes/projects.py),
+mounted at `/projects`. Full request/response shapes are in the OpenAPI
+docs at `http://localhost:8000/docs` once the server is running; summary:
+
+| Method & path | Purpose |
+|---|---|
+| `POST /projects` | Create a project. Generates its `WorkflowNode`/`WorkflowEdge` rows from the default workflow template — the start node (`requirement_intake`) is set `IN_PROGRESS`, every other node `NOT_STARTED`. Requires `name`, `business_owner`, `created_by_id` (an existing user). |
+| `GET /projects` | List projects. Supports `?status=`, `?skip=`, `?limit=`. |
+| `GET /projects/{id}` | Get one project. |
+| `PATCH /projects/{id}` | Update `name`/`business_owner`/`description`/`current_stage`. `current_stage` must match one of the project's own `WorkflowNode.node_key` values — a made-up stage name is rejected with 400. Rejected with 409 if the project is archived. |
+| `POST /projects/{id}/archive` | Archive a project. 409 if already archived. |
+| `GET /projects/{id}/workflow-nodes` | List the project's workflow nodes, in order. |
+| `PATCH /projects/{id}/workflow-nodes/{node_id}` | Update one node's status. 404 if the node doesn't belong to that project. |
+
+Every create/update/archive/status-change writes an `AuditLog` row (see
+[app/services/audit.py](app/services/audit.py)). A raw DB constraint
+violation (e.g. a duplicate) is caught globally in
+[app/main.py](app/main.py) and returned as a clean `409` instead of a
+`500`.

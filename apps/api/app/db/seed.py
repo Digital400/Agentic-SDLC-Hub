@@ -56,6 +56,20 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _get_or_create_user(db: Session, *, email: str, full_name: str) -> User:
+    """Users aren't owned by a project (a project's members reference them,
+    but deleting a project doesn't delete its members' User rows), so
+    re-running this script after a project was deleted and recreated must
+    reuse existing users by email rather than re-insert them.
+    """
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        user = User(email=email, full_name=full_name)
+        db.add(user)
+        db.flush()
+    return user
+
+
 def seed(db: Session) -> None:
     existing = db.query(Project).filter(Project.name == SAMPLE_PROJECT_NAME).first()
     if existing is not None:
@@ -65,41 +79,48 @@ def seed(db: Session) -> None:
     now = _now()
 
     # --- Users -----------------------------------------------------------
-    owner = User(email="sampathisuru516@gmail.com", full_name="Suru Sampathi")
-    contributor = User(email="priya.dev@agentic-sdlc-hub.local", full_name="Priya Dev")
-    approver = User(email="alex.reviewer@agentic-sdlc-hub.local", full_name="Alex Reviewer")
-    db.add_all([owner, contributor, approver])
-    db.flush()
+    owner = _get_or_create_user(db, email="sampathisuru516@gmail.com", full_name="Suru Sampathi")
+    contributor = _get_or_create_user(db, email="priya.dev@agentic-sdlc-hub.local", full_name="Priya Dev")
+    approver = _get_or_create_user(db, email="alex.reviewer@agentic-sdlc-hub.local", full_name="Alex Reviewer")
 
     # --- Agent definitions + one draft prompt per default-workflow stage --
+    # Same reasoning as users: AgentDefinition/AgentPrompt aren't
+    # project-owned, so a re-run must reuse existing ones (agent_key and
+    # (agent_definition, role, version) are both unique) rather than
+    # re-insert them.
     template = load_workflow_template()
     agent_definitions: dict[str, AgentDefinition] = {}
     for node_data in template["nodes"]:
         agent_key = node_data["agentKey"]
-        agent = AgentDefinition(
-            agent_key=agent_key,
-            name=node_data["name"] + " Agent",
-            description=f"Drafts, improves, and validates the {node_data['outputArtifactType']} "
-            f"produced by the {node_data['name']} stage.",
-            model_name="stub-no-model-configured",  # no real AI calls yet
-        )
-        db.add(agent)
+        agent = db.query(AgentDefinition).filter(AgentDefinition.agent_key == agent_key).first()
+        if agent is None:
+            agent = AgentDefinition(
+                agent_key=agent_key,
+                name=node_data["name"] + " Agent",
+                description=f"Drafts, improves, and validates the {node_data['outputArtifactType']} "
+                f"produced by the {node_data['name']} stage.",
+                model_name="stub-no-model-configured",  # no real AI calls yet
+            )
+            db.add(agent)
+            db.flush()
         agent_definitions[agent_key] = agent
-    db.flush()
 
     for node_data in template["nodes"]:
         agent = agent_definitions[node_data["agentKey"]]
-        prompt = AgentPrompt(
-            agent_definition=agent,
-            role=AgentPromptRole.DRAFT,
-            version=1,
-            template=(
-                f"You are the {node_data['name']} agent. Given the following inputs: "
-                f"{', '.join(node_data['requiredInputs']) or 'none'}, draft a "
-                f"{node_data['outputArtifactType']}. {node_data['description']}"
-            ),
-        )
-        db.add(prompt)
+        has_draft_prompt = any(p.role == AgentPromptRole.DRAFT and p.version == 1 for p in agent.prompts)
+        if not has_draft_prompt:
+            db.add(
+                AgentPrompt(
+                    agent_definition=agent,
+                    role=AgentPromptRole.DRAFT,
+                    version=1,
+                    template=(
+                        f"You are the {node_data['name']} agent. Given the following inputs: "
+                        f"{', '.join(node_data['requiredInputs']) or 'none'}, draft a "
+                        f"{node_data['outputArtifactType']}. {node_data['description']}"
+                    ),
+                )
+            )
     db.flush()
 
     # --- Project + membership + generated workflow graph ------------------
@@ -109,8 +130,10 @@ def seed(db: Session) -> None:
             "Add a points-based loyalty rewards program to the customer mobile app: "
             "customers earn points on purchases and redeem them for discounts."
         ),
+        business_owner="Marketing — Jordan Lee",
         workflow_template_id=template["id"],
         workflow_template_version=template["version"],
+        current_stage=template["startNode"],
         status=ProjectStatus.ACTIVE,
         created_by=owner,
     )
@@ -272,6 +295,7 @@ def seed(db: Session) -> None:
     artifact.status = WorkflowStatus.APPROVED
     intake_node.status = WorkflowStatus.COMPLETED
     problem_discovery_node.status = WorkflowStatus.IN_PROGRESS
+    project.current_stage = problem_discovery_node.node_key
 
     log(
         project=project,

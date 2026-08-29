@@ -17,12 +17,23 @@ class Project(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # The accountable business-side stakeholder (a name, e.g. "Marketing —
+    # Jane Doe"), not necessarily a platform User — deliberately a plain
+    # string rather than a FK for that reason.
+    business_owner: Mapped[str] = mapped_column(String(255), nullable=False)
+
     # Identifies which workflow template (and version of it) this project's
     # WorkflowNode/WorkflowEdge rows were generated from. Kept even though
     # the template file can change later, so a project's graph stays
     # reproducible/explainable.
     workflow_template_id: Mapped[str] = mapped_column(String(100), nullable=False)
     workflow_template_version: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    # node_key of the workflow node the project is currently on (e.g.
+    # "hld"). Set to the template's startNode at creation; any later update
+    # must match one of this project's actual WorkflowNode.node_key values
+    # — see app/api/routes/projects.py.
+    current_stage: Mapped[str] = mapped_column(String(100), nullable=False)
 
     status: Mapped[ProjectStatus] = mapped_column(
         Enum(ProjectStatus, native_enum=False, length=20, validate_strings=True),
