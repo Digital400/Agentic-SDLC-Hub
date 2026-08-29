@@ -1,6 +1,10 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings
+
+# apps/api/app/core/config.py -> repo root is four levels up.
+REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 class Settings(BaseSettings):
@@ -10,8 +14,15 @@ class Settings(BaseSettings):
     # Comma-separated list of allowed origins for local dev.
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 
-    # Placeholder for future use; not wired up yet.
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/agentic_sdlc_hub"
+
+    # Directory holding workflow template JSON files (e.g. sdlc-workflow.json).
+    # Defaults to the repo-root `workflows/` folder.
+    WORKFLOWS_DIR: Path = REPO_ROOT / "workflows"
+
+    # File name (within WORKFLOWS_DIR) of the default workflow template used
+    # when a new project doesn't specify one explicitly.
+    DEFAULT_WORKFLOW_FILE: str = "sdlc-workflow.json"
 
     class Config:
         env_file = ".env"
