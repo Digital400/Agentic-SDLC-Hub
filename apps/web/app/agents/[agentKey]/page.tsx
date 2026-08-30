@@ -15,11 +15,19 @@ export default async function AgentPromptPage({ params }: { params: { agentKey: 
 
   // Every version in this agent's (draft-role) lineage — see
   // apps/api/app/api/routes/prompts.py's list endpoint.
-  const apiVersions = await api.prompts.list({ agent_key: params.agentKey });
+  const [apiVersions, users] = await Promise.all([
+    api.prompts.list({ agent_key: params.agentKey }),
+    api.users.list(),
+  ]);
   if (apiVersions.length === 0) notFound();
 
   const agent = toAgentDefinitionSummary(apiAgent);
   const versions = apiVersions.map(toAgentPromptVersion);
+  // Prompt updates are Admin-only (see apps/api/app/services/permissions.py)
+  // — no login exists yet, so this defaults to the first seeded user, same
+  // convention used everywhere "created by"/"acting as" is needed without
+  // auth. That user happens to be the seeded Admin.
+  const currentUserId = users[0]?.id ?? null;
 
-  return <PromptLibraryDetail agent={agent} initialVersions={versions} />;
+  return <PromptLibraryDetail agent={agent} initialVersions={versions} currentUserId={currentUserId} />;
 }

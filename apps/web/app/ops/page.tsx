@@ -1,111 +1,111 @@
-import { Activity, AlertTriangle, Bot, ClipboardCheck } from "lucide-react";
+import {
+  AlertTriangle,
+  Ban,
+  Bot,
+  CheckCircle2,
+  Clock,
+  Coins,
+  Hash,
+  PenLine,
+  ThumbsDown,
+  ThumbsUp,
+  XCircle,
+} from "lucide-react";
 
 import { PageHeader } from "@/components/layout/page-header";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { formatStageLabel } from "@/lib/format";
-import { mockProjects, mockReviews } from "@/lib/mock-data";
+import { StatCard } from "@/components/dashboard/stat-card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { OpsCostChartPlaceholder } from "@/components/ops/ops-cost-chart-placeholder";
+import { OpsFailureList } from "@/components/ops/ops-failure-list";
+import { OpsRunTable } from "@/components/ops/ops-run-table";
+import { OpsStagePerformanceTable } from "@/components/ops/ops-stage-performance";
+import { formatCost, formatDuration, formatPercent } from "@/lib/format";
+import { api } from "@/lib/api";
+import { toOpsSummary } from "@/lib/mappers";
 
-const STAGE_KEYS = [
-  "requirement_intake",
-  "problem_discovery",
-  "solution_discovery",
-  "hld",
-  "story_crafting",
-  "lld",
-  "implementation",
-  "testing",
-  "infrastructure",
-  "release",
-  "maintenance",
-];
-
-// Mock — a real ops dashboard would compute this from how long each
-// project has actually sat at a stage (WorkflowNode.updated_at deltas).
-const MOCK_AVG_DAYS_IN_STAGE: Record<string, number> = {
-  requirement_intake: 1,
-  problem_discovery: 3,
-  solution_discovery: 4,
-  hld: 6,
-  story_crafting: 2,
-  lld: 5,
-  implementation: 8,
-  testing: 4,
-  infrastructure: 2,
-  release: 1,
-  maintenance: 0,
-};
-
-export default function OpsPage() {
-  const activeProjects = mockProjects.filter((p) => p.status === "ACTIVE");
-  const stageCounts = STAGE_KEYS.map((key) => ({
-    key,
-    count: activeProjects.filter((p) => p.currentStage === key).length,
-    avgDays: MOCK_AVG_DAYS_IN_STAGE[key] ?? 0,
-  })).filter((s) => s.count > 0);
-
-  const pendingReviews = mockReviews.filter((r) => r.status === "PENDING").length;
-
-  const stats = [
-    { label: "Active projects", value: activeProjects.length, icon: Activity },
-    { label: "Pending approvals", value: pendingReviews, icon: ClipboardCheck },
-    { label: "Agent runs (7d)", value: 46, icon: Bot },
-    { label: "Stages with a bottleneck", value: stageCounts.filter((s) => s.avgDays >= 5).length, icon: AlertTriangle },
-  ];
+export default async function OpsPage() {
+  const summary = toOpsSummary(await api.ops.summary());
 
   return (
     <div>
-      <PageHeader title="Ops Dashboard" description="Cross-project visibility: bottlenecks, approvals, agent activity." />
+      <PageHeader
+        title="AI Ops Dashboard"
+        description="Company-wide agent activity and the human approval gate — for management and tech leads."
+      />
 
+      {/* 1-4: run volume + duration */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        {stats.map((stat) => (
-          <Card key={stat.label}>
-            <CardContent className="flex items-center justify-between p-4">
-              <div>
-                <p className="text-xs text-muted-foreground">{stat.label}</p>
-                <p className="mt-1 text-2xl font-semibold">{stat.value}</p>
-              </div>
-              <stat.icon className="h-8 w-8 text-muted-foreground/50" strokeWidth={1.5} />
-            </CardContent>
-          </Card>
-        ))}
+        <StatCard label="Total agent runs" value={summary.totalRuns} icon={Bot} />
+        <StatCard label="Successful runs" value={summary.successfulRuns} icon={CheckCircle2} />
+        <StatCard label="Failed runs" value={summary.failedRuns} icon={XCircle} tone={summary.failedRuns > 0 ? "warning" : "default"} />
+        <StatCard label="Avg. run duration" value={formatDuration(summary.avgDurationSeconds)} icon={Clock} />
       </div>
 
-      <Card className="mt-6">
-        <CardHeader>
-          <CardTitle className="text-base">Where active projects are stuck</CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Stage</TableHead>
-                <TableHead>Projects currently here</TableHead>
-                <TableHead>Avg. days in stage</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {stageCounts.map((stage) => (
-                <TableRow key={stage.key}>
-                  <TableCell className="font-medium">{formatStageLabel(stage.key)}</TableCell>
-                  <TableCell>{stage.count}</TableCell>
-                  <TableCell>
-                    <div className="flex items-center gap-2">
-                      <div className="h-1.5 w-24 overflow-hidden rounded-full bg-muted">
-                        <div
-                          className={stage.avgDays >= 5 ? "h-full bg-amber-500" : "h-full bg-primary"}
-                          style={{ width: `${Math.min(stage.avgDays * 10, 100)}%` }}
-                        />
-                      </div>
-                      <span className="text-xs text-muted-foreground">{stage.avgDays}d</span>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+      {/* 5-8: cost + the human approval gate */}
+      <div className="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <StatCard label="Token usage" value={summary.totalTokens.toLocaleString()} icon={Hash} />
+        <StatCard label="Estimated cost" value={formatCost(summary.totalCost)} icon={Coins} />
+        <StatCard label="Approval rate" value={formatPercent(summary.approvalRate)} icon={ThumbsUp} />
+        <StatCard label="Rejection rate" value={formatPercent(summary.rejectionRate)} icon={ThumbsDown} />
+      </div>
+
+      {/* 9-10: not-yet-tracked human editing behavior + blocked work */}
+      <div className="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <StatCard label="Human change rate" value="Not tracked yet" icon={PenLine} />
+        <StatCard
+          label="Blocked workflows"
+          value={summary.blockedWorkflowCount}
+          icon={summary.blockedWorkflowCount > 0 ? AlertTriangle : Ban}
+          tone={summary.blockedWorkflowCount > 0 ? "warning" : "default"}
+        />
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground" title={summary.humanChangeRateNote}>
+        Human change rate: {summary.humanChangeRateNote}
+      </p>
+
+      <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-3">
+        <Card className="xl:col-span-2">
+          <CardHeader>
+            <CardTitle className="text-base">Recent agent runs</CardTitle>
+            <CardDescription>Every run across every project, most recent first.</CardDescription>
+          </CardHeader>
+          <CardContent className="overflow-x-auto p-0">
+            <OpsRunTable runs={summary.recentRuns} />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Recent failures</CardTitle>
+            <CardDescription>What is actually breaking, with the error.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <OpsFailureList failures={summary.recentFailures} />
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Cost over time</CardTitle>
+            <CardDescription>Roadmap item — see the card for why.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <OpsCostChartPlaceholder totalCost={summary.totalCost} />
+          </CardContent>
+        </Card>
+
+        <Card className="xl:col-span-2">
+          <CardHeader>
+            <CardTitle className="text-base">Stage performance</CardTitle>
+            <CardDescription>Run volume, success rate, and average duration by SDLC stage.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <OpsStagePerformanceTable stages={summary.stagePerformance} />
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }

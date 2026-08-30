@@ -14,11 +14,21 @@ export default async function ArtifactEditorPage({ params }: { params: { artifac
     throw err;
   }
 
-  const [versions, apiReviews, users] = await Promise.all([
+  const [versions, apiReviews, users, workflowNodes] = await Promise.all([
     api.artifacts.versions(artifact.id),
     api.reviews.listAll(),
     api.users.list(),
+    api.projects.workflowNodes(artifact.project_id),
   ]);
+
+  const node = workflowNodes.find((n) => n.id === artifact.workflow_node_id);
+  // Mirrors the backend's own required-input classification (see
+  // apps/api/app/services/workflow_progress.py's resolve_required_inputs):
+  // a required input that matches some node's output_artifact_type is an
+  // upstream-artifact dependency (already satisfied via approval, no user
+  // input needed); anything else is freeform and needs a text box.
+  const knownArtifactTypes = new Set(workflowNodes.map((n) => n.output_artifact_type));
+  const freeformInputKeys = (node?.required_inputs ?? []).filter((input) => !knownArtifactTypes.has(input));
 
   const currentVersion = versions.find((v) => v.id === artifact.current_version_id);
   const userNameById = new Map(users.map((u) => [u.id, u.full_name]));
@@ -37,8 +47,31 @@ export default async function ArtifactEditorPage({ params }: { params: { artifac
       createdAt: c.created_at,
     }));
 
-  const document = toArtifactDocument(artifact, versions, currentVersion?.content_markdown ?? "", comments);
+  const document = toArtifactDocument(
+    artifact,
+    versions,
+    currentVersion?.content_markdown ?? "",
+    comments,
+    node?.agent_key ?? "",
+    freeformInputKeys
+  );
   const defaultUserId = users[0]?.id ?? null;
+  const reviewers = users.map((u) => ({ id: u.id, name: u.full_name }));
 
-  return <ArtifactEditor document={document} createdById={defaultUserId} />;
+  // "Send for review" submits the artifact AND opens a review round in one
+  // action (see ArtifactEditor's handleSendForReview) — but an artifact
+  // can be READY_FOR_REVIEW with no open review round behind it (e.g. one
+  // sent for review before that pairing existed). Detect that case so the
+  // editor can offer to just open the missing review instead of trying to
+  // re-submit (which the backend correctly rejects from this status).
+  const hasOpenReview = apiReviews.some((r) => r.artifact_id === artifact.id && r.status === "PENDING");
+
+  return (
+    <ArtifactEditor
+      document={document}
+      createdById={defaultUserId}
+      reviewers={reviewers}
+      hasOpenReview={hasOpenReview}
+    />
+  );
 }

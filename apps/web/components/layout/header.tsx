@@ -5,12 +5,16 @@ import { Button } from "@/components/ui/button";
 
 export interface HeaderProps {
   onMenuClick: () => void;
+  /** Null when there's no user yet (empty DB) or the backend was
+   * unreachable at render time — falls back to a generic label rather
+   * than a stale hardcoded name. */
+  currentUser: { name: string; roleLabel: string } | null;
 }
 
 // The persistent top bar (not a per-page heading — see PageHeader for
 // that). Search/notifications are presentational for now; wire them up
 // once there's something real to search or be notified about.
-export function Header({ onMenuClick }: HeaderProps) {
+export function Header({ onMenuClick, currentUser }: HeaderProps) {
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-background px-4">
       <Button variant="ghost" size="icon" className="lg:hidden" onClick={onMenuClick} aria-label="Open navigation">
@@ -33,10 +37,10 @@ export function Header({ onMenuClick }: HeaderProps) {
       </Button>
 
       <div className="flex items-center gap-2 pl-2">
-        <Avatar name="Suru Sampathi" />
+        <Avatar name={currentUser?.name ?? "?"} />
         <div className="hidden text-left leading-tight sm:block">
-          <div className="text-sm font-medium">Suru Sampathi</div>
-          <div className="text-xs text-muted-foreground">Owner</div>
+          <div className="text-sm font-medium">{currentUser?.name ?? "No users yet"}</div>
+          <div className="text-xs text-muted-foreground">{currentUser?.roleLabel ?? "—"}</div>
         </div>
       </div>
     </header>

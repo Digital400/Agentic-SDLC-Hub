@@ -18,7 +18,7 @@ interface FormErrors {
 
 // Calls the real `POST /projects` (see apps/api/app/api/routes/projects.py)
 // — the workflow graph is generated server-side, with the first node
-// ("Requirement Intake") set IN_PROGRESS and every other node NOT_STARTED.
+// ("Requirement Intake") set READY and every other node LOCKED.
 export function CreateProjectForm({ createdById }: { createdById: string | null }) {
   const router = useRouter();
   const [name, setName] = useState("");

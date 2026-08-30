@@ -16,15 +16,27 @@ export function WorkflowCanvas({
   edges,
   documents,
   reviews,
+  currentUserId,
 }: {
   projectId: string;
   nodes: ProjectWorkflowNode[];
   edges: ProjectWorkflowEdge[];
   documents: DocumentArtifact[];
   reviews: ReviewItem[];
+  currentUserId: string | null;
 }) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? null;
+
+  // Same classification the document editor uses (see
+  // apps/web/app/documents/[artifactId]/page.tsx) — a required input that
+  // matches some node's output_artifact_type is an upstream-artifact
+  // dependency, not something a human types in here.
+  const knownArtifactTypes = useMemo(() => new Set(nodes.map((n) => n.outputArtifactType)), [nodes]);
+  const selectedNodeFreeformInputKeys = useMemo(
+    () => selectedNode?.requiredInputs.filter((input) => !knownArtifactTypes.has(input)) ?? [],
+    [selectedNode, knownArtifactTypes]
+  );
 
   const flowNodes = useMemo<Node<StageNodeData>[]>(
     () =>
@@ -62,8 +74,11 @@ export function WorkflowCanvas({
   };
 
   return (
-    <div className="flex h-[70vh] w-full gap-4">
-      <div className="min-w-0 flex-1 overflow-hidden rounded-lg border border-border">
+    // Column below lg: side-by-side with a fixed-width detail panel leaves
+    // almost no room for the canvas on a phone/tablet-portrait screen —
+    // stack them instead so both stay fully usable.
+    <div className="flex flex-col gap-4 lg:h-[70vh] lg:flex-row">
+      <div className="h-[50vh] min-w-0 overflow-hidden rounded-lg border border-border lg:h-auto lg:flex-1">
         <ReactFlow
           nodes={flowNodes}
           edges={flowEdges}
@@ -86,6 +101,8 @@ export function WorkflowCanvas({
           node={selectedNode}
           documents={documents}
           reviews={reviews}
+          freeformInputKeys={selectedNodeFreeformInputKeys}
+          currentUserId={currentUserId}
           onClose={() => setSelectedNodeId(null)}
         />
       ) : null}

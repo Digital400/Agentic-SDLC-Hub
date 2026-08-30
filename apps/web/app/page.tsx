@@ -58,7 +58,7 @@ export default async function DashboardPage() {
       title: run.agentName,
       subtitle: `${run.projectName} · ${run.workflowStageName}`,
       timestamp: formatRelativeTime(run.createdAt),
-      href: `/projects/${run.projectId}`,
+      href: `/agent-runs/${run.id}`,
       badge: <AgentRunStatusBadge status={run.status} />,
     }));
 

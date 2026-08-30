@@ -6,7 +6,13 @@ import { Header } from "@/components/layout/header";
 import { Sidebar } from "@/components/layout/sidebar";
 import { cn } from "@/lib/utils";
 
-export function AppShell({ children }: { children: ReactNode }) {
+export function AppShell({
+  children,
+  currentUser,
+}: {
+  children: ReactNode;
+  currentUser: { name: string; roleLabel: string } | null;
+}) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   return (
@@ -31,7 +37,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       ) : null}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <Header onMenuClick={() => setMobileNavOpen(true)} />
+        <Header onMenuClick={() => setMobileNavOpen(true)} currentUser={currentUser} />
         <main className="flex-1 overflow-y-auto p-4 sm:p-6">{children}</main>
       </div>
     </div>

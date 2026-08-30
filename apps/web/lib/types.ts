@@ -11,6 +11,11 @@ export type AgentRunStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
 /** An artifact's own review lifecycle — distinct from WorkflowStatus, which
  * tracks its owning WorkflowNode's broader lifecycle. */
 export type ArtifactStatus = "DRAFT" | "READY_FOR_REVIEW" | "APPROVED" | "NEEDS_CHANGES" | "REJECTED";
+export type KnowledgeSourceType = "PROJECT_ARTIFACT" | "UPLOADED_DOCUMENT" | "EXTERNAL_LINK";
+/** A knowledge source's ingestion lifecycle — no ingestion pipeline exists
+ * yet (see apps/api/app/models/knowledge.py), so this only reflects
+ * whatever a source was seeded/set to, not real pipeline progress. */
+export type KnowledgeSourceStatus = "PENDING" | "PROCESSING" | "INDEXED" | "FAILED";
 
 export interface Project {
   id: string;
@@ -90,7 +95,14 @@ export interface ArtifactDocument {
   id: string;
   projectId: string;
   projectName: string;
+  workflowNodeId: string;
   workflowStageName: string;
+  /** The agent responsible for this stage — see ProjectWorkflowNode.agentKey. */
+  agentKey: string;
+  /** Which of this stage's required_inputs are freeform (no upstream
+   * artifact to satisfy them) — e.g. "stakeholder_request" for Requirement
+   * Intake. Empty for a stage whose inputs are all upstream artifacts. */
+  freeformInputKeys: string[];
   artifactType: string;
   title: string;
   status: ArtifactStatus;
@@ -176,11 +188,154 @@ export interface AgentRunSummary {
   createdAt: string;
 }
 
-export interface KnowledgeBaseSource {
+/** One Knowledge Base chunk retrieved for a run's context — see
+ * apps/api/app/services/retrieval.py. */
+export interface RetrievedSourceItem {
+  chunkId: string;
+  sourceId: string;
+  sourceTitle: string;
+  chunkIndex: number;
+  snippet: string;
+  similarity: number;
+}
+
+/** Full detail for the Agent Run Detail screen. */
+export interface AgentRunDetail {
+  id: string;
+  projectId: string;
+  projectName: string;
+  workflowStageName: string;
+  agentKey: string;
+  promptVersion: number | null;
+  action: "draft" | "improve" | "validate";
+  status: AgentRunStatus;
+  inputContext: Record<string, unknown>;
+  outputText: string | null;
+  outputArtifactId: string | null;
+  errorMessage: string | null;
+  tokenUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null;
+  cost: number | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  /** Null: retrieval never ran (e.g. the run failed before that step).
+   * Empty array: retrieval ran and found nothing relevant enough to use —
+   * the run proceeded on project context alone. */
+  retrievedSources: RetrievedSourceItem[] | null;
+}
+
+/** One story's Jira field mapping preview — see
+ * apps/api/app/services/jira_export.py. No real Jira connection exists;
+ * this is a review-before-push preview only. */
+export interface JiraFieldMapping {
+  epic: string | null;
+  labels: string[];
+  summary: string;
+  description: string;
+  priority: string | null;
+  linkedIssuesPlaceholder: string[];
+}
+
+export interface StoryJiraPreviewItem {
+  storyTitle: string;
+  jiraIssueType: string;
+  mapping: JiraFieldMapping;
+  validationErrors: string[];
+  isValid: boolean;
+}
+
+export interface JiraExportPreview {
+  projectId: string;
+  artifactId: string;
+  artifactTitle: string;
+  storyCount: number;
+  validStoryCount: number;
+  hasErrors: boolean;
+  overallErrors: string[];
+  stories: StoryJiraPreviewItem[];
+  pushToJiraEnabled: boolean;
+}
+
+/** One row in the AI Ops Dashboard's agent run table / failure list. */
+export interface OpsAgentRunRow {
+  id: string;
+  projectId: string;
+  projectName: string;
+  workflowStageName: string;
+  agentKey: string;
+  action: string;
+  status: string;
+  durationSeconds: number | null;
+  totalTokens: number | null;
+  cost: number | null;
+  errorMessage: string | null;
+  createdAt: string;
+}
+
+export interface OpsStagePerformance {
+  nodeKey: string;
+  stageName: string;
+  totalRuns: number;
+  successfulRuns: number;
+  failedRuns: number;
+  /** null when this stage has had zero runs. */
+  successRate: number | null;
+  avgDurationSeconds: number | null;
+}
+
+/** Company-wide AI Ops metrics — see apps/api/app/services/ops_metrics.py. */
+export interface OpsSummary {
+  totalRuns: number;
+  successfulRuns: number;
+  failedRuns: number;
+  avgDurationSeconds: number | null;
+  totalTokens: number;
+  totalCost: number;
+  /** null when there are no decided reviews yet to compute a rate from. */
+  approvalRate: number | null;
+  rejectionRate: number | null;
+  decidedReviewCount: number;
+  /** Always null today — see humanChangeRateNote. */
+  humanChangeRate: null;
+  humanChangeRateNote: string;
+  blockedWorkflowCount: number;
+  recentRuns: OpsAgentRunRow[];
+  recentFailures: OpsAgentRunRow[];
+  stagePerformance: OpsStagePerformance[];
+}
+
+export type IntegrationProvider = "JIRA" | "CONFLUENCE" | "GITHUB" | "SLACK" | "TEAMS" | "AZURE_DEVOPS";
+export type IntegrationStatus = "NOT_CONNECTED" | "CONNECTED" | "ERROR";
+
+/** One row from the Integrations settings UI — see
+ * apps/api/app/models/integration.py. No MCP tool is wired up yet, so
+ * every integration is realistically NOT_CONNECTED with lastSyncedAt null. */
+export interface IntegrationItem {
+  id: string;
+  integrationName: string;
+  provider: IntegrationProvider;
+  status: IntegrationStatus;
+  connectedByName: string | null;
+  lastSyncedAt: string | null;
+}
+
+export interface KnowledgeSourceItem {
   id: string;
   title: string;
-  sourceType: "Project artifact" | "Uploaded document" | "External link";
-  projectName?: string;
-  indexed: boolean;
-  updatedAt: string;
+  category: string;
+  sourceType: KnowledgeSourceType;
+  fileUrl: string | null;
+  status: KnowledgeSourceStatus;
+  uploadedByName: string;
+  chunkCount: number;
+  createdAt: string;
+}
+
+export interface KnowledgeChunkItem {
+  id: string;
+  sourceId: string;
+  chunkIndex: number;
+  content: string;
+  metadataJson: Record<string, unknown> | null;
+  createdAt: string;
 }

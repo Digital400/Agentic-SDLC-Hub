@@ -22,18 +22,26 @@ actionable work, not re-deciding the design itself.
 
 ## Output Format
 
-Markdown: a list of stories, each formatted as follows, in backlog order
-(dependencies before what depends on them):
+Markdown: a list of stories, each formatted exactly as follows, in backlog
+order (dependencies before what depends on them). This exact field set and
+labeling is required — it's parsed programmatically for the Export Stories
+feature (Markdown/CSV/JSON), not just read as prose:
 
 ```markdown
 # Story Backlog — <short design name>
 
 ## Story: <short, action-oriented title>
-**Description:** (1–2 sentences: what this story delivers and why.)
-**References:** (Which HLD component(s) this story implements.)
+**Epic:** (The larger body of work this story belongs to.)
+**Feature:** (The specific feature this story implements within the epic.)
+**User Story:** As a <role>, I want <capability>, so that <benefit>.
+**Priority:** High | Medium | Low
+**Dependencies:** (Other story titles this depends on, or "None.")
 **Acceptance Criteria:**
 - [ ] (Specific, testable condition)
 - [ ] (Specific, testable condition)
+**Definition of Done:**
+- [ ] (Condition that must hold before this story is considered complete —
+      e.g. code reviewed, tests passing, documentation updated.)
 ```
 
 Repeat the `## Story:` block for each story in the backlog.
@@ -44,11 +52,14 @@ Repeat the `## Story:` block for each story in the backlog.
    that someone other than the author could verify completion.
 2. Size each story so it's independently completable within one
    implementation pass — split anything larger.
-3. Reference the HLD component(s) each story implements; don't introduce
-   design decisions the HLD didn't make.
-4. Order the backlog so dependencies come before what depends on them.
+3. Reference the HLD component(s) each story implements via its Epic/Feature
+   fields; don't introduce design decisions the HLD didn't make.
+4. Order the backlog so dependencies come before what depends on them, and
+   name those dependencies explicitly in the Dependencies field.
 5. Taken together, the stories must cover the full scope of the HLD — no
    component should be left with no corresponding story.
+6. Every story must state a Priority and a Definition of Done — these are
+   required fields for the exported backlog, not optional detail.
 
 ## What Not To Do
 
@@ -72,6 +83,8 @@ Before this output is considered ready for review, confirm:
 - [ ] No story silently re-decides something the HLD already settled.
 - [ ] Together, the stories cover the full scope of the HLD.
 - [ ] Backlog order respects dependencies between stories.
+- [ ] Every story states Epic, Feature, User Story, Priority, Dependencies,
+      Acceptance Criteria, and Definition of Done — all seven fields.
 
 ## Human Review Requirement
 

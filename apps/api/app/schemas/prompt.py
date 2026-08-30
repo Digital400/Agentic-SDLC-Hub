@@ -4,6 +4,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import AgentPromptRole
+from app.schemas.validators import NonBlankStr
 
 
 class AgentPromptCreate(BaseModel):
@@ -12,10 +13,10 @@ class AgentPromptCreate(BaseModel):
 
     agent_key: str = Field(..., description="Must match an existing AgentDefinition.")
     role: AgentPromptRole = AgentPromptRole.DRAFT
-    name: str = Field(..., min_length=1, max_length=255)
-    stage: str = Field(..., min_length=1, max_length=100, description="Workflow node_key this prompt targets, e.g. 'hld'.")
-    system_prompt: str = Field(..., min_length=1)
-    output_format: str = Field(..., min_length=1)
+    name: NonBlankStr = Field(..., max_length=255)
+    stage: NonBlankStr = Field(..., max_length=100, description="Workflow node_key this prompt targets, e.g. 'hld'.")
+    system_prompt: NonBlankStr
+    output_format: NonBlankStr
     validation_checklist: list[str] = Field(default_factory=list)
 
 
@@ -23,22 +24,34 @@ class AgentPromptVersionCreate(BaseModel):
     """Body for POST /prompts/{id}/versions — a full new version, not a
     partial patch (mirrors ArtifactVersionCreate)."""
 
-    name: str = Field(..., min_length=1, max_length=255)
-    stage: str = Field(..., min_length=1, max_length=100)
-    system_prompt: str = Field(..., min_length=1)
-    output_format: str = Field(..., min_length=1)
+    name: NonBlankStr = Field(..., max_length=255)
+    stage: NonBlankStr = Field(..., max_length=100)
+    system_prompt: NonBlankStr
+    output_format: NonBlankStr
     validation_checklist: list[str] = Field(default_factory=list)
+    created_by_id: uuid.UUID = Field(
+        ..., description="Existing user id — checked against app/services/permissions.py's prompt-update rule."
+    )
 
 
 class AgentPromptUpdate(BaseModel):
     """Body for PATCH /prompts/{id} — edits this version in place. Only
     allowed while it isn't the active version (see the route)."""
 
-    name: str | None = Field(default=None, min_length=1, max_length=255)
-    stage: str | None = Field(default=None, min_length=1, max_length=100)
-    system_prompt: str | None = Field(default=None, min_length=1)
-    output_format: str | None = Field(default=None, min_length=1)
+    name: NonBlankStr | None = Field(default=None, max_length=255)
+    stage: NonBlankStr | None = Field(default=None, max_length=100)
+    system_prompt: NonBlankStr | None = None
+    output_format: NonBlankStr | None = None
     validation_checklist: list[str] | None = None
+    updated_by_id: uuid.UUID = Field(
+        ..., description="Existing user id — checked against app/services/permissions.py's prompt-update rule."
+    )
+
+
+class AgentPromptActivateRequest(BaseModel):
+    activated_by_id: uuid.UUID = Field(
+        ..., description="Existing user id — checked against app/services/permissions.py's prompt-update rule."
+    )
 
 
 class AgentPromptRead(BaseModel):

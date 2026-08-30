@@ -1,18 +1,13 @@
 import type { WorkflowStatus } from "@agentic-sdlc-hub/shared";
-import { formatSnakeCase } from "@/lib/format";
 import type {
   AgentDefinitionSummary,
   AgentPromptVersion,
   AgentRunSummary,
-  ArtifactDocument,
   DocumentArtifact,
-  KnowledgeBaseSource,
   Project,
   ProjectWorkflowEdge,
   ProjectWorkflowNode,
   ReviewChecklistItem,
-  ReviewDecisionHistoryEntry,
-  ReviewDetail,
   ReviewItem,
 } from "@/lib/types";
 
@@ -53,7 +48,7 @@ function buildWorkflowNodes(projectId: string, statuses: WorkflowStatus[]): Proj
     outputArtifactType: stage.outputArtifactType,
     requiresHumanApproval: stage.requiresHumanApproval,
     allowedActions: [...stage.allowedActions],
-    status: statuses[i] ?? "NOT_STARTED",
+    status: statuses[i] ?? "LOCKED",
     orderIndex: i,
     position: { x: stage.x, y: 0 },
   }));
@@ -138,21 +133,21 @@ export const mockProjects: Project[] = [
 
 export const mockWorkflowNodesByProject: Record<string, ProjectWorkflowNode[]> = {
   "proj-loyalty": buildWorkflowNodes("proj-loyalty", [
-    "COMPLETED", "IN_PROGRESS", "NOT_STARTED", "NOT_STARTED", "NOT_STARTED",
-    "NOT_STARTED", "NOT_STARTED", "NOT_STARTED", "NOT_STARTED", "NOT_STARTED", "NOT_STARTED",
+    "COMPLETED", "READY", "LOCKED", "LOCKED", "LOCKED",
+    "LOCKED", "LOCKED", "LOCKED", "LOCKED", "LOCKED", "LOCKED",
   ]),
   "proj-vendor": buildWorkflowNodes("proj-vendor", [
-    "COMPLETED", "COMPLETED", "COMPLETED", "WAITING_FOR_REVIEW", "NOT_STARTED",
-    "NOT_STARTED", "NOT_STARTED", "NOT_STARTED", "NOT_STARTED", "NOT_STARTED", "NOT_STARTED",
+    "COMPLETED", "COMPLETED", "COMPLETED", "WAITING_FOR_REVIEW", "LOCKED",
+    "LOCKED", "LOCKED", "LOCKED", "LOCKED", "LOCKED", "LOCKED",
   ]),
   "proj-fraud": buildWorkflowNodes("proj-fraud", [
     "COMPLETED", "COMPLETED", "COMPLETED", "COMPLETED", "COMPLETED",
-    "COMPLETED", "COMPLETED", "IN_PROGRESS", "NOT_STARTED", "NOT_STARTED", "NOT_STARTED",
+    "COMPLETED", "COMPLETED", "READY", "LOCKED", "LOCKED", "LOCKED",
   ]),
   "proj-invoicing": buildWorkflowNodes("proj-invoicing", Array(11).fill("COMPLETED") as WorkflowStatus[]),
   "proj-legacy-crm": buildWorkflowNodes("proj-legacy-crm", [
-    "COMPLETED", "COMPLETED", "BLOCKED", "NOT_STARTED", "NOT_STARTED",
-    "NOT_STARTED", "NOT_STARTED", "NOT_STARTED", "NOT_STARTED", "NOT_STARTED", "NOT_STARTED",
+    "COMPLETED", "COMPLETED", "BLOCKED", "LOCKED", "LOCKED",
+    "LOCKED", "LOCKED", "LOCKED", "LOCKED", "LOCKED", "LOCKED",
   ]),
 };
 
@@ -189,33 +184,6 @@ export const REVIEW_CHECKLIST_ITEMS: ReviewChecklistItem[] = [
   { id: "no-sensitive-data", label: "No sensitive or confidential data is exposed inappropriately" },
   { id: "aligned", label: "Aligns with the approved output of the previous stage" },
 ];
-
-const reviewHistoryById: Record<string, ReviewDecisionHistoryEntry[]> = {
-  "rev-4": [
-    {
-      id: "rev-4-h1",
-      versionNumber: 1,
-      status: "REJECTED",
-      reviewerName: "Alex Reviewer",
-      comment: "Migration plan doesn't cover a rollback strategy — please address before resubmitting.",
-      decidedAt: "2026-03-20T09:00:00Z",
-    },
-  ],
-};
-
-export function getReviewDetail(reviewId: string): ReviewDetail | undefined {
-  const review = mockReviews.find((r) => r.id === reviewId);
-  if (!review) return undefined;
-
-  const artifact = getArtifactDocument(review.artifactId);
-  if (!artifact) return undefined;
-
-  return {
-    ...review,
-    artifact,
-    history: reviewHistoryById[reviewId] ?? [],
-  };
-}
 
 export const mockAgents: AgentDefinitionSummary[] = TEMPLATE_STAGES.map((stage, i) => ({
   id: `agent-${stage.key}`,
@@ -340,13 +308,6 @@ export const mockAgentRuns: AgentRunSummary[] = [
   { id: "run-6", projectId: "proj-loyalty", projectName: "Customer Loyalty Rewards Platform", agentName: "Requirement Intake Agent", workflowStageName: "Requirement Intake", action: "draft", status: "COMPLETED", createdAt: "2026-08-27T10:30:00Z" },
 ];
 
-export const mockKnowledgeBase: KnowledgeBaseSource[] = [
-  { id: "kb-1", title: "Requirement Intake Summary — Customer Loyalty Rewards Platform", sourceType: "Project artifact", projectName: "Customer Loyalty Rewards Platform", indexed: true, updatedAt: "2026-08-28T09:30:00Z" },
-  { id: "kb-2", title: "High-Level Design — Vendor Onboarding Portal", sourceType: "Project artifact", projectName: "Vendor Onboarding Portal", indexed: false, updatedAt: "2026-08-29T11:15:00Z" },
-  { id: "kb-3", title: "Company SDLC Style Guide", sourceType: "Uploaded document", indexed: true, updatedAt: "2026-06-01T09:00:00Z" },
-  { id: "kb-4", title: "Data Retention Policy (Legal wiki)", sourceType: "External link", indexed: false, updatedAt: "2026-05-12T09:00:00Z" },
-];
-
 /** The 11 stage keys, in workflow order — for anything that needs to walk stages in sequence. */
 export const STAGE_ORDER = TEMPLATE_STAGES.map((s) => s.key);
 
@@ -363,160 +324,3 @@ export function getProjectById(id: string): Project | undefined {
   return mockProjects.find((p) => p.id === id);
 }
 
-// --- Full editable documents, for the artifact editor -----------------------
-// Only a couple of documents get realistic multi-section content here —
-// getArtifactDocument() below synthesizes a minimal one-section stand-in
-// for every other row in mockDocuments, so every document link works.
-
-const richArtifactDocuments: Record<string, ArtifactDocument> = {
-  "doc-3": {
-    id: "doc-3",
-    projectId: "proj-vendor",
-    projectName: "Vendor Onboarding Portal",
-    workflowStageName: "High-Level Design",
-    artifactType: "hld_document",
-    title: "High-Level Design",
-    status: "READY_FOR_REVIEW",
-    currentVersionNumber: 2,
-    sections: [
-      {
-        id: "overview",
-        title: "Overview",
-        contentMarkdown:
-          "The Vendor Onboarding Portal lets new vendors submit compliance documents through a self-serve " +
-          "web form instead of emailing PDFs to Procurement. This design covers the web app, the document " +
-          "intake API, and where submitted files are stored.",
-      },
-      {
-        id: "architecture",
-        title: "Architecture",
-        contentMarkdown:
-          "- Next.js frontend (form + status tracking) talks to a FastAPI backend over REST.\n" +
-          "- Uploaded documents land in object storage; the API only stores metadata + a pointer.\n" +
-          "- A background job scans each upload for basic file-type/size validation before marking it \"received\".",
-      },
-      {
-        id: "data-model",
-        title: "Data Model",
-        contentMarkdown:
-          "Two new tables: `vendor_submissions` (one row per vendor's onboarding attempt) and " +
-          "`vendor_documents` (one row per uploaded file, FK to a submission). Status on `vendor_submissions` " +
-          "mirrors the existing project workflow status vocabulary for consistency.",
-      },
-      {
-        id: "security",
-        title: "Security Considerations",
-        contentMarkdown:
-          "Uploaded files are scanned before being made visible to Procurement staff. Vendors can only see " +
-          "their own submission via a signed link — no account/login required for the vendor side.",
-      },
-      {
-        id: "open-questions",
-        title: "Open Questions",
-        contentMarkdown:
-          "- Do we need to retain rejected submissions, or can they be purged after 30 days?\n" +
-          "- Should Procurement be notified per-submission or via a daily digest?",
-      },
-    ],
-    versions: [
-      { id: "doc-3-v1", versionNumber: 1, changeSummary: "Initial AI-drafted design.", createdByName: "HLD Agent (draft)", createdAt: "2026-08-27T09:00:00Z" },
-      { id: "doc-3-v2", versionNumber: 2, changeSummary: "Added open questions after architecture review sync.", createdByName: "Priya Dev", createdAt: "2026-08-29T11:15:00Z" },
-    ],
-    comments: [
-      {
-        id: "doc-3-c1",
-        authorName: "Alex Reviewer",
-        body: "Can we confirm retention policy before this goes to Legal for sign-off?",
-        createdAt: "2026-08-29T12:00:00Z",
-        sectionId: "open-questions",
-      },
-      {
-        id: "doc-3-c2",
-        authorName: "Sam Rivera",
-        body: "Procurement would prefer a daily digest — per-submission emails will get noisy fast.",
-        createdAt: "2026-08-29T13:30:00Z",
-        sectionId: "open-questions",
-      },
-    ],
-  },
-  "doc-1": {
-    id: "doc-1",
-    projectId: "proj-loyalty",
-    projectName: "Customer Loyalty Rewards Platform",
-    workflowStageName: "Requirement Intake",
-    artifactType: "intake_summary",
-    title: "Requirement Intake Summary",
-    status: "APPROVED",
-    currentVersionNumber: 2,
-    sections: [
-      {
-        id: "stakeholder",
-        title: "Stakeholder & Request",
-        contentMarkdown:
-          "**Stakeholder:** Marketing\n\n**Request:** Introduce a points-based loyalty program in the customer " +
-          "mobile app so customers earn points on purchases and redeem them for discounts, to improve repeat " +
-          "purchase rate.",
-      },
-      {
-        id: "constraints",
-        title: "Constraints",
-        contentMarkdown: "No fixed launch date; target shipping ahead of the holiday season.",
-      },
-      {
-        id: "success-metric",
-        title: "Success Metric",
-        contentMarkdown: "+15% repeat purchase rate within 2 quarters of launch.",
-      },
-    ],
-    versions: [
-      { id: "doc-1-v1", versionNumber: 1, changeSummary: "Initial AI-drafted intake summary.", createdByName: "Requirement Intake Agent (draft)", createdAt: "2026-08-27T10:00:00Z" },
-      { id: "doc-1-v2", versionNumber: 2, changeSummary: "Clarified success metrics after stakeholder sync.", createdByName: "Priya Dev", createdAt: "2026-08-28T04:00:00Z" },
-    ],
-    comments: [
-      {
-        id: "doc-1-c1",
-        authorName: "Alex Reviewer",
-        body: "Looks good — clear problem framing and a measurable success metric. Approved to proceed to Problem Discovery.",
-        createdAt: "2026-08-28T09:30:00Z",
-      },
-    ],
-  },
-};
-
-/** Look up the full editable document for a DocumentArtifact row. Falls
- * back to a minimal single-section stand-in when no rich mock exists, so
- * every document in mockDocuments has a working editor page. */
-export function getArtifactDocument(id: string): ArtifactDocument | undefined {
-  if (richArtifactDocuments[id]) return richArtifactDocuments[id];
-
-  const doc = mockDocuments.find((d) => d.id === id);
-  if (!doc) return undefined;
-
-  return {
-    id: doc.id,
-    projectId: doc.projectId,
-    projectName: doc.projectName,
-    workflowStageName: TEMPLATE_STAGES.find((s) => s.outputArtifactType === doc.artifactType)?.name ?? "Unknown Stage",
-    artifactType: doc.artifactType,
-    title: doc.title,
-    status: doc.status,
-    currentVersionNumber: doc.versionNumber,
-    sections: [
-      {
-        id: "content",
-        title: formatSnakeCase(doc.artifactType),
-        contentMarkdown: `_No detailed mock content authored for this document yet — this is a placeholder body for "${doc.title}"._`,
-      },
-    ],
-    versions: [
-      {
-        id: `${doc.id}-v${doc.versionNumber}`,
-        versionNumber: doc.versionNumber,
-        changeSummary: null,
-        createdByName: "—",
-        createdAt: doc.updatedAt,
-      },
-    ],
-    comments: [],
-  };
-}

@@ -1,22 +1,46 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Download, FileCode, Save, SendHorizontal, GitBranch } from "lucide-react";
+import { Download, ExternalLink, FileCode, FileJson, FileSpreadsheet, FileText, Save, SendHorizontal, GitBranch } from "lucide-react";
 
-import { AgentActionsPanel } from "@/components/documents/agent-actions-panel";
+import { AgentActionsPanel, type AgentRunOutcome } from "@/components/documents/agent-actions-panel";
 import { CommentsPanel } from "@/components/documents/comments-panel";
+import { JiraExportPreviewPanel } from "@/components/documents/jira-export-preview-panel";
 import { SectionNav } from "@/components/documents/section-nav";
 import { ArtifactStatusBadge } from "@/components/status-badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { formatRelativeTime } from "@/lib/format";
-import { api, ApiError } from "@/lib/api";
-import { joinSectionsIntoMarkdown } from "@/lib/markdown-sections";
-import { toArtifactVersionSummary } from "@/lib/mappers";
-import type { ArtifactDocument, ArtifactSection, ArtifactStatus } from "@/lib/types";
+import { API_URL, api, ApiError } from "@/lib/api";
+import { joinSectionsIntoMarkdown, splitMarkdownIntoSections } from "@/lib/markdown-sections";
+import { toArtifactVersionSummary, toJiraExportPreview } from "@/lib/mappers";
+import type { ArtifactDocument, ArtifactSection, ArtifactStatus, JiraExportPreview } from "@/lib/types";
 
-export function ArtifactEditor({ document: doc, createdById }: { document: ArtifactDocument; createdById: string | null }) {
+// Story Crafting's output_artifact_type — see
+// apps/api/app/api/routes/artifacts.py's STORY_BACKLOG_ARTIFACT_TYPE.
+const STORY_BACKLOG_ARTIFACT_TYPE = "story_backlog";
+
+export interface ReviewerOption {
+  id: string;
+  name: string;
+}
+
+export function ArtifactEditor({
+  document: doc,
+  createdById,
+  reviewers = [],
+  hasOpenReview = false,
+}: {
+  document: ArtifactDocument;
+  createdById: string | null;
+  reviewers?: ReviewerOption[];
+  /** Whether this artifact already has a PENDING review open — see
+   * app/documents/[artifactId]/page.tsx for why this can be false even
+   * while status is READY_FOR_REVIEW. */
+  hasOpenReview?: boolean;
+}) {
   const [sections, setSections] = useState<ArtifactSection[]>(doc.sections);
   const [dirty, setDirty] = useState(false);
   const [status, setStatus] = useState<ArtifactStatus>(doc.status);
@@ -25,6 +49,16 @@ export function ArtifactEditor({ document: doc, createdById }: { document: Artif
   const [activeSectionId, setActiveSectionId] = useState(doc.sections[0]?.id ?? "");
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [showVersionForm, setShowVersionForm] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [showReviewForm, setShowReviewForm] = useState(false);
+  const [showJiraPreview, setShowJiraPreview] = useState(false);
+  const [jiraPreview, setJiraPreview] = useState<JiraExportPreview | null>(null);
+  const [jiraPreviewLoading, setJiraPreviewLoading] = useState(false);
+  const [jiraPreviewError, setJiraPreviewError] = useState<string | null>(null);
+  const [openReview, setOpenReview] = useState(hasOpenReview);
+  const [reviewerId, setReviewerId] = useState(
+    reviewers.find((r) => r.id !== createdById)?.id ?? reviewers[0]?.id ?? ""
+  );
   const [changeSummaryDraft, setChangeSummaryDraft] = useState("");
   const [banner, setBanner] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -47,9 +81,16 @@ export function ArtifactEditor({ document: doc, createdById }: { document: Artif
   }
 
   async function handleSaveDraft() {
+    if (createdById === null) {
+      flash("No users exist yet to attribute this edit to.");
+      return;
+    }
     setBusy(true);
     try {
-      await api.artifacts.updateContent(doc.id, { content_markdown: joinSectionsIntoMarkdown(sections) });
+      await api.artifacts.updateContent(doc.id, {
+        content_markdown: joinSectionsIntoMarkdown(sections),
+        edited_by_id: createdById,
+      });
       setDirty(false);
       setSavedAt(new Date().toISOString());
       flash("Draft saved.");
@@ -75,6 +116,7 @@ export function ArtifactEditor({ document: doc, createdById }: { document: Artif
       setVersions((prev) => [...prev, toArtifactVersionSummary(version)]);
       setCurrentVersionNumber(version.version_number);
       setStatus("DRAFT");
+      setOpenReview(false);
       setDirty(false);
       setShowVersionForm(false);
       setChangeSummaryDraft("");
@@ -86,21 +128,77 @@ export function ArtifactEditor({ document: doc, createdById }: { document: Artif
     }
   }
 
+  async function handleAgentApplied(outcome: AgentRunOutcome) {
+    // The agent run's own save-to-artifact call already changed the
+    // artifact server-side (new/updated version, possibly a new status) —
+    // re-fetch this artifact's current state rather than guessing at it
+    // locally, same as every other mutating action in this component.
+    try {
+      const [freshArtifact, freshVersions] = await Promise.all([api.artifacts.get(doc.id), api.artifacts.versions(doc.id)]);
+      const currentVersion = freshVersions.find((v) => v.id === freshArtifact.current_version_id);
+      setStatus(outcome.artifactStatus as ArtifactStatus);
+      setCurrentVersionNumber(freshArtifact.current_version_number ?? currentVersionNumber);
+      setVersions(freshVersions.map(toArtifactVersionSummary));
+      setSections(splitMarkdownIntoSections(currentVersion?.content_markdown ?? ""));
+      setDirty(false);
+      // A "validate" run can push status straight to READY_FOR_REVIEW —
+      // that's a new version needing its own review round, not a
+      // continuation of whatever was open (if anything) before this run.
+      setOpenReview(false);
+      flash("Agent output applied to this document.");
+    } catch (err) {
+      flash(err instanceof ApiError ? `Applied, but failed to refresh the view: ${err.message}` : "Applied, but failed to refresh the view.");
+    }
+  }
+
+  async function handleOpenJiraPreview() {
+    setShowJiraPreview(true);
+    setJiraPreviewLoading(true);
+    setJiraPreviewError(null);
+    try {
+      const preview = await api.projects.previewJiraExport(doc.projectId);
+      setJiraPreview(toJiraExportPreview(preview));
+    } catch (err) {
+      setJiraPreviewError(err instanceof ApiError ? err.message : "Failed to build the Jira export preview.");
+    } finally {
+      setJiraPreviewLoading(false);
+    }
+  }
+
+  // Submitting an artifact (status -> READY_FOR_REVIEW) and opening the
+  // review round that actually shows up on /reviews are two separate API
+  // calls (see apps/api/app/api/routes/{artifacts,reviews}.py) — done here
+  // as one action so a document can never end up "ready for review" with
+  // no review anyone can act on. See app/documents/[artifactId]/page.tsx's
+  // hasOpenReview for the one case this button alone can't have caused
+  // (an artifact left in that state before this pairing existed).
   async function handleSendForReview() {
+    if (!reviewerId) {
+      flash("No users exist yet to assign as reviewer.");
+      return;
+    }
     setBusy(true);
     try {
-      const artifact = await api.artifacts.submitForReview(doc.id);
-      setStatus(artifact.status);
+      if (status === "DRAFT" || status === "NEEDS_CHANGES") {
+        const artifact = await api.artifacts.submitForReview(doc.id);
+        setStatus(artifact.status);
+      }
+      await api.reviews.create({ artifact_id: doc.id, reviewer_id: reviewerId });
+      setOpenReview(true);
+      setShowReviewForm(false);
       flash("Sent for review.");
     } catch (err) {
-      flash(err instanceof ApiError ? `Failed to submit: ${err.message}` : "Failed to submit for review.");
+      flash(err instanceof ApiError ? `Failed to send for review: ${err.message}` : "Failed to send for review.");
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="flex h-[calc(100vh-8.5rem)] flex-col">
+    // Fixed viewport height + 3 side-by-side columns only makes sense once
+    // there's room for all three — below lg the section nav, content, and
+    // agent/comments rail stack instead and the page scrolls normally.
+    <div className="flex flex-col lg:h-[calc(100vh-8.5rem)]">
       {/* Header + toolbar */}
       <div className="mb-4 flex flex-col gap-3 border-b border-border pb-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -127,14 +225,60 @@ export function ArtifactEditor({ document: doc, createdById }: { document: Artif
             </Button>
             <Button
               size="sm"
-              onClick={handleSendForReview}
-              disabled={dirty || busy || (status !== "DRAFT" && status !== "NEEDS_CHANGES")}
+              onClick={() => setShowReviewForm((v) => !v)}
+              disabled={
+                dirty ||
+                busy ||
+                !(status === "DRAFT" || status === "NEEDS_CHANGES" || (status === "READY_FOR_REVIEW" && !openReview))
+              }
               title={dirty ? "Save your draft first" : undefined}
             >
               <SendHorizontal className="h-3.5 w-3.5" />
-              Send for review
+              {status === "READY_FOR_REVIEW" && !openReview ? "Open review" : "Send for review"}
             </Button>
             <div className="mx-1 h-5 w-px bg-border" />
+            {doc.artifactType === STORY_BACKLOG_ARTIFACT_TYPE && status === "APPROVED" ? (
+              <div className="relative">
+                <Button variant="outline" size="sm" onClick={() => setShowExportMenu((v) => !v)}>
+                  <Download className="h-3.5 w-3.5" />
+                  Export Stories
+                </Button>
+                {showExportMenu ? (
+                  <div className="absolute right-0 top-full z-10 mt-1 flex flex-col gap-1 rounded-md border border-border bg-card p-1.5 shadow-md">
+                    <a
+                      href={`${API_URL}/artifacts/${doc.id}/export/stories?format=markdown`}
+                      className={buttonVariants({ variant: "ghost", size: "sm", className: "justify-start" })}
+                      onClick={() => setShowExportMenu(false)}
+                    >
+                      <FileText className="h-3.5 w-3.5" />
+                      Markdown (.md)
+                    </a>
+                    <a
+                      href={`${API_URL}/artifacts/${doc.id}/export/stories?format=csv`}
+                      className={buttonVariants({ variant: "ghost", size: "sm", className: "justify-start" })}
+                      onClick={() => setShowExportMenu(false)}
+                    >
+                      <FileSpreadsheet className="h-3.5 w-3.5" />
+                      CSV (.csv)
+                    </a>
+                    <a
+                      href={`${API_URL}/artifacts/${doc.id}/export/stories?format=json`}
+                      className={buttonVariants({ variant: "ghost", size: "sm", className: "justify-start" })}
+                      onClick={() => setShowExportMenu(false)}
+                    >
+                      <FileJson className="h-3.5 w-3.5" />
+                      JSON (.json)
+                    </a>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {doc.artifactType === STORY_BACKLOG_ARTIFACT_TYPE && status === "APPROVED" ? (
+              <Button variant="outline" size="sm" onClick={handleOpenJiraPreview}>
+                <ExternalLink className="h-3.5 w-3.5" />
+                Preview Jira Export
+              </Button>
+            ) : null}
             <Button variant="outline" size="sm" onClick={() => flash("PDF export isn't available yet.")}>
               <Download className="h-3.5 w-3.5" />
               Export PDF
@@ -163,6 +307,25 @@ export function ArtifactEditor({ document: doc, createdById }: { document: Artif
           </div>
         ) : null}
 
+        {showReviewForm ? (
+          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 p-2">
+            <Select value={reviewerId} onChange={(e) => setReviewerId(e.target.value)} className="flex-1">
+              {reviewers.length === 0 ? <option value="">No users available</option> : null}
+              {reviewers.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.name}
+                </option>
+              ))}
+            </Select>
+            <Button size="sm" onClick={handleSendForReview} disabled={busy || !reviewerId}>
+              Confirm
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setShowReviewForm(false)} disabled={busy}>
+              Cancel
+            </Button>
+          </div>
+        ) : null}
+
         {!editable ? (
           <p className="rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
             This document is read-only while its status is {status.replace(/_/g, " ").toLowerCase()}. Create a new
@@ -171,9 +334,10 @@ export function ArtifactEditor({ document: doc, createdById }: { document: Artif
         ) : null}
       </div>
 
-      {/* Three-panel layout */}
-      <div className="flex min-h-0 flex-1 gap-4">
-        <aside className="w-56 shrink-0 overflow-hidden rounded-lg border border-border">
+      {/* Three-panel layout — column below lg, row at lg+ (see the outer
+          container's comment above). */}
+      <div className="flex min-h-0 flex-1 flex-col gap-4 lg:flex-row">
+        <aside className="max-h-56 w-full shrink-0 overflow-hidden rounded-lg border border-border lg:h-auto lg:max-h-none lg:w-56">
           <SectionNav
             sections={sections}
             activeSectionId={activeSectionId}
@@ -204,11 +368,28 @@ export function ArtifactEditor({ document: doc, createdById }: { document: Artif
           </div>
         </main>
 
-        <aside className="w-72 shrink-0 space-y-4 overflow-y-auto">
-          <AgentActionsPanel activeSectionTitle={activeSection?.title ?? null} />
+        <aside className="w-full shrink-0 space-y-4 overflow-y-auto lg:w-72">
+          <AgentActionsPanel
+            activeSectionTitle={activeSection?.title ?? null}
+            projectId={doc.projectId}
+            workflowNodeId={doc.workflowNodeId}
+            agentKey={doc.agentKey}
+            freeformInputKeys={doc.freeformInputKeys}
+            triggeredByUserId={createdById}
+            onApplied={handleAgentApplied}
+          />
           <CommentsPanel comments={doc.comments} />
         </aside>
       </div>
+
+      {showJiraPreview ? (
+        <JiraExportPreviewPanel
+          preview={jiraPreview}
+          loading={jiraPreviewLoading}
+          error={jiraPreviewError}
+          onClose={() => setShowJiraPreview(false)}
+        />
+      ) : null}
 
       {banner ? (
         <div className="fixed bottom-6 right-6 z-50 rounded-md bg-foreground px-4 py-2 text-sm text-background shadow-lg">

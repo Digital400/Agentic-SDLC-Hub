@@ -16,17 +16,19 @@ export default async function ProjectWorkflowPage({ params }: { params: { projec
     throw err;
   }
 
-  const [apiNodes, apiEdges, apiArtifacts, apiReviews] = await Promise.all([
+  const [apiNodes, apiEdges, apiArtifacts, apiReviews, users] = await Promise.all([
     api.projects.workflowNodes(project.id),
     api.projects.workflowEdges(project.id),
     api.projects.artifacts(project.id),
     api.reviews.listAll(),
+    api.users.list(),
   ]);
 
   const nodes = apiNodes.map(toWorkflowNode);
   const edges = apiEdges.map(toWorkflowEdge);
   const documents = apiArtifacts.map(toDocumentArtifact);
   const reviews = apiReviews.filter((r) => r.project_id === project.id).map(toReviewItem);
+  const currentUserId = users[0]?.id ?? null;
 
   return (
     <div>
@@ -34,7 +36,14 @@ export default async function ProjectWorkflowPage({ params }: { params: { projec
       <Suspense fallback={null}>
         <WorkspaceTabs projectId={project.id} />
       </Suspense>
-      <WorkflowCanvas projectId={project.id} nodes={nodes} edges={edges} documents={documents} reviews={reviews} />
+      <WorkflowCanvas
+        projectId={project.id}
+        nodes={nodes}
+        edges={edges}
+        documents={documents}
+        reviews={reviews}
+        currentUserId={currentUserId}
+      />
     </div>
   );
 }

@@ -10,8 +10,10 @@ version is created by a human via `created_by_id`.
 """
 
 import uuid
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -24,6 +26,8 @@ from app.schemas.artifact import (
     ArtifactVersionRead,
 )
 from app.services.audit import record_audit_log
+from app.services.permissions import require_can_edit_stage
+from app.services.story_export import STORY_BACKLOG_ARTIFACT_TYPE, parse_story_backlog, render_csv, render_json, render_markdown
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
 
@@ -69,6 +73,7 @@ def create_artifact(payload: ArtifactCreate, db: Session = Depends(get_db)) -> A
         )
 
     creator = _get_user_or_400(db, payload.created_by_id, "created_by_id")
+    require_can_edit_stage(creator, node.node_key)
 
     artifact = Artifact(
         project=project,
@@ -120,6 +125,7 @@ def create_artifact_version(
     """
     artifact = _get_artifact_or_404(db, artifact_id)
     creator = _get_user_or_400(db, payload.created_by_id, "created_by_id")
+    require_can_edit_stage(creator, artifact.workflow_node.node_key)
 
     last_version_number = (
         db.query(ArtifactVersion.version_number)
@@ -195,6 +201,8 @@ def update_artifact_content(
     content a reviewer may already be looking at.
     """
     artifact = _get_artifact_or_404(db, artifact_id)
+    editor = _get_user_or_400(db, payload.edited_by_id, "edited_by_id")
+    require_can_edit_stage(editor, artifact.workflow_node.node_key)
 
     if artifact.status != ArtifactStatus.DRAFT:
         raise HTTPException(
@@ -256,3 +264,71 @@ def submit_artifact_for_review(artifact_id: uuid.UUID, db: Session = Depends(get
     db.commit()
     db.refresh(artifact)
     return ArtifactRead.from_orm_artifact(artifact)
+
+
+# 8. Export a Story Crafting artifact's stories -------------------------------------
+
+
+_EXPORT_CONTENT_TYPES = {
+    "markdown": "text/markdown; charset=utf-8",
+    "csv": "text/csv; charset=utf-8",
+    "json": "application/json",
+}
+_EXPORT_EXTENSIONS = {"markdown": "md", "csv": "csv", "json": "json"}
+
+
+@router.get("/{artifact_id}/export/stories")
+def export_story_backlog(
+    artifact_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    format: Literal["markdown", "csv", "json"] = Query(...),
+) -> Response:
+    """Exports an approved Story Crafting artifact's stories as a downloadable
+    file. Story Crafting only, and only once approved — matches the product
+    request ("From approved Story Crafting artifact"). No Jira (or other
+    tracker) integration — see app/services/story_export.py's docstring;
+    this only produces the file.
+    """
+    artifact = _get_artifact_or_404(db, artifact_id)
+
+    if artifact.artifact_type != STORY_BACKLOG_ARTIFACT_TYPE:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Story export is only available for '{STORY_BACKLOG_ARTIFACT_TYPE}' artifacts "
+            f"(this one is '{artifact.artifact_type}').",
+        )
+    if artifact.status != ArtifactStatus.APPROVED:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Story export requires an APPROVED artifact (current status: {artifact.status.value}).",
+        )
+    if artifact.current_version is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Artifact has no version to export.")
+
+    stories = parse_story_backlog(artifact.current_version.content_markdown)
+
+    if format == "markdown":
+        body = render_markdown(stories, artifact.title)
+    elif format == "csv":
+        body = render_csv(stories)
+    else:
+        body = render_json(stories, artifact.title)
+
+    record_audit_log(
+        db,
+        project_id=artifact.project_id,
+        action="artifact.stories_exported",
+        entity_type="Artifact",
+        entity_id=artifact.id,
+        extra_data={"format": format, "story_count": len(stories)},
+    )
+    db.commit()
+
+    safe_title = "".join(c if c.isalnum() or c in "-_ " else "_" for c in artifact.title).strip() or "story-backlog"
+    filename = f"{safe_title}.{_EXPORT_EXTENSIONS[format]}"
+
+    return Response(
+        content=body,
+        media_type=_EXPORT_CONTENT_TYPES[format],
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

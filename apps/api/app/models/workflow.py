@@ -37,9 +37,18 @@ class WorkflowNode(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     status: Mapped[WorkflowStatus] = mapped_column(
         Enum(WorkflowStatus, native_enum=False, length=30, validate_strings=True),
-        default=WorkflowStatus.NOT_STARTED,
+        default=WorkflowStatus.LOCKED,
         nullable=False,
     )
+    # Why this node is BLOCKED — set whenever GraphEngineService sets that
+    # status (a rejected review, or any other hard stop), cleared when the
+    # node moves off BLOCKED. Null the rest of the time.
+    blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Reason given for the most recent manual override (see
+    # GraphEngineService.manual_override) — the full history of who/when
+    # lives in AuditLog; this is just the latest one, visible on the node
+    # itself without joining out to the audit trail.
+    override_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Display order (matches the template's node order) and canvas position
     # for the React Flow rendering of this project's graph.

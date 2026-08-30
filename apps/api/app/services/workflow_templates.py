@@ -79,9 +79,10 @@ def _validate_template(template: dict[str, Any], path: Path) -> None:
 def generate_workflow_graph(db: Session, project: Project, template: dict[str, Any]) -> None:
     """Create WorkflowNode/WorkflowEdge rows for `project` from `template`.
 
-    The template's start node is created as IN_PROGRESS (work begins there
-    immediately); every other node starts NOT_STARTED. Call this once, right
-    after the project itself is created.
+    The template's start node is created READY (its prerequisites are
+    trivially satisfied — it has none); every other node starts LOCKED
+    until GraphEngineService.unlock_next_nodes opens it up. Call this once,
+    right after the project itself is created.
     """
     nodes_by_key: dict[str, WorkflowNode] = {}
 
@@ -97,7 +98,7 @@ def generate_workflow_graph(db: Session, project: Project, template: dict[str, A
             output_artifact_type=node_data["outputArtifactType"],
             requires_human_approval=node_data["requiresHumanApproval"],
             allowed_actions=node_data["allowedActions"],
-            status=WorkflowStatus.IN_PROGRESS if node_data["id"] == template["startNode"] else WorkflowStatus.NOT_STARTED,
+            status=WorkflowStatus.READY if node_data["id"] == template["startNode"] else WorkflowStatus.LOCKED,
             order_index=order_index,
             position_x=position.get("x", 0),
             position_y=position.get("y", 0),

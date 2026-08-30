@@ -3,7 +3,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
-from app.api.routes import agent_definitions, agent_runs, artifacts, health, projects, prompts, reviews, users
+from app.api.routes import (
+    agent_definitions,
+    agent_runs,
+    artifacts,
+    health,
+    integrations,
+    knowledge,
+    ops,
+    projects,
+    prompts,
+    reviews,
+    users,
+)
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -38,4 +50,7 @@ app.include_router(reviews.router)
 app.include_router(prompts.router)
 app.include_router(agent_runs.router)
 app.include_router(agent_definitions.router)
+app.include_router(knowledge.router)
+app.include_router(integrations.router)
+app.include_router(ops.router)
 app.include_router(users.router)

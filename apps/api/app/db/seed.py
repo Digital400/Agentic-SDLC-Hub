@@ -18,8 +18,7 @@ visible in the data:
   11 WorkflowEdges generated from the template
 - A completed pass through the first stage (Requirement Intake):
   an agent draft -> a human edit -> a submitted review -> an approval,
-  leaving that node COMPLETED and the next node (Problem Discovery)
-  IN_PROGRESS
+  leaving that node APPROVED and the next node (Problem Discovery) READY
 - Audit log entries for the key events along the way
 """
 
@@ -38,6 +37,13 @@ from app.models import (
     ArtifactStatus,
     ArtifactVersion,
     AuditLog,
+    Integration,
+    IntegrationProvider,
+    IntegrationStatus,
+    KnowledgeChunk,
+    KnowledgeSource,
+    KnowledgeSourceStatus,
+    KnowledgeSourceType,
     Project,
     ProjectMember,
     ProjectRole,
@@ -46,8 +52,12 @@ from app.models import (
     ReviewComment,
     ReviewStatus,
     User,
+    UserRole,
     WorkflowStatus,
 )
+from app.services.audit import record_audit_log
+from app.services.embeddings import embed_text
+from app.services.graph_engine import GraphEngineService
 from app.services.workflow_templates import generate_workflow_graph, load_workflow_template
 
 SAMPLE_PROJECT_NAME = "Customer Loyalty Rewards Platform"
@@ -57,17 +67,23 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _get_or_create_user(db: Session, *, email: str, full_name: str) -> User:
+def _get_or_create_user(db: Session, *, email: str, full_name: str, role: UserRole) -> User:
     """Users aren't owned by a project (a project's members reference them,
     but deleting a project doesn't delete its members' User rows), so
     re-running this script after a project was deleted and recreated must
-    reuse existing users by email rather than re-insert them.
+    reuse existing users by email rather than re-insert them. `role` (see
+    app/services/permissions.py) is applied even to an already-existing
+    row, so re-running this after the User.role migration backfilled
+    everyone to VIEWER still converges these three seed users to their
+    intended role.
     """
     user = db.query(User).filter(User.email == email).first()
     if user is None:
-        user = User(email=email, full_name=full_name)
+        user = User(email=email, full_name=full_name, role=role)
         db.add(user)
         db.flush()
+    elif user.role != role:
+        user.role = role
     return user
 
 
@@ -140,12 +156,22 @@ RICH_DEFAULT_PROMPTS: dict[str, dict] = {
             "implementation pass. Do not include design details already settled in the HLD — reference them "
             "instead."
         ),
-        "output_format": "Markdown list of stories, each with a title, description, and acceptance criteria as a checklist.",
+        # This exact field set/labeling is required — it's parsed
+        # programmatically by app/services/story_export.py for the Export
+        # Stories feature (Markdown/CSV/JSON), not just read as prose. Keep
+        # this in sync with packages/prompts/agents/story-crafting-agent.md.
+        "output_format": (
+            "Markdown: one `## Story: <title>` block per story, each with these exact bold-labeled fields, in "
+            "this order: **Epic:**, **Feature:**, **User Story:** (as 'As a <role>, I want <capability>, so that "
+            "<benefit>.'), **Priority:** (High/Medium/Low), **Dependencies:** (other story titles, or 'None.'), "
+            "**Acceptance Criteria:** (a checklist), **Definition of Done:** (a checklist)."
+        ),
         "validation_checklist": [
             "Every story has explicit acceptance criteria",
             "Stories are independently completable",
             "No story silently re-decides something already settled in the HLD",
             "Together, the stories cover the full HLD scope",
+            "Every story states Epic, Feature, User Story, Priority, Dependencies, and Definition of Done",
         ],
     },
 }
@@ -206,23 +232,246 @@ def _ensure_agent_definitions_and_prompts(db: Session, template: dict) -> dict[s
     return agent_definitions
 
 
+KNOWLEDGE_BASE_SAMPLES: list[dict] = [
+    {
+        "title": "Company Engineering Handbook",
+        "category": "Company Policy",
+        "source_type": KnowledgeSourceType.UPLOADED_DOCUMENT,
+        "status": KnowledgeSourceStatus.INDEXED,
+        "chunks": [
+            "All new services must expose a /health endpoint returning 200 when ready to serve traffic.",
+            "Database migrations are reviewed the same way as code — no direct schema changes in production.",
+        ],
+    },
+    {
+        "title": "Loyalty Program Design Guidelines",
+        "category": "Market Research",
+        "source_type": KnowledgeSourceType.EXTERNAL_LINK,
+        "file_url": "https://example.com/research/loyalty-programs-2026",
+        "status": KnowledgeSourceStatus.INDEXED,
+        "chunks": [
+            "Points-based loyalty programs see the strongest repeat purchase impact when redemption is "
+            "simple: customers should be able to see their points balance and redeem it in two taps or fewer.",
+            "Competitor loyalty programs in retail typically award 1 point per $1 spent and set redemption "
+            "thresholds low enough (around 100-200 points) that a customer's first reward feels achievable "
+            "within a few purchases, which drives early engagement.",
+            "Loyalty programs that expire points aggressively see higher churn; a rolling 12-month expiry "
+            "window is a common balance between encouraging return visits and not feeling punitive.",
+        ],
+    },
+    {
+        "title": "Requirement Intake Summary — Customer Loyalty Rewards Platform",
+        "category": "Project Artifact",
+        "source_type": KnowledgeSourceType.PROJECT_ARTIFACT,
+        "status": KnowledgeSourceStatus.FAILED,
+        "chunks": [],
+    },
+]
+
+
+def _ensure_knowledge_base_samples(db: Session, uploaded_by: User) -> int:
+    """Ensure a few sample KnowledgeSource rows exist, one per source_type,
+    so the Knowledge Base UI has something to show, and so agent runs
+    against the sample project have something real to retrieve (see
+    app/services/retrieval.py). Idempotent by title. Chunks are embedded
+    immediately with the same app/services/embeddings.py function real
+    ingestion would use — these aren't placeholder vectors.
+    """
+    created = 0
+    for sample in KNOWLEDGE_BASE_SAMPLES:
+        existing_source = db.query(KnowledgeSource).filter(KnowledgeSource.title == sample["title"]).first()
+        if existing_source is not None:
+            continue
+
+        source = KnowledgeSource(
+            title=sample["title"],
+            category=sample["category"],
+            source_type=sample["source_type"],
+            file_url=sample.get("file_url"),
+            status=sample["status"],
+            uploaded_by=uploaded_by,
+        )
+        db.add(source)
+        db.flush()
+
+        for i, content in enumerate(sample["chunks"]):
+            db.add(KnowledgeChunk(source=source, chunk_index=i, content=content, embedding=embed_text(content)))
+
+        created += 1
+    db.flush()
+    return created
+
+
+STORY_BACKLOG_DEMO_TITLE = f"Story Backlog — {SAMPLE_PROJECT_NAME}"
+
+# Demo content for the Export Stories feature (see
+# app/services/story_export.py) — hand-authored in the exact format the
+# story-crafting-agent's prompt requires, so the parser has something real
+# to work against without needing a live agent run first. Note this
+# artifact is seeded APPROVED independent of the sample project's actual
+# workflow progress (which stops at Problem Discovery) — it exists purely
+# to demonstrate/exercise the export feature, not to claim the project has
+# really reached Story Crafting.
+STORY_BACKLOG_DEMO_CONTENT = """# Story Backlog — Customer Loyalty Rewards Platform
+
+## Story: Display points balance on account home
+**Epic:** Loyalty Points Program
+**Feature:** Points Balance Display
+**User Story:** As a customer, I want to see my current points balance on my account home screen, so that I always know how many points I have without digging through menus.
+**Priority:** High
+**Dependencies:** None.
+**Acceptance Criteria:**
+- [ ] Points balance is visible on the account home screen within one screen load, no extra taps.
+- [ ] Balance updates within 5 minutes of a qualifying purchase.
+- [ ] Balance displays "0 points" rather than a blank/error state for a new customer.
+**Definition of Done:**
+- [ ] Code reviewed and merged.
+- [ ] Unit tests cover the zero-balance and stale-cache cases.
+- [ ] Verified against the points ledger service in staging.
+
+## Story: Redeem points for a discount at checkout
+**Epic:** Loyalty Points Program
+**Feature:** Points Redemption
+**User Story:** As a customer, I want to redeem my points for a discount at checkout, so that I get value from my accumulated points in two taps or fewer.
+**Priority:** High
+**Dependencies:** Display points balance on account home.
+**Acceptance Criteria:**
+- [ ] Customer can apply available points as a discount in at most two taps from the cart screen.
+- [ ] Partial redemption is supported when the order total is less than the full points value.
+- [ ] Points balance and order total both reflect the redemption before payment is confirmed.
+**Definition of Done:**
+- [ ] Code reviewed and merged.
+- [ ] Integration test covers full and partial redemption.
+- [ ] Reviewed by Payments for correct ledger reconciliation.
+
+## Story: Expire unused points after a rolling 12-month window
+**Epic:** Loyalty Points Program
+**Feature:** Points Expiry
+**User Story:** As the business, I want unused points to expire on a rolling 12-month window, so that the points liability doesn't grow unbounded while still giving customers a fair amount of time to redeem.
+**Priority:** Medium
+**Dependencies:** Display points balance on account home.
+**Acceptance Criteria:**
+- [ ] Points earned more than 12 months ago are automatically excluded from the redeemable balance.
+- [ ] Customer receives a notification 30 days before their oldest points expire.
+- [ ] Expired points are recorded in the ledger for audit purposes, not silently dropped.
+**Definition of Done:**
+- [ ] Code reviewed and merged.
+- [ ] Scheduled job tested against a seeded ledger spanning more than 12 months.
+- [ ] Notification copy approved by Marketing.
+"""
+
+
+def _ensure_story_export_demo(db: Session, project: Project, author: User) -> bool:
+    """Idempotent by title. Returns True if it created the demo artifact."""
+    existing_artifact = db.query(Artifact).filter(Artifact.title == STORY_BACKLOG_DEMO_TITLE).first()
+    if existing_artifact is not None:
+        return False
+
+    story_crafting_node = next((n for n in project.workflow_nodes if n.node_key == "story_crafting"), None)
+    if story_crafting_node is None:
+        return False
+
+    artifact = Artifact(
+        project=project,
+        workflow_node=story_crafting_node,
+        artifact_type=story_crafting_node.output_artifact_type,
+        title=STORY_BACKLOG_DEMO_TITLE,
+        status=ArtifactStatus.APPROVED,
+        created_by=author,
+    )
+    db.add(artifact)
+    db.flush()
+
+    version = ArtifactVersion(
+        artifact=artifact,
+        version_number=1,
+        content_markdown=STORY_BACKLOG_DEMO_CONTENT,
+        created_by=author,
+        change_summary="Demo backlog for the Export Stories feature.",
+    )
+    db.add(version)
+    db.flush()
+    artifact.current_version = version
+
+    record_audit_log(
+        db,
+        project_id=project.id,
+        actor_user_id=author.id,
+        action="artifact.created",
+        entity_type="Artifact",
+        entity_id=artifact.id,
+        extra_data={"workflow_node": story_crafting_node.node_key, "artifact_type": artifact.artifact_type, "seeded_demo": True},
+    )
+    db.flush()
+    return True
+
+
+INTEGRATION_PLACEHOLDERS: list[dict] = [
+    {"integration_name": "Jira", "provider": IntegrationProvider.JIRA},
+    {"integration_name": "Confluence", "provider": IntegrationProvider.CONFLUENCE},
+    {"integration_name": "GitHub", "provider": IntegrationProvider.GITHUB},
+    {"integration_name": "Slack", "provider": IntegrationProvider.SLACK},
+    {"integration_name": "Azure DevOps", "provider": IntegrationProvider.AZURE_DEVOPS},
+]
+
+
+def _ensure_integration_placeholders(db: Session) -> int:
+    """Ensures one placeholder Integration row per planned provider exists
+    (see docs/architecture.md's MCP integrations section) — idempotent by
+    provider. Every row is created NOT_CONNECTED with no config; nothing
+    here ever actually connects (see app/models/integration.py)."""
+    created = 0
+    for placeholder in INTEGRATION_PLACEHOLDERS:
+        existing = db.query(Integration).filter(Integration.provider == placeholder["provider"]).first()
+        if existing is not None:
+            continue
+        db.add(
+            Integration(
+                integration_name=placeholder["integration_name"],
+                provider=placeholder["provider"],
+                status=IntegrationStatus.NOT_CONNECTED,
+            )
+        )
+        created += 1
+    db.flush()
+    return created
+
+
 def seed(db: Session) -> None:
     template = load_workflow_template()
     agent_definitions = _ensure_agent_definitions_and_prompts(db, template)
 
+    # Not project-owned, so — like agent definitions/prompts above — this
+    # runs unconditionally rather than being gated by the sample project
+    # existence check below.
+    kb_owner = _get_or_create_user(db, email="sampathisuru516@gmail.com", full_name="Suru Sampathi", role=UserRole.ADMIN)
+    knowledge_sources_created = _ensure_knowledge_base_samples(db, kb_owner)
+    integrations_created = _ensure_integration_placeholders(db)
+
+    # Also not project-owned — ensured unconditionally so re-running this
+    # script converges these three seed users' roles even when the sample
+    # project already exists and the rest of this function is skipped below
+    # (e.g. after the User.role migration backfilled everyone to VIEWER).
+    contributor = _get_or_create_user(db, email="priya.dev@agentic-sdlc-hub.local", full_name="Priya Dev", role=UserRole.BA)
+    approver = _get_or_create_user(
+        db, email="alex.reviewer@agentic-sdlc-hub.local", full_name="Alex Reviewer", role=UserRole.PRODUCT_OWNER
+    )
+
     existing = db.query(Project).filter(Project.name == SAMPLE_PROJECT_NAME).first()
     if existing is not None:
+        story_demo_created = _ensure_story_export_demo(db, existing, kb_owner)
         db.commit()
         print(f"Sample project '{SAMPLE_PROJECT_NAME}' already exists (id={existing.id}); skipping project seed.")
         print(f"Agent definitions ensured: {len(agent_definitions)}.")
+        print(f"Knowledge sources created: {knowledge_sources_created}.")
+        print(f"Story export demo artifact created: {story_demo_created}.")
+        print(f"Integration placeholders created: {integrations_created}.")
         return
 
     now = _now()
 
     # --- Users -----------------------------------------------------------
-    owner = _get_or_create_user(db, email="sampathisuru516@gmail.com", full_name="Suru Sampathi")
-    contributor = _get_or_create_user(db, email="priya.dev@agentic-sdlc-hub.local", full_name="Priya Dev")
-    approver = _get_or_create_user(db, email="alex.reviewer@agentic-sdlc-hub.local", full_name="Alex Reviewer")
+    owner = kb_owner
 
     # --- Project + membership + generated workflow graph ------------------
     project = Project(
@@ -398,8 +647,15 @@ def seed(db: Session) -> None:
     )
 
     artifact.status = ArtifactStatus.APPROVED
-    intake_node.status = WorkflowStatus.COMPLETED
-    problem_discovery_node.status = WorkflowStatus.IN_PROGRESS
+    # Real engine, not hand-rolled status assignments — see
+    # app/services/graph_engine.py. mark_approved() is what a real
+    # POST /reviews/{id}/approve call does; unlock_next_nodes() is what
+    # actually decides problem_discovery_node should become READY (rather
+    # than assuming it here), so this stays correct if the template ever
+    # changes.
+    graph_engine = GraphEngineService(db)
+    graph_engine.mark_approved(intake_node)
+    unlocked = graph_engine.unlock_next_nodes(intake_node)
     project.current_stage = problem_discovery_node.node_key
 
     log(
@@ -417,25 +673,29 @@ def seed(db: Session) -> None:
         action="workflow_node.status_changed",
         entity_type="WorkflowNode",
         entity_id=intake_node.id,
-        extra_data={"from": "WAITING_FOR_REVIEW", "to": "COMPLETED"},
+        extra_data={"from": "WAITING_FOR_REVIEW", "to": WorkflowStatus.APPROVED.value},
         created_at=decided_at,
     )
-    log(
-        project=project,
-        actor_user=approver,
-        action="workflow_node.status_changed",
-        entity_type="WorkflowNode",
-        entity_id=problem_discovery_node.id,
-        extra_data={"from": "NOT_STARTED", "to": "IN_PROGRESS"},
-        created_at=decided_at,
-    )
+    for node in unlocked:
+        log(
+            project=project,
+            actor_user=approver,
+            action="workflow_node.unlocked",
+            entity_type="WorkflowNode",
+            entity_id=node.id,
+            extra_data={"from": "LOCKED", "to": WorkflowStatus.READY.value},
+            created_at=decided_at,
+        )
 
+    story_demo_created = _ensure_story_export_demo(db, project, contributor)
     db.commit()
 
     print(f"Seeded sample project '{SAMPLE_PROJECT_NAME}' (id={project.id}).")
     print(f"  Users: owner={owner.email}, contributor={contributor.email}, approver={approver.email}")
     print(f"  Workflow nodes: {len(project.workflow_nodes)}, edges: {len(project.workflow_edges)}")
     print(f"  {intake_node.name}: {intake_node.status.value} -> {problem_discovery_node.name}: {problem_discovery_node.status.value}")
+    print(f"  Knowledge sources created: {knowledge_sources_created}.")
+    print(f"  Story export demo artifact created: {story_demo_created}.")
 
 
 def main() -> None:

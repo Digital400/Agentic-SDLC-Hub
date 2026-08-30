@@ -1,6 +1,7 @@
 """Agent Run endpoints — running an agent against a workflow node.
 
-Covers: start a run, get one by id, and save a completed run's output into
+Covers: start a run, get one by id, view a run's loop execution history
+(see app/services/loop_engine.py), and save a completed run's output into
 an artifact draft. "List agent runs by project" lives in
 app/api/routes/projects.py, next to that resource's other sub-lists.
 
@@ -13,9 +14,10 @@ itself and irreversibly overwrite a shared artifact.
 
 Guardrails enforced here, not just documented: a run is blocked (recorded
 as a FAILED run, not a bare HTTP rejection — it's still a real, auditable
-attempt) whenever a required upstream artifact is missing or not yet
-APPROVED, so an agent can never be used to skip a stage. See
-app/services/workflow_progress.py's `resolve_required_inputs`.
+attempt) whenever the workflow node isn't in a runnable state, or a
+required upstream artifact is missing or not yet APPROVED, so an agent can
+never be used to skip a stage. See
+app/services/graph_engine.py's GraphEngineService.validate_can_run.
 """
 
 import uuid
@@ -39,20 +41,24 @@ from app.models import (
     WorkflowNode,
     WorkflowStatus,
 )
-from app.schemas.agent_run import AgentRunCreate, AgentRunRead, SaveAgentOutputResponse
+from app.schemas.agent_run import AgentRunCreate, AgentRunLoopEventRead, AgentRunRead, SaveAgentOutputResponse
 from app.services.ai_generation import CLARIFICATION_MARKER, AIGenerationError, generate
 from app.services.audit import record_audit_log
-from app.services.workflow_progress import resolve_required_inputs
+from app.services.graph_engine import GraphEngineService
+from app.services.loop_engine import LoopEngineService
+from app.services.permissions import require_can_edit_stage
+from app.services.retrieval import retrieve_relevant_chunks
 
 router = APIRouter(prefix="/agent-runs", tags=["agent-runs"])
 
 # The node status a run's action leaves the workflow node in once its
 # output is saved: draft/improve mean the agent is still producing/revising
-# content (node stays IN_PROGRESS); validate means the agent has confirmed
-# the content meets its own bar and it's ready for a human (WAITING_FOR_REVIEW).
+# content (node goes back to READY, ready for further work); validate means
+# the agent has confirmed the content meets its own bar and it's ready for
+# a human (WAITING_FOR_REVIEW).
 NODE_STATUS_BY_ACTION: dict[AgentPromptRole, WorkflowStatus] = {
-    AgentPromptRole.DRAFT: WorkflowStatus.IN_PROGRESS,
-    AgentPromptRole.IMPROVE: WorkflowStatus.IN_PROGRESS,
+    AgentPromptRole.DRAFT: WorkflowStatus.READY,
+    AgentPromptRole.IMPROVE: WorkflowStatus.READY,
     AgentPromptRole.VALIDATE: WorkflowStatus.WAITING_FOR_REVIEW,
 }
 ARTIFACT_STATUS_BY_ACTION: dict[AgentPromptRole, ArtifactStatus] = {
@@ -92,6 +98,7 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
     triggered_by = db.get(User, payload.triggered_by_user_id)
     if triggered_by is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+    require_can_edit_stage(triggered_by, node.node_key)
 
     for artifact_id in payload.input_artifact_ids:
         if db.get(Artifact, artifact_id) is None:
@@ -148,34 +155,112 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
         # this agent has no active prompt to run with.
         return _fail(f"No active {payload.action.value} prompt configured for agent '{agent.agent_key}'.")
 
-    # The core "don't skip stages" guardrail: every required input must
+    # The graph-rule gate (see app/services/graph_engine.py): the node's own
+    # status must allow running at all, AND every required input must
     # already have an APPROVED artifact (or be present in input_context for
-    # the freeform, no-prior-artifact case) before this stage may run at all.
-    required_inputs = resolve_required_inputs(db, project=project, node=node, freeform_context=payload.input_context)
-    if required_inputs.missing_reasons:
-        return _fail("Cannot run — " + "; ".join(required_inputs.missing_reasons) + ".")
+    # the freeform, no-prior-artifact case). Node status is left untouched
+    # on either failure — nothing actually ran.
+    graph_engine = GraphEngineService(db)
+    validation = graph_engine.validate_can_run(project=project, node=node, freeform_context=payload.input_context)
+    if not validation.can_run:
+        return _fail("Cannot run — " + "; ".join(validation.reasons) + ".")
 
+    # Retrieval-augmented context: pull whatever the Knowledge Base has that's
+    # relevant to this project/stage/input/upstream-artifacts combination
+    # (see app/services/retrieval.py). An empty result is a normal outcome,
+    # not a failure — the run proceeds on project context alone.
+    retrieved_chunks = retrieve_relevant_chunks(
+        db,
+        project=project,
+        node=node,
+        freeform_context=payload.input_context,
+        approved_inputs=validation.approved_artifact_content,
+    )
+    run.retrieved_sources = [
+        {
+            "chunk_id": c.chunk_id,
+            "source_id": c.source_id,
+            "source_title": c.source_title,
+            "chunk_index": c.chunk_index,
+            "snippet": c.content[:300],
+            "similarity": c.similarity,
+        }
+        for c in retrieved_chunks
+    ]
+
+    # Only now, having passed every pre-flight check, does the node itself
+    # start reflecting that a run is actually in progress.
+    graph_engine.mark_running(node)
+
+    # DRAFT runs go through the Loop Engine's self-improvement cycle (see
+    # app/services/loop_engine.py) — generate, validate, improve on
+    # critical issues, repeat until quality is good enough or iterations
+    # run out. VALIDATE/IMPROVE runs are already a single well-defined
+    # human-triggered agent step, so they keep the direct one-shot call.
     try:
-        result = generate(
-            project=project,
-            node=node,
-            action=payload.action,
-            active_prompt=active_prompt,
-            approved_inputs=required_inputs.approved_artifact_content,
-            freeform_context=payload.input_context,
-        )
+        if payload.action == AgentPromptRole.DRAFT:
+            loop_result = LoopEngineService(db).run_loop(
+                run=run,
+                project=project,
+                node=node,
+                action=payload.action,
+                active_prompt=active_prompt,
+                approved_inputs=validation.approved_artifact_content,
+                freeform_context=payload.input_context,
+                retrieved_chunks=retrieved_chunks,
+            )
+            result_content = loop_result.content_markdown
+            result_needs_clarification = loop_result.needs_clarification
+            result_used_mock = loop_result.used_mock
+            token_usage = {
+                "prompt_tokens": loop_result.prompt_tokens,
+                "completion_tokens": loop_result.completion_tokens,
+                "total_tokens": loop_result.total_tokens,
+            }
+            cost = loop_result.cost
+            extra_audit_data = {
+                "loop_status": loop_result.loop_status.value,
+                "loop_iterations": loop_result.iterations_run,
+                "loop_quality_score": loop_result.quality_score,
+            }
+        else:
+            result = generate(
+                project=project,
+                node=node,
+                action=payload.action,
+                active_prompt=active_prompt,
+                approved_inputs=validation.approved_artifact_content,
+                freeform_context=payload.input_context,
+                retrieved_chunks=retrieved_chunks,
+            )
+            result_content = result.content_markdown
+            result_needs_clarification = result.needs_clarification
+            result_used_mock = result.used_mock
+            token_usage = {
+                "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
+                "total_tokens": result.total_tokens,
+            }
+            cost = result.cost
+            extra_audit_data = {}
     except AIGenerationError as exc:
+        graph_engine.mark_failed(node)
         return _fail(f"AI generation failed: {exc}")
 
-    run.output_text = result.content_markdown
-    run.token_usage = {
-        "prompt_tokens": result.prompt_tokens,
-        "completion_tokens": result.completion_tokens,
-        "total_tokens": result.total_tokens,
-    }
-    run.cost = result.cost
+    run.output_text = result_content
+    run.token_usage = token_usage
+    run.cost = cost
     run.status = AgentRunStatus.COMPLETED
     run.completed_at = datetime.now(timezone.utc)
+
+    # The run itself is done, but its output isn't saved to an artifact yet
+    # (see module docstring) — the node just reflects that a human/agent
+    # now has something to act on: either answer a clarification, or look
+    # at the draft and decide whether to save it.
+    if result_needs_clarification:
+        graph_engine.mark_waiting_for_input(node)
+    else:
+        graph_engine.mark_ready(node)
 
     record_audit_log(
         db, project_id=project.id, action="agent_run.completed", entity_type="AgentRun", entity_id=run.id,
@@ -183,8 +268,10 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
             "agent_key": agent.agent_key,
             "prompt_version": active_prompt.version,
             "token_usage": run.token_usage,
-            "used_mock": result.used_mock,
-            "needs_clarification": result.needs_clarification,
+            "used_mock": result_used_mock,
+            "needs_clarification": result_needs_clarification,
+            "retrieved_source_count": len(retrieved_chunks),
+            **extra_audit_data,
         },
     )
 
@@ -199,6 +286,20 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
 @router.get("/{run_id}", response_model=AgentRunRead)
 def get_agent_run(run_id: uuid.UUID, db: Session = Depends(get_db)) -> AgentRunRead:
     return AgentRunRead.from_orm_run(_get_run_or_404(db, run_id))
+
+
+# 3. View loop execution history --------------------------------------------------
+
+
+@router.get("/{run_id}/loop-events", response_model=list[AgentRunLoopEventRead])
+def list_agent_run_loop_events(run_id: uuid.UUID, db: Session = Depends(get_db)) -> list[AgentRunLoopEventRead]:
+    """The full PLAN/RETRIEVE_CONTEXT/GENERATE_DRAFT/VALIDATE/IMPROVE/
+    READY_FOR_REVIEW trail behind a run's loop_* summary fields (see
+    AgentRunRead) — empty for a run whose action wasn't DRAFT, since only
+    DRAFT runs go through the Loop Engine. Ordered by iteration, then by
+    creation time within an iteration."""
+    run = _get_run_or_404(db, run_id)
+    return [AgentRunLoopEventRead.model_validate(e) for e in run.loop_events]
 
 
 # 4. Save agent output to artifact draft --------------------------------------------
@@ -265,7 +366,7 @@ def save_agent_output_to_artifact(run_id: uuid.UUID, db: Session = Depends(get_d
     # information, so both statuses stay at their in-progress defaults.
     needs_clarification = run.output_text.startswith(CLARIFICATION_MARKER)
     artifact.status = ArtifactStatus.DRAFT if needs_clarification else ARTIFACT_STATUS_BY_ACTION[run.action]
-    node.status = WorkflowStatus.IN_PROGRESS if needs_clarification else NODE_STATUS_BY_ACTION[run.action]
+    node.status = WorkflowStatus.WAITING_FOR_INPUT if needs_clarification else NODE_STATUS_BY_ACTION[run.action]
     run.output_artifact_id = artifact.id
 
     record_audit_log(

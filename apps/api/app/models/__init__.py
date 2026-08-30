@@ -14,9 +14,16 @@ from app.models.enums import (
     AgentPromptRole,
     AgentRunStatus,
     ArtifactStatus,
+    IntegrationProvider,
+    IntegrationStatus,
+    KnowledgeSourceStatus,
+    KnowledgeSourceType,
+    LoopStatus,
+    LoopStepType,
     ProjectRole,
     ProjectStatus,
     ReviewStatus,
+    UserRole,
     WorkflowAction,
     WorkflowStatus,
 )
@@ -25,7 +32,9 @@ from app.models.project import Project, ProjectMember
 from app.models.workflow import WorkflowEdge, WorkflowNode
 from app.models.artifact import Artifact, ArtifactVersion
 from app.models.review import Review, ReviewComment
-from app.models.agent import AgentDefinition, AgentPrompt, AgentRun
+from app.models.agent import AgentDefinition, AgentPrompt, AgentRun, AgentRunLoopEvent
+from app.models.knowledge import KnowledgeChunk, KnowledgeSource
+from app.models.integration import Integration
 from app.models.audit import AuditLog
 
 __all__ = [
@@ -38,6 +47,13 @@ __all__ = [
     "ArtifactStatus",
     "AgentPromptRole",
     "AgentRunStatus",
+    "LoopStatus",
+    "LoopStepType",
+    "KnowledgeSourceType",
+    "KnowledgeSourceStatus",
+    "IntegrationProvider",
+    "IntegrationStatus",
+    "UserRole",
     "User",
     "Project",
     "ProjectMember",
@@ -50,5 +66,9 @@ __all__ = [
     "AgentDefinition",
     "AgentPrompt",
     "AgentRun",
+    "AgentRunLoopEvent",
+    "KnowledgeSource",
+    "KnowledgeChunk",
+    "Integration",
     "AuditLog",
 ]

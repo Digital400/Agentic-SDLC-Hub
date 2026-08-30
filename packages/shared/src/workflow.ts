@@ -15,26 +15,30 @@
  * is running through it.
  */
 export type WorkflowStatus =
-  | "NOT_STARTED"
-  | "IN_PROGRESS"
+  | "LOCKED"
+  | "READY"
+  | "RUNNING"
+  | "WAITING_FOR_INPUT"
   | "WAITING_FOR_REVIEW"
   | "APPROVED"
   | "NEEDS_CHANGES"
-  | "REJECTED"
   | "BLOCKED"
-  | "COMPLETED"
-  | "FAILED";
+  | "FAILED"
+  | "SKIPPED"
+  | "COMPLETED";
 
 export const WORKFLOW_STATUSES: readonly WorkflowStatus[] = [
-  "NOT_STARTED",
-  "IN_PROGRESS",
+  "LOCKED",
+  "READY",
+  "RUNNING",
+  "WAITING_FOR_INPUT",
   "WAITING_FOR_REVIEW",
   "APPROVED",
   "NEEDS_CHANGES",
-  "REJECTED",
   "BLOCKED",
-  "COMPLETED",
   "FAILED",
+  "SKIPPED",
+  "COMPLETED",
 ] as const;
 
 /**

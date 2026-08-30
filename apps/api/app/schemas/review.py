@@ -4,6 +4,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import ReviewStatus
+from app.schemas.validators import NonBlankStr
 
 
 class ReviewCreate(BaseModel):
@@ -66,16 +67,16 @@ class ReviewRead(BaseModel):
 
 
 class ReviewApproveRequest(BaseModel):
-    comment: str | None = Field(default=None, description="Optional — approving without comment is fine.")
+    comment: NonBlankStr | None = Field(default=None, description="Optional — approving without comment is fine.")
 
 
 class ReviewDecisionWithReasonRequest(BaseModel):
     """Body for request-changes / reject — a reason is required for both:
     a reviewer can't ask for changes or reject with no feedback."""
 
-    comment: str = Field(..., min_length=1)
+    comment: NonBlankStr
 
 
 class ReviewCommentCreate(BaseModel):
     author_id: uuid.UUID = Field(..., description="Existing user id.")
-    body: str = Field(..., min_length=1)
+    body: NonBlankStr

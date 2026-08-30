@@ -6,8 +6,8 @@ from datetime import datetime
 from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from app.models.enums import AgentPromptRole, AgentRunStatus
+from app.models.base import Base, CreatedAtMixin, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.enums import AgentPromptRole, AgentRunStatus, LoopStatus, LoopStepType
 
 
 class AgentDefinition(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -125,8 +125,41 @@ class AgentRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # call will report; the numbers themselves are not meaningful yet.
     token_usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Knowledge Base chunks retrieved for this run's context (see
+    # app/services/retrieval.py), captured at run time so the Agent Run
+    # Detail UI can show what was cited without re-running retrieval.
+    # Each entry: {source_id, source_title, chunk_id, chunk_index, snippet,
+    # similarity}. Empty list (not null) means retrieval ran and found
+    # nothing above the relevance threshold — the run still proceeded on
+    # project context alone, per the "don't force irrelevant knowledge"
+    # rule; null means retrieval didn't run at all (e.g. an older run).
+    retrieved_sources: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # --- Loop Engine state (see app/services/loop_engine.py) ---------------
+    #
+    # Only DRAFT-action runs currently go through the loop (see
+    # app/api/routes/agent_runs.py) — a VALIDATE or IMPROVE run is already a
+    # single well-defined human-triggered step, so these stay at their
+    # NOT_STARTED/0/None defaults for those runs. The full per-step trail
+    # lives in `loop_events`; these columns are just the latest snapshot, so
+    # the run's own status is visible without joining out to it.
+    loop_status: Mapped[LoopStatus] = mapped_column(
+        Enum(LoopStatus, native_enum=False, length=30, validate_strings=True),
+        default=LoopStatus.NOT_STARTED,
+        nullable=False,
+    )
+    loop_current_step: Mapped[LoopStepType | None] = mapped_column(
+        Enum(LoopStepType, native_enum=False, length=20, validate_strings=True), nullable=True
+    )
+    loop_iteration: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    loop_max_iterations: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    loop_quality_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The latest VALIDATE step's score/issues — i.e. the ones that produced
+    # loop_status's final decision. Each entry: {severity, message}.
+    loop_quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    loop_validation_issues: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
 
     project: Mapped["Project"] = relationship("Project")
     workflow_node: Mapped["WorkflowNode"] = relationship("WorkflowNode", back_populates="agent_runs")
@@ -134,3 +167,40 @@ class AgentRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     agent_prompt: Mapped["AgentPrompt | None"] = relationship("AgentPrompt", back_populates="runs")
     triggered_by_user: Mapped["User | None"] = relationship("User")
     output_artifact: Mapped["Artifact | None"] = relationship("Artifact", foreign_keys=[output_artifact_id])
+    loop_events: Mapped[list["AgentRunLoopEvent"]] = relationship(
+        "AgentRunLoopEvent",
+        back_populates="agent_run",
+        cascade="all, delete-orphan",
+        order_by="AgentRunLoopEvent.created_at",
+    )
+
+
+class AgentRunLoopEvent(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
+    """One step of one iteration of an agent run's loop — the full
+    execution history behind AgentRun's loop_* summary columns, and what
+    "improvement history" means for this run (its GENERATE_DRAFT/IMPROVE
+    rows in iteration order). Append-only: nothing ever updates an existing
+    row, matching AuditLog's own immutability pattern.
+    """
+
+    __tablename__ = "agent_run_loop_events"
+
+    agent_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False)
+    # 0 for the once-per-run PLAN/RETRIEVE_CONTEXT steps; 1-based for the
+    # repeating GENERATE_DRAFT/IMPROVE/VALIDATE cycle; the final
+    # READY_FOR_REVIEW row carries whichever iteration the loop stopped on.
+    iteration: Mapped[int] = mapped_column(Integer, nullable=False)
+    step: Mapped[LoopStepType] = mapped_column(
+        Enum(LoopStepType, native_enum=False, length=20, validate_strings=True), nullable=False
+    )
+    # Set only on VALIDATE (and echoed onto the final READY_FOR_REVIEW row).
+    quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    validation_issues: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    # The generated content at this step — set on GENERATE_DRAFT/IMPROVE
+    # only, so "improvement history" (this run's content over time) can be
+    # reconstructed without re-deriving it from token counts.
+    content_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Freeform: the plan text, a retrieval summary, why the loop stopped, ...
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    agent_run: Mapped["AgentRun"] = relationship("AgentRun", back_populates="loop_events")

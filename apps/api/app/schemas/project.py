@@ -4,11 +4,12 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import ProjectStatus
+from app.schemas.validators import NonBlankStr
 
 
 class ProjectCreate(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255, description="Required.")
-    business_owner: str = Field(..., min_length=1, max_length=255, description="Required.")
+    name: NonBlankStr = Field(..., max_length=255, description="Required; whitespace-only is rejected.")
+    business_owner: NonBlankStr = Field(..., max_length=255, description="Required; whitespace-only is rejected.")
     description: str | None = None
     created_by_id: uuid.UUID = Field(..., description="Existing user id; becomes the project's OWNER member.")
     # Optional override of which workflow template file (in WORKFLOWS_DIR)
@@ -18,17 +19,21 @@ class ProjectCreate(BaseModel):
 
 
 class ProjectUpdate(BaseModel):
-    """All fields optional — only the ones provided are changed.
+    """All fields optional (except the actor) — only the ones provided are
+    changed.
 
     `current_stage`, if provided, must match the `node_key` of one of this
     project's own workflow nodes (validated in the route, since it depends
     on the project's generated graph, not just the request body).
     """
 
-    name: str | None = Field(default=None, min_length=1, max_length=255)
-    business_owner: str | None = Field(default=None, min_length=1, max_length=255)
+    name: NonBlankStr | None = Field(default=None, max_length=255)
+    business_owner: NonBlankStr | None = Field(default=None, max_length=255)
     description: str | None = None
     current_stage: str | None = None
+    updated_by_id: uuid.UUID = Field(
+        ..., description="Existing user id — checked against app/services/permissions.py's project-update rule."
+    )
 
 
 class ProjectRead(BaseModel):

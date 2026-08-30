@@ -1,9 +1,18 @@
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
-pydantic==2.8.2
+# Bumped from 2.8.2 — google-genai (below) requires a newer pydantic-core;
+# verified the app still boots and serves real data on 2.13.5 (fastapi
+# 0.111's own pydantic v2 support isn't version-pinned tightly).
+pydantic==2.13.5
 pydantic-settings==2.3.4
 sqlalchemy==2.0.31
 alembic==1.13.2
 anthropic==1.2.0
+# Optional real-AI provider, used when ANTHROPIC_API_KEY isn't set but
+# GEMINI_API_KEY is — see app/services/ai_generation.py.
+google-genai==2.20.0
 psycopg2-binary==2.9.10
 python-dotenv==1.0.1
+pgvector==0.5.0
+# Test-only dependency — apps/api/tests/.
+pytest==8.3.3

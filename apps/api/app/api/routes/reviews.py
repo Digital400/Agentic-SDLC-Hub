@@ -31,7 +31,8 @@ from app.schemas.review import (
     ReviewRead,
 )
 from app.services.audit import record_audit_log
-from app.services.workflow_progress import unlock_next_nodes
+from app.services.graph_engine import GraphEngineService
+from app.services.permissions import require_can_approve_stage
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 
@@ -187,6 +188,7 @@ def approve_review(review_id: uuid.UUID, payload: ReviewApproveRequest, db: Sess
     review = _get_review_or_404(db, review_id)
     artifact = _get_reviewable_artifact_or_409(db, review)
     node = review.workflow_node
+    require_can_approve_stage(review.reviewer, node.node_key)
 
     _record_decision(
         db, review=review, artifact=artifact, decision_status=ReviewStatus.APPROVED,
@@ -194,7 +196,8 @@ def approve_review(review_id: uuid.UUID, payload: ReviewApproveRequest, db: Sess
     )
 
     artifact.status = ArtifactStatus.APPROVED
-    node.status = WorkflowStatus.APPROVED
+    graph_engine = GraphEngineService(db)
+    graph_engine.mark_approved(node)
     record_audit_log(
         db,
         project_id=artifact.project_id,
@@ -205,7 +208,7 @@ def approve_review(review_id: uuid.UUID, payload: ReviewApproveRequest, db: Sess
         extra_data={"node_key": node.node_key, "to": WorkflowStatus.APPROVED.value},
     )
 
-    unlocked = unlock_next_nodes(db, node)
+    unlocked = graph_engine.unlock_next_nodes(node)
     for next_node in unlocked:
         record_audit_log(
             db,
@@ -232,6 +235,7 @@ def request_changes(
     review = _get_review_or_404(db, review_id)
     artifact = _get_reviewable_artifact_or_409(db, review)
     node = review.workflow_node
+    require_can_approve_stage(review.reviewer, node.node_key)
 
     _record_decision(
         db, review=review, artifact=artifact, decision_status=ReviewStatus.NEEDS_CHANGES,
@@ -239,7 +243,7 @@ def request_changes(
     )
 
     artifact.status = ArtifactStatus.NEEDS_CHANGES
-    node.status = WorkflowStatus.NEEDS_CHANGES
+    GraphEngineService(db).mark_needs_changes(node)
     record_audit_log(
         db,
         project_id=artifact.project_id,
@@ -265,6 +269,7 @@ def reject_review(
     review = _get_review_or_404(db, review_id)
     artifact = _get_reviewable_artifact_or_409(db, review)
     node = review.workflow_node
+    require_can_approve_stage(review.reviewer, node.node_key)
 
     _record_decision(
         db, review=review, artifact=artifact, decision_status=ReviewStatus.REJECTED,
@@ -272,15 +277,13 @@ def reject_review(
     )
 
     artifact.status = ArtifactStatus.REJECTED
-    node.status = WorkflowStatus.REJECTED
-    record_audit_log(
-        db,
-        project_id=artifact.project_id,
-        actor_user_id=review.reviewer_id,
-        action="workflow_node.status_changed",
-        entity_type="WorkflowNode",
-        entity_id=node.id,
-        extra_data={"node_key": node.node_key, "to": WorkflowStatus.REJECTED.value},
+    # A rejected review is a hard stop, not just "needs rework" — see
+    # app/services/graph_engine.py's WorkflowStatus docstring on why
+    # REJECTED (the old node status) became BLOCKED rather than staying its
+    # own status: it now needs a deliberate manual_override to move past,
+    # the same as any other blocked node, rather than a plain resubmit.
+    GraphEngineService(db).mark_blocked(
+        node, reason=f"Review rejected: {payload.comment}", actor_user_id=review.reviewer_id
     )
 
     db.commit()

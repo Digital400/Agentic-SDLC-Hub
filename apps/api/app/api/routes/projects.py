@@ -14,6 +14,7 @@ from app.core.database import get_db
 from app.models import (
     AgentRun,
     Artifact,
+    ArtifactStatus,
     Project,
     ProjectMember,
     ProjectRole,
@@ -24,9 +25,14 @@ from app.models import (
 )
 from app.schemas.agent_run import AgentRunRead
 from app.schemas.artifact import ArtifactRead
+from app.schemas.jira_export import JiraExportPreviewRead
 from app.schemas.project import ProjectCreate, ProjectListResponse, ProjectRead, ProjectUpdate
 from app.schemas.workflow import WorkflowEdgeRead, WorkflowNodeRead, WorkflowNodeStatusUpdate
 from app.services.audit import record_audit_log
+from app.services.graph_engine import GraphEngineService
+from app.services.jira_export import PUSH_TO_JIRA_ENABLED, build_jira_export_preview
+from app.services.permissions import require_can_override_node, require_can_update_project
+from app.services.story_export import STORY_BACKLOG_ARTIFACT_TYPE, parse_story_backlog
 from app.services.workflow_templates import WorkflowTemplateError, generate_workflow_graph, load_workflow_template
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -124,6 +130,11 @@ def get_project(project_id: uuid.UUID, db: Session = Depends(get_db)) -> Project
 @router.patch("/{project_id}", response_model=ProjectRead)
 def update_project(project_id: uuid.UUID, payload: ProjectUpdate, db: Session = Depends(get_db)) -> Project:
     project = _get_project_or_404(db, project_id)
+
+    actor = db.get(User, payload.updated_by_id)
+    if actor is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"updated_by_id {payload.updated_by_id} does not match an existing user")
+    require_can_update_project(actor)
 
     if project.status == ProjectStatus.ARCHIVED:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot update an archived project")
@@ -258,6 +269,10 @@ def update_workflow_node_status(
     payload: WorkflowNodeStatusUpdate,
     db: Session = Depends(get_db),
 ) -> WorkflowNode:
+    """Manual override — see WorkflowNodeStatusUpdate's docstring. This is
+    the only place any code may set a node's status to something the graph
+    engine's own rules wouldn't have produced (e.g. force-unblocking a
+    rejected node, or skipping a stage that doesn't apply)."""
     _get_project_or_404(db, project_id)
 
     node = (
@@ -268,18 +283,73 @@ def update_workflow_node_status(
     if node is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Workflow node {node_id} not found on project {project_id}")
 
-    previous_status = node.status
-    node.status = payload.status
+    actor = db.get(User, payload.overridden_by_id)
+    if actor is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"overridden_by_id {payload.overridden_by_id} does not match an existing user")
+    require_can_override_node(actor)
 
-    record_audit_log(
-        db,
-        project_id=project_id,
-        action="workflow_node.status_changed",
-        entity_type="WorkflowNode",
-        entity_id=node.id,
-        extra_data={"node_key": node.node_key, "from": previous_status.value, "to": payload.status.value},
+    GraphEngineService(db).manual_override(
+        node, new_status=payload.status, reason=payload.reason, actor_user_id=actor.id
     )
 
     db.commit()
     db.refresh(node)
     return node
+
+
+# Preview a Story Crafting backlog's Jira export mapping ---------------------------
+#
+# Foundation only — no real Jira connection exists yet (see
+# app/services/jira_export.py's module docstring and docs/architecture.md's
+# MCP integrations section). This lets a human review the field mapping and
+# catch validation problems before anything is ever actually pushed.
+
+
+@router.post("/{project_id}/stories/preview-jira-export", response_model=JiraExportPreviewRead)
+def preview_jira_export(project_id: uuid.UUID, db: Session = Depends(get_db)) -> JiraExportPreviewRead:
+    _get_project_or_404(db, project_id)
+
+    artifact = (
+        db.query(Artifact)
+        .filter(Artifact.project_id == project_id, Artifact.artifact_type == STORY_BACKLOG_ARTIFACT_TYPE)
+        .order_by(Artifact.created_at.desc())
+        .first()
+    )
+    if artifact is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"Project {project_id} has no {STORY_BACKLOG_ARTIFACT_TYPE} artifact yet."
+        )
+    # Same gate as the plain export endpoint (see
+    # app/api/routes/artifacts.py's export_story_backlog) — a backlog isn't
+    # ready to preview for Jira until a human has approved it.
+    if artifact.status != ArtifactStatus.APPROVED:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Jira export preview requires an APPROVED story backlog (current status: {artifact.status.value}).",
+        )
+    if artifact.current_version is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Artifact has no version to preview.")
+
+    stories = parse_story_backlog(artifact.current_version.content_markdown)
+    preview = build_jira_export_preview(stories)
+
+    return JiraExportPreviewRead(
+        project_id=project_id,
+        artifact_id=artifact.id,
+        artifact_title=artifact.title,
+        story_count=preview.story_count,
+        valid_story_count=preview.valid_story_count,
+        has_errors=preview.has_errors,
+        overall_errors=preview.overall_errors,
+        stories=[
+            {
+                "story_title": s.story_title,
+                "jira_issue_type": s.jira_issue_type,
+                "mapping": s.mapping,
+                "validation_errors": s.validation_errors,
+                "is_valid": s.is_valid,
+            }
+            for s in preview.stories
+        ],
+        push_to_jira_enabled=PUSH_TO_JIRA_ENABLED,
+    )

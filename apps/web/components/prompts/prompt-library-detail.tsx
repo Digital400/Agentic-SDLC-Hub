@@ -13,9 +13,11 @@ import type { AgentDefinitionSummary, AgentPromptVersion } from "@/lib/types";
 export function PromptLibraryDetail({
   agent,
   initialVersions,
+  currentUserId,
 }: {
   agent: AgentDefinitionSummary;
   initialVersions: AgentPromptVersion[];
+  currentUserId: string | null;
 }) {
   const [versions, setVersions] = useState<AgentPromptVersion[]>(initialVersions);
   const activeVersion = versions.find((v) => v.isActive) ?? versions[0];
@@ -29,6 +31,10 @@ export function PromptLibraryDetail({
   }
 
   async function handleSaveInPlace(fields: PromptEditableFields) {
+    if (currentUserId === null) {
+      flash("No users exist yet to attribute this change to.");
+      return;
+    }
     try {
       const updated = await api.prompts.update(selected.id, {
         name: fields.name,
@@ -36,6 +42,7 @@ export function PromptLibraryDetail({
         system_prompt: fields.systemPrompt,
         output_format: fields.outputFormat,
         validation_checklist: fields.validationChecklist,
+        updated_by_id: currentUserId,
       });
       const mapped = toAgentPromptVersion(updated);
       setVersions((prev) => prev.map((v) => (v.id === mapped.id ? mapped : v)));
@@ -46,6 +53,10 @@ export function PromptLibraryDetail({
   }
 
   async function handleSaveAsNewVersion(fields: PromptEditableFields) {
+    if (currentUserId === null) {
+      flash("No users exist yet to attribute this version to.");
+      return;
+    }
     try {
       const created = await api.prompts.createVersion(selected.id, {
         name: fields.name,
@@ -53,6 +64,7 @@ export function PromptLibraryDetail({
         system_prompt: fields.systemPrompt,
         output_format: fields.outputFormat,
         validation_checklist: fields.validationChecklist,
+        created_by_id: currentUserId,
       });
       const mapped = toAgentPromptVersion(created);
       setVersions((prev) => [...prev, mapped]);
@@ -64,8 +76,12 @@ export function PromptLibraryDetail({
   }
 
   async function handleActivate(versionId: string) {
+    if (currentUserId === null) {
+      flash("No users exist yet to attribute this activation to.");
+      return;
+    }
     try {
-      const activated = await api.prompts.activate(versionId);
+      const activated = await api.prompts.activate(versionId, currentUserId);
       const mapped = toAgentPromptVersion(activated);
       setVersions((prev) => prev.map((v) => ({ ...v, isActive: v.id === mapped.id, updatedAt: v.id === mapped.id ? mapped.updatedAt : v.updatedAt })));
       flash(`v${mapped.version} activated.`);

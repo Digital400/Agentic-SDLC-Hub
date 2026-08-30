@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, String
+from sqlalchemy import Boolean, Enum, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.enums import UserRole
 
 
 class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -14,6 +15,15 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Global functional role — see app/services/permissions.py. Defaults to
+    # the least-privileged role (VIEWER) rather than something that can act,
+    # so a user created without an explicit role can't accidentally mutate
+    # anything until someone deliberately grants more.
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole, native_enum=False, length=20, validate_strings=True),
+        default=UserRole.VIEWER,
+        nullable=False,
+    )
 
     # Reverse relationships. Targets are resolved via the shared registry —
     # see the note in app/models/base.py — so no import of Project/etc. is

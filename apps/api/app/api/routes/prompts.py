@@ -13,14 +13,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models import AgentDefinition, AgentPrompt, AgentPromptRole
+from app.models import AgentDefinition, AgentPrompt, AgentPromptRole, User
 from app.schemas.prompt import (
+    AgentPromptActivateRequest,
     AgentPromptCreate,
     AgentPromptRead,
     AgentPromptUpdate,
     AgentPromptVersionCreate,
 )
 from app.services.audit import record_audit_log
+from app.services.permissions import require_can_update_prompt
 
 router = APIRouter(prefix="/prompts", tags=["prompts"])
 
@@ -37,6 +39,13 @@ def _get_prompt_or_404(db: Session, prompt_id: uuid.UUID) -> AgentPrompt:
     if prompt is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Prompt {prompt_id} not found")
     return prompt
+
+
+def _get_user_or_400(db: Session, user_id: uuid.UUID, field_name: str) -> User:
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{field_name} {user_id} does not match an existing user")
+    return user
 
 
 # 1. Create agent prompt ---------------------------------------------------------
@@ -138,6 +147,8 @@ def update_prompt(prompt_id: uuid.UUID, payload: AgentPromptUpdate, db: Session 
     agent behavior changes without a new, reviewable version. Use
     POST /prompts/{id}/versions instead once a prompt is active."""
     prompt = _get_prompt_or_404(db, prompt_id)
+    editor = _get_user_or_400(db, payload.updated_by_id, "updated_by_id")
+    require_can_update_prompt(editor)
 
     if prompt.is_active:
         raise HTTPException(
@@ -176,6 +187,8 @@ def create_prompt_version(
     """Creates a new version in the same (agent, role) lineage as
     `prompt_id`. Starts inactive — see POST /prompts/{id}/activate."""
     base = _get_prompt_or_404(db, prompt_id)
+    creator = _get_user_or_400(db, payload.created_by_id, "created_by_id")
+    require_can_update_prompt(creator)
 
     last_version_number = (
         db.query(AgentPrompt.version)
@@ -217,10 +230,14 @@ def create_prompt_version(
 
 
 @router.post("/{prompt_id}/activate", response_model=AgentPromptRead)
-def activate_prompt_version(prompt_id: uuid.UUID, db: Session = Depends(get_db)) -> AgentPromptRead:
+def activate_prompt_version(
+    prompt_id: uuid.UUID, payload: AgentPromptActivateRequest, db: Session = Depends(get_db)
+) -> AgentPromptRead:
     """Makes this version the active one; deactivates every other version
     in its (agent, role) lineage — exactly one active version at a time."""
     prompt = _get_prompt_or_404(db, prompt_id)
+    activator = _get_user_or_400(db, payload.activated_by_id, "activated_by_id")
+    require_can_update_prompt(activator)
 
     if prompt.is_active:
         raise HTTPException(status.HTTP_409_CONFLICT, "This version is already active.")
