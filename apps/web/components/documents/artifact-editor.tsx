@@ -1,11 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Download, ExternalLink, FileCode, FileJson, FileSpreadsheet, FileText, Save, SendHorizontal, GitBranch } from "lucide-react";
+import { Download, Eye, ExternalLink, FileCode, FileJson, FileSpreadsheet, FileText, Github, Pencil, Save, SendHorizontal, GitBranch } from "lucide-react";
 
 import { AgentActionsPanel, type AgentRunOutcome } from "@/components/documents/agent-actions-panel";
 import { CommentsPanel } from "@/components/documents/comments-panel";
+import { GithubPrPreviewPanel } from "@/components/documents/github-pr-preview-panel";
 import { JiraExportPreviewPanel } from "@/components/documents/jira-export-preview-panel";
+import { MarkdownPreview } from "@/components/documents/markdown-preview";
 import { SectionNav } from "@/components/documents/section-nav";
 import { ArtifactStatusBadge } from "@/components/status-badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -15,12 +17,16 @@ import { Textarea } from "@/components/ui/textarea";
 import { formatRelativeTime } from "@/lib/format";
 import { API_URL, api, ApiError } from "@/lib/api";
 import { joinSectionsIntoMarkdown, splitMarkdownIntoSections } from "@/lib/markdown-sections";
-import { toArtifactVersionSummary, toJiraExportPreview } from "@/lib/mappers";
-import type { ArtifactDocument, ArtifactSection, ArtifactStatus, JiraExportPreview } from "@/lib/types";
+import { toArtifactVersionSummary, toGithubPrPreview, toJiraExportPreview } from "@/lib/mappers";
+import type { ArtifactDocument, ArtifactSection, ArtifactStatus, GithubPrPreview, JiraExportPreview } from "@/lib/types";
 
 // Story Crafting's output_artifact_type — see
 // apps/api/app/api/routes/artifacts.py's STORY_BACKLOG_ARTIFACT_TYPE.
 const STORY_BACKLOG_ARTIFACT_TYPE = "story_backlog";
+// Implementation's output_artifact_type — see workflows/sdlc-workflow.json.
+// Gates the "Preview GitHub PR" button the same way STORY_BACKLOG_ARTIFACT_TYPE
+// gates the Jira preview button above.
+const CODE_CHANGE_ARTIFACT_TYPE = "code_change";
 
 export interface ReviewerOption {
   id: string;
@@ -47,6 +53,7 @@ export function ArtifactEditor({
   const [versions, setVersions] = useState(doc.versions);
   const [currentVersionNumber, setCurrentVersionNumber] = useState(doc.currentVersionNumber);
   const [activeSectionId, setActiveSectionId] = useState(doc.sections[0]?.id ?? "");
+  const [viewMode, setViewMode] = useState<"edit" | "preview">("edit");
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [showVersionForm, setShowVersionForm] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
@@ -55,6 +62,10 @@ export function ArtifactEditor({
   const [jiraPreview, setJiraPreview] = useState<JiraExportPreview | null>(null);
   const [jiraPreviewLoading, setJiraPreviewLoading] = useState(false);
   const [jiraPreviewError, setJiraPreviewError] = useState<string | null>(null);
+  const [showGithubPreview, setShowGithubPreview] = useState(false);
+  const [githubPreview, setGithubPreview] = useState<GithubPrPreview | null>(null);
+  const [githubPreviewLoading, setGithubPreviewLoading] = useState(false);
+  const [githubPreviewError, setGithubPreviewError] = useState<string | null>(null);
   const [openReview, setOpenReview] = useState(hasOpenReview);
   const [reviewerId, setReviewerId] = useState(
     reviewers.find((r) => r.id !== createdById)?.id ?? reviewers[0]?.id ?? ""
@@ -165,6 +176,20 @@ export function ArtifactEditor({
     }
   }
 
+  async function handleOpenGithubPreview() {
+    setShowGithubPreview(true);
+    setGithubPreviewLoading(true);
+    setGithubPreviewError(null);
+    try {
+      const preview = await api.artifacts.githubPrPreview(doc.id);
+      setGithubPreview(toGithubPrPreview(preview));
+    } catch (err) {
+      setGithubPreviewError(err instanceof ApiError ? err.message : "Failed to build the GitHub PR preview.");
+    } finally {
+      setGithubPreviewLoading(false);
+    }
+  }
+
   // Submitting an artifact (status -> READY_FOR_REVIEW) and opening the
   // review round that actually shows up on /reviews are two separate API
   // calls (see apps/api/app/api/routes/{artifacts,reviews}.py) — done here
@@ -215,6 +240,29 @@ export function ArtifactEditor({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <div className="flex rounded-md border border-border p-0.5">
+              <button
+                type="button"
+                onClick={() => setViewMode("edit")}
+                className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                  viewMode === "edit" ? "bg-secondary text-secondary-foreground" : "text-muted-foreground"
+                }`}
+              >
+                <Pencil className="h-3.5 w-3.5" />
+                Edit
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode("preview")}
+                className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                  viewMode === "preview" ? "bg-secondary text-secondary-foreground" : "text-muted-foreground"
+                }`}
+              >
+                <Eye className="h-3.5 w-3.5" />
+                Preview
+              </button>
+            </div>
+            <div className="mx-1 h-5 w-px bg-border" />
             <Button variant="outline" size="sm" onClick={handleSaveDraft} disabled={!editable || !dirty || busy}>
               <Save className="h-3.5 w-3.5" />
               Save draft
@@ -279,14 +327,26 @@ export function ArtifactEditor({
                 Preview Jira Export
               </Button>
             ) : null}
-            <Button variant="outline" size="sm" onClick={() => flash("PDF export isn't available yet.")}>
+            {doc.artifactType === CODE_CHANGE_ARTIFACT_TYPE ? (
+              <Button variant="outline" size="sm" onClick={handleOpenGithubPreview}>
+                <Github className="h-3.5 w-3.5" />
+                Preview GitHub PR
+              </Button>
+            ) : null}
+            <a
+              href={`${API_URL}/artifacts/${doc.id}/export/document?format=pdf`}
+              className={buttonVariants({ variant: "outline", size: "sm" })}
+            >
               <Download className="h-3.5 w-3.5" />
               Export PDF
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => flash("HTML export isn't available yet.")}>
+            </a>
+            <a
+              href={`${API_URL}/artifacts/${doc.id}/export/document?format=html`}
+              className={buttonVariants({ variant: "outline", size: "sm" })}
+            >
               <FileCode className="h-3.5 w-3.5" />
               Export HTML
-            </Button>
+            </a>
           </div>
         </div>
 
@@ -348,24 +408,30 @@ export function ArtifactEditor({
         </aside>
 
         <main className="min-w-0 flex-1 overflow-y-auto rounded-lg border border-border p-5">
-          <div className="mx-auto flex max-w-2xl flex-col gap-6">
-            {sections.map((section) => (
-              <section
-                key={section.id}
-                onFocus={() => setActiveSectionId(section.id)}
-                className="scroll-mt-4"
-              >
-                <h2 className="mb-2 text-sm font-semibold">{section.title}</h2>
-                <Textarea
-                  value={section.contentMarkdown}
-                  onChange={(e) => updateSection(section.id, e.target.value)}
-                  disabled={!editable}
-                  rows={Math.max(4, Math.ceil(section.contentMarkdown.length / 70))}
-                  className="font-mono text-sm"
-                />
-              </section>
-            ))}
-          </div>
+          {viewMode === "preview" ? (
+            <div className="mx-auto max-w-2xl">
+              <MarkdownPreview markdown={joinSectionsIntoMarkdown(sections)} />
+            </div>
+          ) : (
+            <div className="mx-auto flex max-w-2xl flex-col gap-6">
+              {sections.map((section) => (
+                <section
+                  key={section.id}
+                  onFocus={() => setActiveSectionId(section.id)}
+                  className="scroll-mt-4"
+                >
+                  <h2 className="mb-2 text-sm font-semibold">{section.title}</h2>
+                  <Textarea
+                    value={section.contentMarkdown}
+                    onChange={(e) => updateSection(section.id, e.target.value)}
+                    disabled={!editable}
+                    rows={Math.max(4, Math.ceil(section.contentMarkdown.length / 70))}
+                    className="font-mono text-sm"
+                  />
+                </section>
+              ))}
+            </div>
+          )}
         </main>
 
         <aside className="w-full shrink-0 space-y-4 overflow-y-auto lg:w-72">
@@ -388,6 +454,15 @@ export function ArtifactEditor({
           loading={jiraPreviewLoading}
           error={jiraPreviewError}
           onClose={() => setShowJiraPreview(false)}
+        />
+      ) : null}
+
+      {showGithubPreview ? (
+        <GithubPrPreviewPanel
+          preview={githubPreview}
+          loading={githubPreviewLoading}
+          error={githubPreviewError}
+          onClose={() => setShowGithubPreview(false)}
         />
       ) : null}
 

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { MessageSquare } from "lucide-react";
 
 import { Avatar } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -44,9 +45,14 @@ export function ReviewComments({
               <li key={comment.id} className="flex gap-2">
                 <Avatar name={comment.authorName} className="h-6 w-6 text-[10px]" />
                 <div className="min-w-0">
-                  <div className="flex items-baseline gap-2">
+                  <div className="flex flex-wrap items-baseline gap-2">
                     <span className="text-xs font-medium">{comment.authorName}</span>
                     <span className="text-xs text-muted-foreground">{formatRelativeTime(comment.createdAt)}</span>
+                    {comment.sectionTitle ? (
+                      <Badge variant="outline" className="text-[10px]">
+                        {comment.sectionTitle}
+                      </Badge>
+                    ) : null}
                   </div>
                   <p className="text-xs text-muted-foreground">{comment.body}</p>
                 </div>

@@ -1,14 +1,24 @@
 "use client";
 
 import { useState } from "react";
-import { CheckCircle2, RotateCcw, ShieldAlert, XCircle } from "lucide-react";
+import { CheckCircle2, Plus, RotateCcw, ShieldAlert, Trash2, XCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
 export type ReviewDecision = "APPROVED" | "NEEDS_CHANGES" | "REJECTED";
+
+/** One structured piece of reviewer feedback — mirrors the backend's
+ * ReviewCommentInput. `sectionTitle` null means general, document-wide
+ * feedback (linking a comment to a section is "where possible", not
+ * required). */
+export interface StructuredComment {
+  body: string;
+  sectionTitle: string | null;
+}
 
 interface DecisionConfig {
   decision: ReviewDecision;
@@ -53,12 +63,16 @@ const DECISIONS: DecisionConfig[] = [
   },
 ];
 
+const EMPTY_STRUCTURED_COMMENT: StructuredComment = { body: "", sectionTitle: null };
+
 export function ReviewDecisionPanel({
   disabled,
   disabledReason,
   approveDisabled,
   approveDisabledReason,
+  sectionTitles,
   onDecide,
+  onRequestChanges,
 }: {
   /** True once the review is no longer PENDING — no more decisions possible. */
   disabled: boolean;
@@ -66,24 +80,58 @@ export function ReviewDecisionPanel({
   /** True until the reviewer checklist is fully checked. */
   approveDisabled: boolean;
   approveDisabledReason?: string;
-  onDecide: (decision: ReviewDecision, comment: string | null) => void;
+  /** This artifact's current section titles — populates each structured
+   * comment's "link to section" dropdown (rule 2). */
+  sectionTitles: string[];
+  onDecide: (decision: Exclude<ReviewDecision, "NEEDS_CHANGES">, comment: string | null) => void;
+  /** Rule 1: one or more structured comments explaining what needs to
+   * change, each optionally linked to a section (rule 2). */
+  onRequestChanges: (comments: StructuredComment[]) => void;
 }) {
   const [active, setActive] = useState<ReviewDecision | null>(null);
   const [comment, setComment] = useState("");
+  const [structuredComments, setStructuredComments] = useState<StructuredComment[]>([EMPTY_STRUCTURED_COMMENT]);
 
   const config = DECISIONS.find((d) => d.decision === active);
-  const canConfirm = config ? !config.commentRequired || comment.trim().length > 0 : false;
+  let canConfirm = false;
+  if (active === "NEEDS_CHANGES") {
+    canConfirm = structuredComments.some((c) => c.body.trim().length > 0);
+  } else if (config) {
+    canConfirm = !config.commentRequired || comment.trim().length > 0;
+  }
 
   function startDecision(decision: ReviewDecision) {
     setActive(decision);
     setComment("");
+    setStructuredComments([EMPTY_STRUCTURED_COMMENT]);
+  }
+
+  function updateStructuredComment(index: number, patch: Partial<StructuredComment>) {
+    setStructuredComments((prev) => prev.map((c, i) => (i === index ? { ...c, ...patch } : c)));
+  }
+
+  function addStructuredComment() {
+    setStructuredComments((prev) => [...prev, EMPTY_STRUCTURED_COMMENT]);
+  }
+
+  function removeStructuredComment(index: number) {
+    setStructuredComments((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== index) : prev));
   }
 
   function confirm() {
     if (!config || !canConfirm) return;
-    onDecide(config.decision, comment.trim() || null);
+    if (config.decision === "NEEDS_CHANGES") {
+      onRequestChanges(
+        structuredComments
+          .map((c) => ({ body: c.body.trim(), sectionTitle: c.sectionTitle }))
+          .filter((c) => c.body.length > 0)
+      );
+    } else {
+      onDecide(config.decision, comment.trim() || null);
+    }
     setActive(null);
     setComment("");
+    setStructuredComments([EMPTY_STRUCTURED_COMMENT]);
   }
 
   return (
@@ -127,13 +175,60 @@ export function ReviewDecisionPanel({
         {active && config ? (
           <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/40 p-3">
             <p className="text-sm font-medium">{config.confirmLabel}</p>
-            <Textarea
-              value={comment}
-              onChange={(e) => setComment(e.target.value)}
-              placeholder={config.commentPlaceholder}
-              rows={3}
-              autoFocus
-            />
+
+            {active === "NEEDS_CHANGES" ? (
+              <div className="flex flex-col gap-2">
+                {structuredComments.map((c, i) => (
+                  <div key={i} className="flex flex-col gap-1 rounded-md border border-border bg-background p-2">
+                    <div className="flex items-center gap-1.5">
+                      <Select
+                        value={c.sectionTitle ?? ""}
+                        onChange={(e) => updateStructuredComment(i, { sectionTitle: e.target.value || null })}
+                        className="text-xs"
+                      >
+                        <option value="">General feedback (whole document)</option>
+                        {sectionTitles.map((title) => (
+                          <option key={title} value={title}>
+                            {title}
+                          </option>
+                        ))}
+                      </Select>
+                      {structuredComments.length > 1 ? (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 shrink-0"
+                          onClick={() => removeStructuredComment(i)}
+                          aria-label="Remove this comment"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      ) : null}
+                    </div>
+                    <Textarea
+                      value={c.body}
+                      onChange={(e) => updateStructuredComment(i, { body: e.target.value })}
+                      placeholder="What needs to change here? (required)"
+                      rows={2}
+                      autoFocus={i === 0}
+                    />
+                  </div>
+                ))}
+                <Button variant="outline" size="sm" className="w-fit" onClick={addStructuredComment}>
+                  <Plus className="h-3.5 w-3.5" />
+                  Add another comment
+                </Button>
+              </div>
+            ) : (
+              <Textarea
+                value={comment}
+                onChange={(e) => setComment(e.target.value)}
+                placeholder={config.commentPlaceholder}
+                rows={3}
+                autoFocus
+              />
+            )}
+
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="sm" onClick={() => setActive(null)}>
                 Cancel

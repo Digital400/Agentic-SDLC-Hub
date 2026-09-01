@@ -21,9 +21,14 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  // A FormData body (file upload) must NOT get a hardcoded JSON
+  // Content-Type — the browser sets its own multipart boundary header
+  // when it serializes the body, and overriding it here would break
+  // parsing on the server. Every other call sends JSON.
+  const isFormData = init?.body instanceof FormData;
   const res = await fetch(`${API_URL}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    headers: isFormData ? init?.headers : { "Content-Type": "application/json", ...init?.headers },
     // Server-component fetches default to caching in Next.js; this app's
     // data changes on every write, so always fetch fresh rather than
     // reason about revalidation tags per route.
@@ -48,6 +53,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 const get = <T>(path: string) => request<T>(path);
 const post = <T>(path: string, body?: unknown) => request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined });
 const patch = <T>(path: string, body: unknown) => request<T>(path, { method: "PATCH", body: JSON.stringify(body) });
+const postForm = <T>(path: string, formData: FormData) => request<T>(path, { method: "POST", body: formData });
 
 // --- DTOs — mirror apps/api/app/schemas/*.py exactly (snake_case) ----------
 
@@ -89,6 +95,24 @@ export interface ApiWorkflowNode {
   requires_human_approval: boolean;
   allowed_actions: string[];
   status: string;
+  // Set by GraphEngineService when the node's own rules block it (distinct
+  // from a manual override) — see app/services/graph_engine.py. Null unless
+  // status is BLOCKED.
+  blocked_reason: string | null;
+  // Set only when the node's current status came from a manual override
+  // (PATCH .../workflow-nodes/{id}) rather than normal graph progression.
+  override_reason: string | null;
+  // Token Budget Service ceilings for this node's agent runs — see
+  // app/services/token_budget.py.
+  context_token_budget: number;
+  output_token_budget: number;
+  full_content_artifact_types: string[];
+  rag_top_k: number;
+  max_rag_tokens: number;
+  // A `## <heading>` this stage's artifact must have, with non-empty
+  // content, before a review can approve it — see
+  // GraphEngineService.validate_evidence_requirement. Null for most stages.
+  required_evidence_section: string | null;
   order_index: number;
   position_x: number;
   position_y: number;
@@ -119,6 +143,221 @@ export interface ApiArtifact {
   current_version_number: number | null;
 }
 
+// See app/models/implementation_task.py / app/services/implementation_planner.py.
+export type ApiImplementationTaskArea = "BACKEND" | "FRONTEND" | "DATABASE" | "TESTING" | "INFRA" | "DOCS";
+export type ApiImplementationTaskRiskLevel = "LOW" | "MEDIUM" | "HIGH";
+export type ApiImplementationTaskStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" | "BLOCKED";
+
+export interface ApiImplementationTask {
+  id: string;
+  project_id: string;
+  workflow_node_id: string;
+  artifact_id: string;
+  artifact_version_id: string;
+  title: string;
+  description: string;
+  linked_story: string | null;
+  linked_lld_section: string | null;
+  area: ApiImplementationTaskArea;
+  expected_paths: string[];
+  dependencies: string[];
+  acceptance_criteria: string[];
+  test_expectation: string;
+  risk_level: ApiImplementationTaskRiskLevel;
+  assigned_agent_type: string;
+  status: ApiImplementationTaskStatus;
+  order_index: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiGenerateImplementationPlanResponse {
+  artifact_id: string;
+  artifact_version_id: string;
+  tasks: ApiImplementationTask[];
+  review: ApiReview;
+}
+
+// Implementation Agent execution — see app/services/implementation_agent.py
+// and app/models/implementation_run.py. Generating/reviewing a run never
+// writes to GitHub; only create_pull_request (once ACCEPTED) does — see
+// ApiPullRequestLink below.
+export type ApiImplementationRunStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
+export type ApiImplementationRunReviewStatus = "PENDING_REVIEW" | "ACCEPTED" | "REJECTED";
+
+export interface ApiProposedFileChange {
+  path: string;
+  change_type: string; // "create" | "modify" | "delete"
+  summary: string;
+  after_content: string | null;
+}
+
+export type ApiPullRequestStatus = "OPEN" | "MERGED" | "CLOSED";
+
+export interface ApiPullRequestLink {
+  id: string;
+  project_id: string;
+  workflow_node_id: string;
+  implementation_task_id: string;
+  implementation_run_id: string;
+  repository_id: string;
+  branch_name: string;
+  base_branch: string;
+  pr_number: number;
+  pr_url: string;
+  status: ApiPullRequestStatus;
+  created_by_agent: boolean;
+  triggered_by_user_id: string | null;
+  commit_message: string;
+  created_at: string;
+}
+
+export interface ApiImplementationRun {
+  id: string;
+  project_id: string;
+  implementation_task_id: string;
+  repository_snapshot_id: string | null;
+  triggered_by_user_id: string | null;
+  agent_type: string;
+  status: ApiImplementationRunStatus;
+  proposed_file_changes: ApiProposedFileChange[];
+  diff_text: string;
+  explanation: string;
+  test_command: string;
+  risks: string[];
+  used_mock: boolean;
+  token_usage: Record<string, number> | null;
+  cost: number | null;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  review_status: ApiImplementationRunReviewStatus;
+  reviewed_by_user_id: string | null;
+  reviewed_at: string | null;
+  review_comment: string | null;
+  created_at: string;
+  updated_at: string;
+  pull_request: ApiPullRequestLink | null;
+}
+
+// Testing Agent system — see app/services/testing_agent.py and
+// app/models/test_run.py. Reasoning-based test assessment (no execution
+// sandbox exists); a real test_report Artifact + QA Review is what
+// actually gates approval — see review_id below.
+export type ApiTestAgentType = "UNIT" | "API" | "UI" | "REGRESSION" | "SECURITY";
+export type ApiTestRunStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
+
+export interface ApiTestToAdd {
+  name: string;
+  description: string;
+  area: string;
+}
+
+export interface ApiTestExecuted {
+  name: string;
+  result: string; // "PASS" | "FAIL"
+  notes: string;
+}
+
+export interface ApiTestRun {
+  id: string;
+  project_id: string;
+  workflow_node_id: string;
+  implementation_task_id: string;
+  implementation_run_id: string;
+  pull_request_link_id: string | null;
+  artifact_id: string | null;
+  artifact_version_id: string | null;
+  triggered_by_user_id: string | null;
+  agent_type: ApiTestAgentType;
+  status: ApiTestRunStatus;
+  test_plan: string;
+  tests_to_add: ApiTestToAdd[];
+  tests_executed: ApiTestExecuted[];
+  pass_count: number;
+  fail_count: number;
+  bugs_found: string[];
+  suggested_fixes: string[];
+  coverage_impact: Record<string, string>;
+  used_mock: boolean;
+  token_usage: Record<string, number> | null;
+  cost: number | null;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  review_id: string | null;
+}
+
+// PR Review Agent — see app/services/pr_review_agent.py and
+// app/models/pr_review_run.py. Fully bespoke: no Artifact/Review exists
+// for this. "Human reviewer decides final approval" is the real GitHub
+// PR review, external to this app — overallRecommendation is advisory.
+export type ApiPRReviewRunStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
+export type ApiPRReviewRecommendation = "APPROVE" | "REQUEST_CHANGES" | "COMMENT_ONLY";
+
+export interface ApiFinding {
+  file: string;
+  detail: string;
+}
+
+export interface ApiSuggestedComment {
+  file: string;
+  body: string;
+}
+
+export interface ApiPostedComment {
+  file: string;
+  body: string;
+  github_comment_id: number;
+  github_comment_url: string;
+  posted_at: string;
+}
+
+export interface ApiPRReviewRun {
+  id: string;
+  project_id: string;
+  workflow_node_id: string;
+  implementation_task_id: string;
+  implementation_run_id: string;
+  pull_request_link_id: string;
+  triggered_by_user_id: string | null;
+  status: ApiPRReviewRunStatus;
+  overall_recommendation: ApiPRReviewRecommendation | null;
+  summary: string;
+  critical_findings: ApiFinding[];
+  major_findings: ApiFinding[];
+  minor_findings: ApiFinding[];
+  missing_tests: string[];
+  suggested_comments: ApiSuggestedComment[];
+  risk_score: number | null;
+  final_reviewer_note: string;
+  posted_comments: ApiPostedComment[];
+  used_mock: boolean;
+  token_usage: Record<string, number> | null;
+  cost: number | null;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiPostedCommentResult {
+  file: string;
+  body: string;
+  status: "posted" | "failed";
+  github_comment_id: number | null;
+  github_comment_url: string | null;
+  error: string | null;
+}
+
+export interface ApiPostPRReviewCommentsResponse {
+  run: ApiPRReviewRun;
+  results: ApiPostedCommentResult[];
+}
+
 export interface ApiArtifactVersion {
   id: string;
   artifact_id: string;
@@ -137,6 +376,10 @@ export interface ApiReviewComment {
   review_id: string;
   author_id: string;
   body: string;
+  // Matches an ArtifactSection heading (see lib/markdown-sections.ts) when
+  // the reviewer could link this comment to one — null for general,
+  // document-wide feedback.
+  section_title: string | null;
   created_at: string;
 }
 
@@ -157,6 +400,21 @@ export interface ApiReview {
   artifact_title: string;
   workflow_stage_name: string;
   reviewer_name: string;
+}
+
+export interface ApiReviewCommentInput {
+  body: string;
+  section_title?: string | null;
+}
+
+export interface ApiRevisionAgentRunResponse {
+  agent_run: ApiAgentRun;
+  needs_clarification: boolean;
+  sections_updated: string[];
+  artifact_version_id: string | null;
+  artifact_status: string | null;
+  workflow_node_status: string;
+  new_review: ApiReview | null;
 }
 
 export interface ApiAgentPrompt {
@@ -237,6 +495,188 @@ export interface ApiJiraExportPreview {
   push_to_jira_enabled: boolean;
 }
 
+// Real Jira integration — see app/services/jira_integration.py and
+// app/api/routes/jira_integration.py. Distinct from ApiJiraExportPreview
+// above (that's the older, local, no-connection story-only preview; this
+// is the real connect/preview/push flow covering Epics/Stories/
+// Implementation Tasks/Testing bugs). Nothing here is ever pushed except
+// what a human explicitly selects — see JiraPushRequest.
+export type ApiJiraSourceType = "EPIC" | "STORY" | "IMPLEMENTATION_TASK" | "TESTING_BUG";
+
+export interface ApiJiraConnection {
+  id: string;
+  integration_id: string;
+  base_url: string;
+  email: string;
+  status: "NOT_CONNECTED" | "CONNECTED" | "ERROR";
+  connected_by_id: string | null;
+  created_at: string;
+  updated_at: string;
+  token_hint: string;
+  connected_by_name: string | null;
+}
+
+export interface ApiConnectJiraRequest {
+  base_url: string;
+  email: string;
+  api_token: string;
+  connected_by_id: string;
+}
+
+export interface ApiJiraProjectLink {
+  id: string;
+  project_id: string;
+  connection_id: string;
+  jira_project_key: string;
+  jira_project_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiJiraIssueLink {
+  id: string;
+  project_id: string;
+  jira_project_link_id: string;
+  source_type: ApiJiraSourceType;
+  source_key: string;
+  source_label: string;
+  jira_issue_key: string;
+  jira_issue_type: string;
+  jira_issue_url: string;
+  parent_jira_issue_key: string | null;
+  jira_status: string | null;
+  last_synced_at: string | null;
+  created_at: string;
+}
+
+export interface ApiJiraPushItem {
+  source_type: ApiJiraSourceType;
+  source_key: string;
+  label: string;
+  jira_issue_type: string;
+  parent_source_key: string | null;
+  summary: string;
+  description: string;
+  validation_errors: string[];
+  already_linked: ApiJiraIssueLink | null;
+}
+
+export interface ApiJiraPushPreview {
+  project_id: string;
+  jira_project_key: string;
+  epics: ApiJiraPushItem[];
+  stories: ApiJiraPushItem[];
+  implementation_tasks: ApiJiraPushItem[];
+  testing_bugs: ApiJiraPushItem[];
+  overall_errors: string[];
+}
+
+export interface ApiJiraPushResultItem {
+  source_type: ApiJiraSourceType;
+  source_key: string;
+  status: "created" | "skipped_duplicate" | "skipped_invalid" | "failed";
+  jira_issue_key: string | null;
+  jira_issue_url: string | null;
+  errors: string[];
+}
+
+export interface ApiJiraPushResponse {
+  results: ApiJiraPushResultItem[];
+}
+
+export interface ApiJiraSyncStatusResponse {
+  links: ApiJiraIssueLink[];
+}
+
+// Real Confluence integration — see app/services/confluence_integration.py
+// and app/api/routes/confluence_integration.py. Same connect/preview/
+// publish shape as Jira above: nothing is ever published except the
+// exact artifact_types a human explicitly selects — see
+// ApiConfluencePublishRequest below.
+export interface ApiConfluenceConnection {
+  id: string;
+  integration_id: string;
+  base_url: string;
+  email: string;
+  status: "NOT_CONNECTED" | "CONNECTED" | "ERROR";
+  connected_by_id: string | null;
+  created_at: string;
+  updated_at: string;
+  token_hint: string;
+  connected_by_name: string | null;
+}
+
+export interface ApiConnectConfluenceRequest {
+  base_url: string;
+  email: string;
+  api_token: string;
+  connected_by_id: string;
+}
+
+export interface ApiConfluenceSpaceLink {
+  id: string;
+  project_id: string;
+  connection_id: string;
+  space_key: string;
+  space_name: string | null;
+  root_page_id: string;
+  root_page_url: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiConfluencePageLink {
+  id: string;
+  project_id: string;
+  confluence_space_link_id: string;
+  artifact_type: string;
+  artifact_id: string;
+  artifact_version_id: string;
+  confluence_page_id: string;
+  confluence_page_url: string;
+  confluence_page_title: string;
+  confluence_page_version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiConfluencePublishItem {
+  artifact_type: string;
+  label: string;
+  artifact_id: string | null;
+  artifact_status: string | null;
+  content_preview: string;
+  validation_errors: string[];
+  already_published: ApiConfluencePageLink | null;
+  update_available: boolean;
+}
+
+export interface ApiConfluencePublishPreview {
+  project_id: string;
+  space_key: string;
+  items: ApiConfluencePublishItem[];
+}
+
+export interface ApiConfluencePublishResultItem {
+  artifact_type: string;
+  status: "published" | "updated" | "skipped_invalid" | "failed";
+  confluence_page_id: string | null;
+  confluence_page_url: string | null;
+  errors: string[];
+}
+
+export interface ApiConfluencePublishResponse {
+  results: ApiConfluencePublishResultItem[];
+}
+
+// See app/services/github_export.py — no real GitHub connection exists;
+// this is what a human pastes into a real PR's title/description boxes.
+export interface ApiGithubPrPreview {
+  suggested_title: string;
+  description_markdown: string;
+  checklist: string[];
+}
+
 export interface ApiOpsAgentRunRow {
   id: string;
   project_id: string;
@@ -260,15 +700,48 @@ export interface ApiOpsStagePerformance {
   failed_runs: number;
   success_rate: number | null;
   avg_duration_seconds: number | null;
+  total_cost: number;
+  avg_quality_score: number | null;
+  avg_iterations: number | null;
+}
+
+export interface ApiOpsCostByProject {
+  project_id: string;
+  project_name: string;
+  total_cost: number;
+  run_count: number;
+}
+
+export interface ApiOpsValidationIssueFrequency {
+  message: string;
+  count: number;
+}
+
+export interface ApiOpsRagSourceUsage {
+  source_title: string;
+  count: number;
+}
+
+export interface ApiOpsBlockedWorkflowRow {
+  project_id: string;
+  project_name: string;
+  node_key: string;
+  stage_name: string;
+  blocked_reason: string | null;
+  updated_at: string;
 }
 
 export interface ApiOpsSummary {
   total_runs: number;
   successful_runs: number;
   failed_runs: number;
+  success_rate: number | null;
+  failure_rate: number | null;
   avg_duration_seconds: number | null;
   total_tokens: number;
+  avg_tokens_per_run: number | null;
   total_cost: number;
+  avg_quality_score: number | null;
   approval_rate: number | null;
   rejection_rate: number | null;
   decided_review_count: number;
@@ -278,6 +751,10 @@ export interface ApiOpsSummary {
   recent_runs: ApiOpsAgentRunRow[];
   recent_failures: ApiOpsAgentRunRow[];
   stage_performance: ApiOpsStagePerformance[];
+  cost_by_project: ApiOpsCostByProject[];
+  validation_issue_frequency: ApiOpsValidationIssueFrequency[];
+  rag_source_usage: ApiOpsRagSourceUsage[];
+  blocked_workflows: ApiOpsBlockedWorkflowRow[];
 }
 
 export interface ApiIntegration {
@@ -291,6 +768,190 @@ export interface ApiIntegration {
   created_at: string;
   updated_at: string;
   connected_by_name: string | null;
+}
+
+// --- GitHub integration foundation — see app/services/github_integration.py ---------
+// SECURITY: the access token is write-only. It appears only in
+// ApiConnectGitHubRequest, never in any *Read type below.
+
+export type ApiIntegrationStatus = "NOT_CONNECTED" | "CONNECTED" | "ERROR";
+
+export interface ApiConnectGitHubRequest {
+  access_token: string;
+  connected_by_id: string;
+}
+
+export interface ApiIntegrationConnection {
+  id: string;
+  integration_id: string;
+  github_username: string | null;
+  scopes: string[] | null;
+  status: ApiIntegrationStatus;
+  connected_by_id: string | null;
+  created_at: string;
+  updated_at: string;
+  // Display-only hint (e.g. "****d3f9") — never the real token.
+  token_hint: string;
+  connected_by_name: string | null;
+}
+
+export interface ApiCreateRepositoryRequest {
+  project_id: string;
+  connection_id: string;
+  owner: string;
+  name: string;
+}
+
+export interface ApiRepository {
+  id: string;
+  project_id: string;
+  connection_id: string;
+  owner: string;
+  name: string;
+  default_branch: string | null;
+  description: string | null;
+  html_url: string | null;
+  is_private: boolean | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// One repo the connected token can see — backs the repo picker in the
+// repository-configuration form (see app/services/github_integration.py's
+// list_repositories). Not persisted; a fresh list on every fetch.
+export interface ApiGitHubRepoSummary {
+  owner: string;
+  name: string;
+  full_name: string;
+  default_branch: string;
+  description: string | null;
+  is_private: boolean;
+  html_url: string;
+}
+
+// Maintenance Agent system — see app/services/maintenance_agent.py and
+// app/api/routes/maintenance_runs.py. Repeatable, manually-triggered
+// project health reports — unlike Testing/PR Review, no Review is ever
+// created (rule: "recommend actions only" — nothing here needs approval).
+export type ApiMaintenanceRunStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
+
+export interface ApiMaintenanceRun {
+  id: string;
+  project_id: string;
+  workflow_node_id: string;
+  triggered_by_user_id: string | null;
+  status: ApiMaintenanceRunStatus;
+  error_logs_input: string | null;
+  user_feedback_input: string | null;
+  report_markdown: string | null;
+  artifact_id: string | null;
+  artifact_version_id: string | null;
+  used_mock: boolean;
+  token_usage: Record<string, number> | null;
+  cost: number | null;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ApiRepositoryFileEntryType = "FILE" | "DIRECTORY";
+
+export interface ApiRepositoryTreeEntry {
+  path: string;
+  entry_type: ApiRepositoryFileEntryType;
+  size: number | null;
+  sha: string;
+}
+
+export interface ApiRepositoryTree {
+  commit_sha: string;
+  entries: ApiRepositoryTreeEntry[];
+  truncated: boolean;
+}
+
+export interface ApiRepositoryFileContent {
+  path: string;
+  sha: string;
+  size: number;
+  content: string | null;
+  truncated: boolean;
+  is_binary: boolean;
+}
+
+export interface ApiCreateSnapshotRequest {
+  triggered_by_id: string;
+  ref?: string | null;
+}
+
+export interface ApiRepositorySnapshot {
+  id: string;
+  repository_id: string;
+  ref: string;
+  commit_sha: string;
+  file_count: number;
+  truncated: boolean;
+  triggered_by_id: string | null;
+  created_at: string;
+  triggered_by_name: string | null;
+}
+
+export interface ApiRepositoryFileIndexEntry {
+  id: string;
+  snapshot_id: string;
+  path: string;
+  entry_type: ApiRepositoryFileEntryType;
+  size: number | null;
+  sha: string;
+}
+
+// Repo Context Builder — see apps/api/app/services/repo_context_builder.py.
+// A stateless preview of exactly what repo context would be sent to a
+// coding agent for one ImplementationTask; nothing here is persisted.
+export interface ApiRelevantFile {
+  path: string;
+  entry_type: "FILE";
+  size: number | null;
+  score: number;
+  reasons: string[];
+  content_mode: "full" | "summary" | "omitted";
+  snippet: string | null;
+}
+
+export interface ApiSuggestedEditScopeEntry {
+  path: string;
+  status: "existing" | "new";
+}
+
+export interface ApiRepoContextPreview {
+  relevant_folders: string[];
+  relevant_files: ApiRelevantFile[];
+  architecture_summary: string;
+  dependency_notes: string[];
+  suggested_edit_scope: ApiSuggestedEditScopeEntry[];
+  token_budget_report: {
+    context_token_budget: number;
+    output_token_budget: number;
+    raw_estimated_tokens: number;
+    estimated_tokens: number;
+    over_budget: boolean;
+    blocks: { priority: string; label: string; estimated_tokens: number; included: boolean; truncated: boolean }[];
+  };
+  files_considered: number;
+  files_included: number;
+}
+
+export interface ApiValidatorDefinition {
+  id: string;
+  validator_key: string;
+  name: string;
+  stage: string;
+  description: string | null;
+  model_name: string;
+  quality_threshold: number;
+  criteria: string[];
+  is_active: boolean;
 }
 
 export interface ApiAgentDefinition {
@@ -310,7 +971,23 @@ export interface ApiRetrievedSource {
   chunk_index: number;
   snippet: string;
   similarity: number;
+  // Retrieval metadata added by the stage-aware RAG work — see
+  // apps/api/app/services/retrieval.py. May be absent on older stored runs.
+  stage?: string | null;
+  domain?: string | null;
+  project_type?: string | null;
+  content_type?: string | null;
+  tags?: string[];
 }
+
+// Matches apps/api/app/models/enums.py's LoopStatus.
+export type ApiLoopStatus =
+  | "NOT_STARTED"
+  | "RUNNING"
+  | "COMPLETED_QUALITY_MET"
+  | "COMPLETED_MAX_ITERATIONS"
+  | "COMPLETED_NO_CRITICAL_ISSUES"
+  | "WAITING_FOR_CLARIFICATION";
 
 export interface ApiAgentRun {
   id: string;
@@ -336,6 +1013,26 @@ export interface ApiAgentRun {
   // (e.g. the run failed before reaching that step); [] means it ran and
   // found nothing relevant enough to inject.
   retrieved_sources: ApiRetrievedSource[] | null;
+  // Deduped, ordered source titles behind retrieved_sources.
+  retrieved_source_titles: string[] | null;
+  // Loop Engine summary — see app/services/loop_engine.py. Only DRAFT-action
+  // runs go through the loop; other actions stay at these defaults.
+  loop_status: ApiLoopStatus;
+  loop_iteration: number;
+  loop_max_iterations: number | null;
+  loop_quality_threshold: number | null;
+  loop_quality_score: number | null;
+  loop_validation_issues: string[] | null;
+  // Full ValidatorResult dict: quality_score, completeness_score,
+  // clarity_score, risk_coverage_score, critical_issues, suggestions,
+  // approval_recommendation. Null if the run never reached VALIDATE.
+  loop_validation_result: Record<string, unknown> | null;
+  // Token Budget Service — the node's budgets that applied to this run, the
+  // pre-call estimate, and the full per-block breakdown.
+  context_token_budget: number | null;
+  output_token_budget: number | null;
+  estimated_context_tokens: number | null;
+  token_budget_report: Record<string, unknown> | null;
 }
 
 // --- Users -------------------------------------------------------------------
@@ -362,11 +1059,50 @@ export const api = {
     archive: (id: string) => post<ApiProject>(`/projects/${id}/archive`),
     workflowNodes: (id: string) => get<ApiWorkflowNode[]>(`/projects/${id}/workflow-nodes`),
     workflowEdges: (id: string) => get<ApiWorkflowEdge[]>(`/projects/${id}/workflow-edges`),
-    updateNodeStatus: (projectId: string, nodeId: string, status: string) =>
-      patch<ApiWorkflowNode>(`/projects/${projectId}/workflow-nodes/${nodeId}`, { status }),
+    // Manual override — bypasses every graph engine rule, so a reason and
+    // the acting (existing) user are always required and every call is
+    // audited. See GraphEngineService.manual_override.
+    updateNodeStatus: (
+      projectId: string,
+      nodeId: string,
+      body: { status: string; reason: string; overridden_by_id: string }
+    ) => patch<ApiWorkflowNode>(`/projects/${projectId}/workflow-nodes/${nodeId}`, body),
     artifacts: (id: string) => get<ApiArtifact[]>(`/projects/${id}/artifacts`),
     agentRuns: (id: string) => get<ApiAgentRun[]>(`/projects/${id}/agent-runs`),
     previewJiraExport: (id: string) => post<ApiJiraExportPreview>(`/projects/${id}/stories/preview-jira-export`),
+    implementationTasks: (id: string) => get<ApiImplementationTask[]>(`/projects/${id}/implementation-tasks`),
+    // "Generate Implementation Plan" — see app/services/implementation_planner.py.
+    // "Approve Implementation Plan" is the existing api.reviews.approve(reviewId) against
+    // the review this returns, not a separate action.
+    generateImplementationPlan: (id: string, body: { triggered_by_user_id: string; reviewer_id: string }) =>
+      post<ApiGenerateImplementationPlanResponse>(`/projects/${id}/implementation-plan/generate`, body),
+    githubRepository: (id: string) => get<ApiRepository | null>(`/projects/${id}/github-repository`),
+    jiraProject: (id: string) => get<ApiJiraProjectLink | null>(`/projects/${id}/jira-project`),
+    confluenceSpace: (id: string) => get<ApiConfluenceSpaceLink | null>(`/projects/${id}/confluence-space`),
+    // Repo Context Preview (rule 7) — see app/services/repo_context_builder.py.
+    // Read-only; safe to call as often as the user wants before a coding
+    // agent ever exists to consume it.
+    repoContextPreview: (
+      projectId: string,
+      taskId: string,
+      params?: { snapshotId?: string; maxFiles?: number; maxTokens?: number }
+    ) => {
+      const qs = new URLSearchParams();
+      if (params?.snapshotId) qs.set("snapshot_id", params.snapshotId);
+      if (params?.maxFiles) qs.set("max_files", String(params.maxFiles));
+      if (params?.maxTokens) qs.set("max_tokens", String(params.maxTokens));
+      const query = qs.toString();
+      return get<ApiRepoContextPreview>(
+        `/projects/${projectId}/implementation-tasks/${taskId}/repo-context-preview${query ? `?${query}` : ""}`
+      );
+    },
+    implementationTaskRuns: (projectId: string, taskId: string) =>
+      get<ApiImplementationRun[]>(`/projects/${projectId}/implementation-tasks/${taskId}/implementation-runs`),
+    implementationTaskTestRuns: (projectId: string, taskId: string) =>
+      get<ApiTestRun[]>(`/projects/${projectId}/implementation-tasks/${taskId}/test-runs`),
+    implementationTaskPrReviewRuns: (projectId: string, taskId: string) =>
+      get<ApiPRReviewRun[]>(`/projects/${projectId}/implementation-tasks/${taskId}/pr-review-runs`),
+    maintenanceRuns: (projectId: string) => get<ApiMaintenanceRun[]>(`/projects/${projectId}/maintenance-runs`),
   },
 
   artifacts: {
@@ -379,6 +1115,10 @@ export const api = {
     updateContent: (id: string, body: { content_markdown: string; change_summary?: string; edited_by_id: string }) =>
       patch<ApiArtifactVersion>(`/artifacts/${id}`, body),
     submitForReview: (id: string) => post<ApiArtifact>(`/artifacts/${id}/submit-for-review`),
+    // "GitHub integration" (rule scope) — a local preview of the PR
+    // title/description/checklist a human pastes into a real GitHub PR;
+    // no real GitHub connection exists — see app/services/github_export.py.
+    githubPrPreview: (id: string) => get<ApiGithubPrPreview>(`/artifacts/${id}/github-pr-preview`),
   },
 
   reviews: {
@@ -393,16 +1133,120 @@ export const api = {
     get: (id: string) => get<ApiReview>(`/reviews/${id}`),
     create: (body: { artifact_id: string; reviewer_id: string }) => post<ApiReview>("/reviews", body),
     approve: (id: string, comment?: string) => post<ApiReview>(`/reviews/${id}/approve`, { comment: comment ?? null }),
-    requestChanges: (id: string, comment: string) => post<ApiReview>(`/reviews/${id}/request-changes`, { comment }),
+    // Structured comments (rule 1), each optionally linked to a section
+    // (rule 2) — see ApiReviewCommentInput and ReviewComment.section_title.
+    requestChanges: (id: string, comments: ApiReviewCommentInput[]) =>
+      post<ApiReview>(`/reviews/${id}/request-changes`, { comments }),
     reject: (id: string, comment: string) => post<ApiReview>(`/reviews/${id}/reject`, { comment }),
-    addComment: (id: string, body: { author_id: string; body: string }) =>
+    addComment: (id: string, body: { author_id: string; body: string; section_title?: string | null }) =>
       post<ApiReviewComment>(`/reviews/${id}/comments`, body),
+    // "Run revision agent" (rule 4) — see app/services/revision_agent.py.
+    runRevisionAgent: (id: string, triggeredByUserId: string) =>
+      post<ApiRevisionAgentRunResponse>(`/reviews/${id}/run-revision-agent`, { triggered_by_user_id: triggeredByUserId }),
+  },
+
+  // Implementation Agent execution (diff/patch preview only) — see
+  // app/api/routes/implementation_runs.py.
+  implementationRuns: {
+    start: (body: { implementation_task_id: string; triggered_by_user_id: string }) =>
+      post<ApiImplementationRun>("/implementation-runs", body),
+    get: (id: string) => get<ApiImplementationRun>(`/implementation-runs/${id}`),
+    review: (id: string, body: { decision: "ACCEPTED" | "REJECTED"; reviewed_by_user_id: string; comment?: string | null }) =>
+      post<ApiImplementationRun>(`/implementation-runs/${id}/review`, body),
+    // Real GitHub write (branch + commit(s) + PR) — only reachable once
+    // the run is ACCEPTED. Never targets the repository's default branch.
+    createPullRequest: (id: string, body: { triggered_by_user_id: string; base_branch?: string | null }) =>
+      post<ApiImplementationRun>(`/implementation-runs/${id}/create-pull-request`, body),
+  },
+
+  // Testing Agent system — see app/api/routes/test_runs.py. QA approval
+  // happens at the existing /reviews/{id} screen (review_id above), not here.
+  testRuns: {
+    start: (body: { implementation_task_id: string; agent_type: ApiTestAgentType; triggered_by_user_id: string; reviewer_id: string }) =>
+      post<ApiTestRun>("/test-runs", body),
+    get: (id: string) => get<ApiTestRun>(`/test-runs/${id}`),
+  },
+
+  // Maintenance Agent — see app/api/routes/maintenance_runs.py. Repeatable,
+  // manually-triggered; no approval gate exists for its output (rule:
+  // "recommend actions only").
+  maintenanceRuns: {
+    start: (body: { project_id: string; triggered_by_user_id: string; error_logs?: string | null; user_feedback?: string | null }) =>
+      post<ApiMaintenanceRun>("/maintenance-runs", body),
+    get: (id: string) => get<ApiMaintenanceRun>(`/maintenance-runs/${id}`),
+  },
+
+  // PR Review Agent — see app/api/routes/pr_review_runs.py. Posting
+  // comments is the only real GitHub write here, and it sends exactly
+  // the (possibly human-edited) text passed in — never re-derives it
+  // from suggested_comments server-side.
+  prReviewRuns: {
+    start: (body: { implementation_task_id: string; triggered_by_user_id: string }) =>
+      post<ApiPRReviewRun>("/pr-review-runs", body),
+    get: (id: string) => get<ApiPRReviewRun>(`/pr-review-runs/${id}`),
+    postComments: (id: string, body: { triggered_by_user_id: string; comments: { file: string; body: string }[] }) =>
+      post<ApiPostPRReviewCommentsResponse>(`/pr-review-runs/${id}/post-comments`, body),
   },
 
   integrations: {
     list: () => get<ApiIntegration[]>("/integrations"),
     connect: (id: string) => post<ApiIntegration>(`/integrations/${id}/connect`),
     disconnect: (id: string) => post<ApiIntegration>(`/integrations/${id}/disconnect`),
+  },
+
+  // GitHub integration foundation — read-only repo scan. `access_token`
+  // in `connect` is the only place a token ever appears in a request;
+  // every response type here is token-free (see ApiIntegrationConnection).
+  github: {
+    connect: (body: ApiConnectGitHubRequest) => post<ApiIntegrationConnection>("/github/connections", body),
+    listConnections: () => get<ApiIntegrationConnection[]>("/github/connections"),
+    disconnect: (connectionId: string) => post<ApiIntegrationConnection>(`/github/connections/${connectionId}/disconnect`),
+    listRepositoryOptions: (connectionId: string) => get<ApiGitHubRepoSummary[]>(`/github/connections/${connectionId}/repositories`),
+    saveRepository: (body: ApiCreateRepositoryRequest) => post<ApiRepository>("/github/repositories", body),
+    getRepository: (repositoryId: string) => get<ApiRepository>(`/github/repositories/${repositoryId}`),
+    listBranches: (repositoryId: string) => get<string[]>(`/github/repositories/${repositoryId}/branches`),
+    getDefaultBranch: (repositoryId: string) => get<string>(`/github/repositories/${repositoryId}/default-branch`),
+    getTree: (repositoryId: string, ref?: string) =>
+      get<ApiRepositoryTree>(`/github/repositories/${repositoryId}/tree${ref ? `?ref=${encodeURIComponent(ref)}` : ""}`),
+    readFile: (repositoryId: string, path: string, ref?: string) => {
+      const qs = new URLSearchParams({ path });
+      if (ref) qs.set("ref", ref);
+      return get<ApiRepositoryFileContent>(`/github/repositories/${repositoryId}/file?${qs.toString()}`);
+    },
+    createSnapshot: (repositoryId: string, body: ApiCreateSnapshotRequest) =>
+      post<ApiRepositorySnapshot>(`/github/repositories/${repositoryId}/snapshots`, body),
+    listSnapshots: (repositoryId: string) => get<ApiRepositorySnapshot[]>(`/github/repositories/${repositoryId}/snapshots`),
+    listSnapshotFiles: (snapshotId: string) => get<ApiRepositoryFileIndexEntry[]>(`/github/snapshots/${snapshotId}/files`),
+  },
+
+  // Real Jira integration — see app/api/routes/jira_integration.py.
+  // push() only ever creates exactly what's named in `selections` — there
+  // is no "push everything" call, by design (no auto-create rule).
+  jira: {
+    connect: (body: ApiConnectJiraRequest) => post<ApiJiraConnection>("/jira/connections", body),
+    listConnections: () => get<ApiJiraConnection[]>("/jira/connections"),
+    disconnect: (connectionId: string) => post<ApiJiraConnection>(`/jira/connections/${connectionId}/disconnect`),
+    saveProject: (body: { project_id: string; connection_id: string; jira_project_key: string }) =>
+      post<ApiJiraProjectLink>("/jira/projects", body),
+    pushPreview: (projectId: string) => get<ApiJiraPushPreview>(`/jira/projects/${projectId}/push-preview`),
+    push: (body: { project_id: string; triggered_by_user_id: string; selections: { source_type: ApiJiraSourceType; source_key: string }[] }) =>
+      post<ApiJiraPushResponse>("/jira/push", body),
+    syncStatus: (projectId: string) => post<ApiJiraSyncStatusResponse>(`/jira/projects/${projectId}/sync-status`),
+  },
+
+  // Real Confluence integration — see app/api/routes/confluence_integration.py.
+  // publish() only ever touches exactly the artifact_types named — there
+  // is no "publish everything" call, by design (rule: preview before
+  // publishing; draft artifacts are always rejected server-side too).
+  confluence: {
+    connect: (body: ApiConnectConfluenceRequest) => post<ApiConfluenceConnection>("/confluence/connections", body),
+    listConnections: () => get<ApiConfluenceConnection[]>("/confluence/connections"),
+    disconnect: (connectionId: string) => post<ApiConfluenceConnection>(`/confluence/connections/${connectionId}/disconnect`),
+    saveSpace: (body: { project_id: string; connection_id: string; space_key: string }) =>
+      post<ApiConfluenceSpaceLink>("/confluence/spaces", body),
+    publishPreview: (projectId: string) => get<ApiConfluencePublishPreview>(`/confluence/projects/${projectId}/publish-preview`),
+    publish: (body: { project_id: string; triggered_by_user_id: string; artifact_types: string[] }) =>
+      post<ApiConfluencePublishResponse>("/confluence/publish", body),
   },
 
   ops: {
@@ -412,6 +1256,11 @@ export const api = {
   agentDefinitions: {
     list: () => get<ApiAgentDefinition[]>("/agents"),
     get: (agentKey: string) => get<ApiAgentDefinition>(`/agents/${agentKey}`),
+  },
+
+  validators: {
+    list: () => get<ApiValidatorDefinition[]>("/validators"),
+    getByStage: (stage: string) => get<ApiValidatorDefinition>(`/validators/${stage}`),
   },
 
   knowledgeSources: {
@@ -425,6 +1274,7 @@ export const api = {
     get: (id: string) => get<ApiKnowledgeSource>(`/knowledge-sources/${id}`),
     create: (body: { title: string; category: string; source_type: string; file_url?: string; uploaded_by_id: string }) =>
       post<ApiKnowledgeSource>("/knowledge-sources", body),
+    upload: (formData: FormData) => postForm<ApiKnowledgeSource>("/knowledge-sources/upload", formData),
     chunks: (id: string) => get<ApiKnowledgeChunk[]>(`/knowledge-sources/${id}/chunks`),
     search: (query: string, params?: { limit?: number; category?: string }) => {
       const qs = new URLSearchParams({ query });

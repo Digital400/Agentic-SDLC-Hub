@@ -6,8 +6,10 @@ Every run follows these steps (see LoopStepType):
         -> [IMPROVE -> VALIDATE]* -> READY_FOR_REVIEW
 
 PLAN and RETRIEVE_CONTEXT happen once. GENERATE_DRAFT produces iteration
-1's draft; from there, VALIDATE scores it (see
-app/services/loop_validation.py) and one of three things happens:
+1's draft; from there, VALIDATE scores it — via an independent validator
+agent, one per workflow stage (see app/services/validator_agent.py and
+app/models/validator.py's ValidatorDefinition) — and one of three things
+happens:
 
   1. quality_score >= quality_threshold           -> stop (COMPLETED_QUALITY_MET)
   2. iteration >= max_iterations                  -> stop (COMPLETED_MAX_ITERATIONS)
@@ -22,6 +24,12 @@ critical issue actually worth spending another iteration on — a draft
 that's merely short of threshold but has nothing critical wrong with it
 stops too, rather than churning for iterations it has no real feedback to
 act on.
+
+Rule 5 ("send suggestions to the improve step") means literally that: when
+the loop continues past VALIDATE, it's the validator's own `suggestions`
+list — not a generic restatement of the critical issues — that's threaded
+into the next GENERATE_DRAFT/IMPROVE call as `validation_feedback` (see
+app/services/ai_generation.py's `generate`).
 
 A draft that comes back asking for clarification (see
 app/services/ai_generation.py's CLARIFICATION_MARKER) stops the loop
@@ -49,11 +57,12 @@ from app.models import (
     LoopStatus,
     LoopStepType,
     Project,
+    ValidatorDefinition,
     WorkflowNode,
 )
 from app.services.ai_generation import generate
-from app.services.loop_validation import validate_draft_quality
 from app.services.retrieval import RetrievedChunk
+from app.services.validator_agent import run_validator
 
 DEFAULT_MAX_ITERATIONS = 3
 DEFAULT_QUALITY_THRESHOLD = 0.8
@@ -67,12 +76,25 @@ class LoopResult:
     loop_status: LoopStatus = LoopStatus.NOT_STARTED
     iterations_run: int = 0
     quality_score: float = 0.0
-    validation_issues: list[dict] = field(default_factory=list)
+    # The last VALIDATE step's critical issues (see
+    # app/services/validator_agent.py); validation_result is the full
+    # structured ValidatorResult (all four scores, suggestions,
+    # approval_recommendation) — what the Agent Run Detail API shows.
+    validation_issues: list[str] = field(default_factory=list)
+    validation_result: dict = field(default_factory=dict)
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
     cost: float = 0.0
     used_mock: bool = False
+    # Token Budget Service (see app/services/token_budget.py) — summed
+    # across every generate() call this loop made, mirroring how
+    # prompt_tokens/etc. above are also totals across iterations rather
+    # than just the last one. token_budget_report is the last iteration's
+    # per-block breakdown (the most relevant one — earlier iterations'
+    # context has already been superseded).
+    estimated_context_tokens: int = 0
+    token_budget_report: dict = field(default_factory=dict)
 
 
 class LoopEngineService:
@@ -86,7 +108,8 @@ class LoopEngineService:
         iteration: int,
         step: LoopStepType,
         quality_score: float | None = None,
-        validation_issues: list[dict] | None = None,
+        validation_issues: list[str] | None = None,
+        validation_result: dict | None = None,
         content_snapshot: str | None = None,
         notes: str | None = None,
     ) -> AgentRunLoopEvent:
@@ -96,6 +119,7 @@ class LoopEngineService:
             step=step,
             quality_score=quality_score,
             validation_issues=validation_issues,
+            validation_result=validation_result,
             content_snapshot=content_snapshot,
             notes=notes,
         )
@@ -111,9 +135,13 @@ class LoopEngineService:
         node: WorkflowNode,
         action: AgentPromptRole,
         active_prompt: AgentPrompt,
-        approved_inputs: dict[str, str],
+        approved_artifact_content: dict[str, str],
+        approved_artifact_summaries: dict[str, str],
         freeform_context: dict[str, Any],
+        full_content_artifact_types: set[str] | None = None,
         retrieved_chunks: list[RetrievedChunk] | None = None,
+        review_comments: list[str] | None = None,
+        validator: ValidatorDefinition | None = None,
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
         quality_threshold: float = DEFAULT_QUALITY_THRESHOLD,
     ) -> LoopResult:
@@ -130,9 +158,9 @@ class LoopEngineService:
             step=LoopStepType.PLAN,
             notes=(
                 f"Plan: draft '{node.output_artifact_type}' for stage '{node.node_key}' using "
-                f"{len(approved_inputs)} approved upstream artifact(s); validate against the active "
-                f"prompt's checklist; improve up to {max_iterations} time(s) until quality >= "
-                f"{quality_threshold}."
+                f"{len(approved_artifact_content)} approved upstream artifact(s); validate against "
+                f"the active prompt's checklist; improve up to {max_iterations} time(s) until "
+                f"quality >= {quality_threshold}."
             ),
         )
 
@@ -152,10 +180,13 @@ class LoopEngineService:
         total_prompt_tokens = 0
         total_completion_tokens = 0
         total_cost = 0.0
+        total_estimated_context_tokens = 0
+        latest_token_budget_report: dict = {}
         used_mock = False
         content = ""
         quality_score = 0.0
-        validation_issues: list[dict] = []
+        validation_issues: list[str] = []
+        validation_result_dict: dict = {}
         pending_feedback: list[str] | None = None
         iteration = 1
 
@@ -168,9 +199,14 @@ class LoopEngineService:
                 node=node,
                 action=action,
                 active_prompt=active_prompt,
-                approved_inputs=approved_inputs,
+                approved_artifact_content=approved_artifact_content,
+                approved_artifact_summaries=approved_artifact_summaries,
                 freeform_context=freeform_context,
+                context_token_budget=node.context_token_budget,
+                output_token_budget=node.output_token_budget,
+                full_content_artifact_types=full_content_artifact_types,
                 retrieved_chunks=retrieved_chunks,
+                review_comments=review_comments,
                 iteration=iteration,
                 validation_feedback=pending_feedback,
             )
@@ -178,6 +214,8 @@ class LoopEngineService:
             total_prompt_tokens += result.prompt_tokens
             total_completion_tokens += result.completion_tokens
             total_cost += result.cost
+            total_estimated_context_tokens += result.estimated_context_tokens
+            latest_token_budget_report = result.token_budget_report
             used_mock = used_mock or result.used_mock
 
             self._log(
@@ -206,29 +244,35 @@ class LoopEngineService:
                     iterations_run=iteration,
                     quality_score=quality_score,
                     validation_issues=validation_issues,
+                    validation_result=validation_result_dict,
                     prompt_tokens=total_prompt_tokens,
                     completion_tokens=total_completion_tokens,
                     total_tokens=total_prompt_tokens + total_completion_tokens,
                     cost=total_cost,
                     used_mock=used_mock,
+                    estimated_context_tokens=total_estimated_context_tokens,
+                    token_budget_report=latest_token_budget_report,
                 )
 
-            # --- VALIDATE --------------------------------------------------------------
-            validation = validate_draft_quality(
-                content_markdown=content, checklist=active_prompt.validation_checklist
-            )
+            # --- VALIDATE (rule 4: independent validator agent, one per stage) --------
+            validation = run_validator(validator=validator, stage_name=node.name, content_markdown=content)
             quality_score = validation.quality_score
-            validation_issues = validation.issues_as_dicts()
+            validation_issues = validation.critical_issues
+            validation_result_dict = validation.to_dict()
             self._log(
                 run,
                 iteration=iteration,
                 step=LoopStepType.VALIDATE,
                 quality_score=quality_score,
                 validation_issues=validation_issues,
-                notes=f"{len(validation.issues)} issue(s) found ({sum(1 for i in validation.issues if i.severity == 'critical')} critical).",
+                validation_result=validation_result_dict,
+                notes=(
+                    f"{len(validation.critical_issues)} critical issue(s); "
+                    f"recommendation={validation.approval_recommendation}."
+                ),
             )
 
-            # --- Rule 4: stop conditions -------------------------------------------------
+            # --- Rule: stop conditions ---------------------------------------------------
             if quality_score >= quality_threshold:
                 run.loop_status = LoopStatus.COMPLETED_QUALITY_MET
                 stop_reason = f"Quality score {quality_score} met threshold {quality_threshold}."
@@ -242,8 +286,10 @@ class LoopEngineService:
                 stop_reason = "Below threshold but no critical issues remain — nothing further to improve."
                 break
 
-            # Rule 5: critical issues exist and iterations remain — improve and re-validate.
-            pending_feedback = [i.message for i in validation.issues]
+            # Rule 5: qualityScore is below threshold and critical issues remain —
+            # send the validator's own suggestions (not a generic restatement of
+            # the critical issues) into the next IMPROVE call, and iterate.
+            pending_feedback = validation.suggestions or validation.critical_issues
             iteration += 1
 
         self._log(
@@ -252,11 +298,13 @@ class LoopEngineService:
             step=LoopStepType.READY_FOR_REVIEW,
             quality_score=quality_score,
             validation_issues=validation_issues,
+            validation_result=validation_result_dict,
             notes=f"Loop stopped: {run.loop_status.value}. {stop_reason}",
         )
 
         run.loop_quality_score = quality_score
         run.loop_validation_issues = validation_issues
+        run.loop_validation_result = validation_result_dict
 
         return LoopResult(
             content_markdown=content,
@@ -265,9 +313,12 @@ class LoopEngineService:
             iterations_run=run.loop_iteration,
             quality_score=quality_score,
             validation_issues=validation_issues,
+            validation_result=validation_result_dict,
             prompt_tokens=total_prompt_tokens,
             completion_tokens=total_completion_tokens,
             total_tokens=total_prompt_tokens + total_completion_tokens,
             cost=total_cost,
             used_mock=used_mock,
+            estimated_context_tokens=total_estimated_context_tokens,
+            token_budget_report=latest_token_budget_report,
         )

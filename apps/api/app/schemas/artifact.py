@@ -77,6 +77,16 @@ class ArtifactVersionRead(BaseModel):
     # Denormalized for version-history display.
     created_by_name: str
 
+    # Compression summaries — see app/services/artifact_summary.py. Null
+    # until this version is approved (see app/api/routes/reviews.py's
+    # approve_review, which is the only place these are (re)generated).
+    executive_summary: str | None
+    agent_context_summary: str | None
+    key_decisions: list[str] | None
+    open_questions: list[str] | None
+    risks: list[str] | None
+    generated_summary_at: datetime | None
+
     @classmethod
     def from_orm_version(cls, version) -> "ArtifactVersionRead":
         return cls(
@@ -89,7 +99,23 @@ class ArtifactVersionRead(BaseModel):
             created_by_id=version.created_by_id,
             created_at=version.created_at,
             created_by_name=version.created_by.full_name,
+            executive_summary=version.executive_summary,
+            agent_context_summary=version.agent_context_summary,
+            key_decisions=version.key_decisions,
+            open_questions=version.open_questions,
+            risks=version.risks,
+            generated_summary_at=version.generated_summary_at,
         )
+
+
+class GithubPrPreviewRead(BaseModel):
+    """Response for GET /artifacts/{id}/github-pr-preview — see
+    app/services/github_export.py. No real GitHub connection exists; this
+    is what a human pastes into a real PR's title/description boxes."""
+
+    suggested_title: str
+    description_markdown: str
+    checklist: list[str]
 
 
 class ArtifactContentUpdate(BaseModel):

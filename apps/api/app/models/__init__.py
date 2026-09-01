@@ -13,16 +13,31 @@ from app.models.base import Base
 from app.models.enums import (
     AgentPromptRole,
     AgentRunStatus,
+    ApprovalRecommendation,
     ArtifactStatus,
+    ImplementationRunReviewStatus,
+    ImplementationRunStatus,
+    ImplementationTaskArea,
+    ImplementationTaskRiskLevel,
+    ImplementationTaskStatus,
     IntegrationProvider,
     IntegrationStatus,
+    KnowledgeContentType,
     KnowledgeSourceStatus,
     KnowledgeSourceType,
     LoopStatus,
     LoopStepType,
+    JiraSourceType,
+    MaintenanceRunStatus,
+    PRReviewRecommendation,
+    PRReviewRunStatus,
     ProjectRole,
     ProjectStatus,
+    PullRequestStatus,
+    RepositoryFileEntryType,
     ReviewStatus,
+    TestAgentType,
+    TestRunStatus,
     UserRole,
     WorkflowAction,
     WorkflowStatus,
@@ -33,8 +48,21 @@ from app.models.workflow import WorkflowEdge, WorkflowNode
 from app.models.artifact import Artifact, ArtifactVersion
 from app.models.review import Review, ReviewComment
 from app.models.agent import AgentDefinition, AgentPrompt, AgentRun, AgentRunLoopEvent
+from app.models.validator import ValidatorDefinition
+from app.models.implementation_task import ImplementationTask
+from app.models.implementation_run import ImplementationRun
+from app.models.pull_request_link import PullRequestLink
+from app.models.test_run import TestRun
+from app.models.pr_review_run import PRReviewRun
+from app.models.maintenance_run import MaintenanceRun
+from app.models.jira_project_link import JiraProjectLink
+from app.models.jira_issue_link import JiraIssueLink
+from app.models.confluence_space_link import ConfluenceSpaceLink
+from app.models.confluence_page_link import ConfluencePageLink
 from app.models.knowledge import KnowledgeChunk, KnowledgeSource
 from app.models.integration import Integration
+from app.models.integration_connection import IntegrationConnection
+from app.models.repository import Repository, RepositoryFileIndex, RepositorySnapshot
 from app.models.audit import AuditLog
 
 __all__ = [
@@ -47,10 +75,34 @@ __all__ = [
     "ArtifactStatus",
     "AgentPromptRole",
     "AgentRunStatus",
+    "ApprovalRecommendation",
+    "ImplementationTaskArea",
+    "ImplementationTaskRiskLevel",
+    "ImplementationTaskStatus",
+    "ImplementationRun",
+    "ImplementationRunStatus",
+    "ImplementationRunReviewStatus",
+    "PullRequestLink",
+    "PullRequestStatus",
+    "TestRun",
+    "TestRunStatus",
+    "TestAgentType",
+    "PRReviewRun",
+    "PRReviewRunStatus",
+    "PRReviewRecommendation",
+    "MaintenanceRun",
+    "MaintenanceRunStatus",
+    "JiraProjectLink",
+    "JiraIssueLink",
+    "JiraSourceType",
+    "ConfluenceSpaceLink",
+    "ConfluencePageLink",
+    "RepositoryFileEntryType",
     "LoopStatus",
     "LoopStepType",
     "KnowledgeSourceType",
     "KnowledgeSourceStatus",
+    "KnowledgeContentType",
     "IntegrationProvider",
     "IntegrationStatus",
     "UserRole",
@@ -67,8 +119,14 @@ __all__ = [
     "AgentPrompt",
     "AgentRun",
     "AgentRunLoopEvent",
+    "ValidatorDefinition",
+    "ImplementationTask",
     "KnowledgeSource",
     "KnowledgeChunk",
     "Integration",
+    "IntegrationConnection",
+    "Repository",
+    "RepositorySnapshot",
+    "RepositoryFileIndex",
     "AuditLog",
 ]

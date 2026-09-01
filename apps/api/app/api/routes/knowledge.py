@@ -1,24 +1,22 @@
 """Knowledge Base endpoints.
 
-Covers: register a knowledge source, list/get/update/delete sources,
+Covers: register a knowledge source, upload a document (extracted,
+chunked, and embedded in one step — see
+app/services/document_ingestion.py), list/get/update/delete sources,
 list/create the chunks under one source, (re)generate their embeddings,
 and semantic search across all chunks. Retrieval for agent runs itself
 lives in app/services/retrieval.py — this file's search endpoint is the
-same underlying query, exposed directly for standalone use (e.g. a future
+same underlying query, exposed directly for standalone use (e.g. the
 Knowledge Base search UI, or debugging what a run would retrieve).
-
-No file-upload/parsing/chunking pipeline exists yet — see
-app/models/knowledge.py's module docstring — so a chunk's `content` is
-still supplied directly rather than extracted from an uploaded file.
 """
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models import KnowledgeChunk, KnowledgeSource, KnowledgeSourceStatus, User
+from app.models import KnowledgeChunk, KnowledgeContentType, KnowledgeSource, KnowledgeSourceStatus, KnowledgeSourceType, User
 from app.schemas.knowledge import (
     KnowledgeChunkCreate,
     KnowledgeChunkRead,
@@ -28,6 +26,7 @@ from app.schemas.knowledge import (
     KnowledgeSourceUpdate,
 )
 from app.services.audit import record_audit_log
+from app.services.document_ingestion import DocumentIngestionError, chunk_text, extract_text
 from app.services.embeddings import embed_text
 from app.services.retrieval import MAX_COSINE_DISTANCE
 
@@ -80,6 +79,91 @@ def create_knowledge_source(payload: KnowledgeSourceCreate, db: Session = Depend
     return KnowledgeSourceRead.from_orm_source(source)
 
 
+# 1b. Upload a document as a new knowledge source ------------------------------------
+
+
+@router.post("/upload", response_model=KnowledgeSourceRead, status_code=status.HTTP_201_CREATED)
+async def upload_knowledge_source(
+    db: Session = Depends(get_db),
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    category: str = Form(...),
+    uploaded_by_id: uuid.UUID = Form(...),
+    content_type: KnowledgeContentType = Form(default=KnowledgeContentType.OTHER),
+    stage: str | None = Form(default=None),
+    domain: str | None = Form(default=None),
+    project_type: str | None = Form(default=None),
+    tags: str = Form(default="", description="Comma-separated."),
+) -> KnowledgeSourceRead:
+    """Extracts the uploaded file's text (see
+    app/services/document_ingestion.py — .txt/.md/.pdf), splits it into
+    chunks, and embeds each one immediately — one call instead of
+    "create a source" + "create each chunk by hand" for a real document.
+    The source lands straight in INDEXED (matching what
+    generate-embeddings does for a manually-built source), since every
+    chunk is embedded before this returns.
+
+    The uploaded file's raw bytes aren't stored anywhere (no object
+    storage is configured in this app) — only its extracted, chunked text
+    is persisted. `file_url` is set to the original filename as a plain
+    label, not a real location.
+    """
+    uploaded_by = _get_user_or_400(db, uploaded_by_id, "uploaded_by_id")
+
+    raw_bytes = await file.read()
+    try:
+        text = extract_text(filename=file.filename or "upload", raw_bytes=raw_bytes)
+    except DocumentIngestionError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    chunk_contents = chunk_text(text)
+    if not chunk_contents:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The uploaded file has no extractable text content.")
+
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+    source = KnowledgeSource(
+        title=title,
+        category=category,
+        source_type=KnowledgeSourceType.UPLOADED_DOCUMENT,
+        file_url=file.filename,
+        status=KnowledgeSourceStatus.PENDING,
+        uploaded_by=uploaded_by,
+    )
+    db.add(source)
+    db.flush()
+
+    for i, content in enumerate(chunk_contents):
+        db.add(
+            KnowledgeChunk(
+                source=source,
+                chunk_index=i,
+                content=content,
+                stage=stage,
+                domain=domain,
+                project_type=project_type,
+                content_type=content_type,
+                tags=tag_list,
+                embedding=embed_text(content),
+            )
+        )
+    source.status = KnowledgeSourceStatus.INDEXED
+    db.flush()
+
+    record_audit_log(
+        db,
+        actor_user_id=uploaded_by.id,
+        action="knowledge_source.uploaded",
+        entity_type="KnowledgeSource",
+        entity_id=source.id,
+        extra_data={"filename": file.filename, "chunk_count": len(chunk_contents), "content_type": content_type.value},
+    )
+
+    db.commit()
+    db.refresh(source)
+    return KnowledgeSourceRead.from_orm_source(source)
+
+
 # 2. List knowledge sources --------------------------------------------------------
 
 
@@ -112,11 +196,16 @@ def search_knowledge(
     query: str = Query(..., min_length=1),
     limit: int = Query(default=5, ge=1, le=20),
     category: str | None = Query(default=None),
+    stage: str | None = Query(default=None, description="A WorkflowNode.node_key — matches that stage or stage-agnostic (null-stage) chunks, same rule as automatic retrieval."),
+    content_type: KnowledgeContentType | None = Query(default=None),
+    domain: str | None = Query(default=None),
+    project_type: str | None = Query(default=None),
 ) -> list[KnowledgeSearchResult]:
     """Cosine-similarity search over every chunk with an embedding — the
     same underlying query app/services/retrieval.py runs before an agent
-    run, exposed directly. Results below the same relevance threshold used
-    there are excluded, so an unrelated query legitimately returns []."""
+    run, exposed directly (with the same stage-aware rule when `stage` is
+    given). Results below the same relevance threshold used there are
+    excluded, so an unrelated query legitimately returns []."""
     query_vector = embed_text(query)
     distance = KnowledgeChunk.embedding.cosine_distance(query_vector)
 
@@ -128,6 +217,14 @@ def search_knowledge(
     )
     if category is not None:
         q = q.filter(KnowledgeSource.category == category)
+    if stage is not None:
+        q = q.filter((KnowledgeChunk.stage.is_(None)) | (KnowledgeChunk.stage == stage))
+    if content_type is not None:
+        q = q.filter(KnowledgeChunk.content_type == content_type)
+    if domain is not None:
+        q = q.filter(KnowledgeChunk.domain == domain)
+    if project_type is not None:
+        q = q.filter(KnowledgeChunk.project_type == project_type)
 
     rows = q.order_by(distance).limit(limit).all()
 
@@ -139,6 +236,11 @@ def search_knowledge(
             chunk_index=chunk.chunk_index,
             content=chunk.content,
             similarity=round(1.0 - float(dist), 4),
+            stage=chunk.stage,
+            domain=chunk.domain,
+            project_type=chunk.project_type,
+            content_type=chunk.content_type,
+            tags=chunk.tags,
         )
         for chunk, source, dist in rows
     ]
@@ -240,6 +342,11 @@ def create_knowledge_chunk(
         chunk_index=payload.chunk_index,
         content=payload.content,
         metadata_json=payload.metadata_json,
+        stage=payload.stage,
+        domain=payload.domain,
+        project_type=payload.project_type,
+        content_type=payload.content_type,
+        tags=payload.tags,
         # Generated immediately, not left for a separate step — see
         # KnowledgeChunkCreate's docstring on why this is never client-supplied.
         embedding=embed_text(payload.content),

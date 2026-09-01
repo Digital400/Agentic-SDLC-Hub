@@ -16,6 +16,15 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.models import Project, WorkflowEdge, WorkflowNode, WorkflowStatus
 
+# Used when a template node omits contextTokenBudget/outputTokenBudget/
+# ragTopK/maxRagTokens — match WorkflowNode's own column defaults (see
+# app/models/workflow.py), kept here too since a template is allowed to
+# override them.
+DEFAULT_CONTEXT_TOKEN_BUDGET = 8000
+DEFAULT_OUTPUT_TOKEN_BUDGET = 2048
+DEFAULT_RAG_TOP_K = 5
+DEFAULT_MAX_RAG_TOKENS = 2000
+
 
 class WorkflowTemplateError(Exception):
     """Raised when a workflow template file is missing or malformed."""
@@ -99,6 +108,12 @@ def generate_workflow_graph(db: Session, project: Project, template: dict[str, A
             requires_human_approval=node_data["requiresHumanApproval"],
             allowed_actions=node_data["allowedActions"],
             status=WorkflowStatus.READY if node_data["id"] == template["startNode"] else WorkflowStatus.LOCKED,
+            context_token_budget=node_data.get("contextTokenBudget", DEFAULT_CONTEXT_TOKEN_BUDGET),
+            output_token_budget=node_data.get("outputTokenBudget", DEFAULT_OUTPUT_TOKEN_BUDGET),
+            full_content_artifact_types=node_data.get("fullContentArtifactTypes", []),
+            rag_top_k=node_data.get("ragTopK", DEFAULT_RAG_TOP_K),
+            max_rag_tokens=node_data.get("maxRagTokens", DEFAULT_MAX_RAG_TOKENS),
+            required_evidence_section=node_data.get("requiredEvidenceSection"),
             order_index=order_index,
             position_x=position.get("x", 0),
             position_y=position.get("y", 0),

@@ -15,23 +15,57 @@ from app.models import (
     AgentRun,
     Artifact,
     ArtifactStatus,
+    ArtifactVersion,
+    ImplementationRun,
+    ImplementationTask,
+    ImplementationTaskArea,
+    ImplementationTaskRiskLevel,
+    JiraProjectLink,
+    ConfluenceSpaceLink,
+    MaintenanceRun,
     Project,
     ProjectMember,
     ProjectRole,
     ProjectStatus,
+    Repository,
+    RepositorySnapshot,
+    PRReviewRun,
+    Review,
+    TestRun,
+    ReviewStatus,
     User,
     WorkflowEdge,
     WorkflowNode,
+    WorkflowStatus,
 )
 from app.schemas.agent_run import AgentRunRead
 from app.schemas.artifact import ArtifactRead
+from app.schemas.github_integration import RepositoryRead
+from app.schemas.implementation_task import (
+    GenerateImplementationPlanRequest,
+    GenerateImplementationPlanResponse,
+    ImplementationTaskRead,
+)
+from app.schemas.implementation_run import ImplementationRunRead
+from app.schemas.test_run import TestRunRead
+from app.schemas.pr_review_run import PRReviewRunRead
 from app.schemas.jira_export import JiraExportPreviewRead
+from app.schemas.jira_integration import JiraProjectLinkRead
+from app.schemas.confluence_integration import ConfluenceSpaceLinkRead
+from app.schemas.maintenance_run import MaintenanceRunRead
 from app.schemas.project import ProjectCreate, ProjectListResponse, ProjectRead, ProjectUpdate
+from app.schemas.repo_context import RepoContextPreviewRead
+from app.schemas.review import ReviewRead
 from app.schemas.workflow import WorkflowEdgeRead, WorkflowNodeRead, WorkflowNodeStatusUpdate
+from app.api.routes.github_integration import decrypt_repository_token
+from app.api.routes.test_runs import get_review_id_for_test_run
 from app.services.audit import record_audit_log
+from app.services.github_integration import GitHubIntegrationError
 from app.services.graph_engine import GraphEngineService
+from app.services.implementation_planner import build_implementation_plan, render_plan_markdown
 from app.services.jira_export import PUSH_TO_JIRA_ENABLED, build_jira_export_preview
-from app.services.permissions import require_can_override_node, require_can_update_project
+from app.services.permissions import require_can_edit_stage, require_can_override_node, require_can_update_project
+from app.services.repo_context_builder import DEFAULT_MAX_CONTEXT_TOKENS, DEFAULT_MAX_FILE_COUNT, RepoContextBuilderService
 from app.services.story_export import STORY_BACKLOG_ARTIFACT_TYPE, parse_story_backlog
 from app.services.workflow_templates import WorkflowTemplateError, generate_workflow_graph, load_workflow_template
 
@@ -257,6 +291,337 @@ def list_project_agent_runs(project_id: uuid.UUID, db: Session = Depends(get_db)
     _get_project_or_404(db, project_id)
     runs = db.query(AgentRun).filter(AgentRun.project_id == project_id).order_by(AgentRun.created_at.desc()).all()
     return [AgentRunRead.from_orm_run(r) for r in runs]
+
+
+# 4. List implementation tasks by project --------------------------------------------
+
+
+@router.get("/{project_id}/implementation-tasks", response_model=list[ImplementationTaskRead])
+def list_project_implementation_tasks(project_id: uuid.UUID, db: Session = Depends(get_db)) -> list[ImplementationTask]:
+    _get_project_or_404(db, project_id)
+    return (
+        db.query(ImplementationTask)
+        .filter(ImplementationTask.project_id == project_id)
+        .order_by(ImplementationTask.order_index)
+        .all()
+    )
+
+
+# 5. Get a project's configured GitHub repository, if any ---------------------------
+
+
+@router.get("/{project_id}/github-repository", response_model=RepositoryRead | None)
+def get_project_github_repository(project_id: uuid.UUID, db: Session = Depends(get_db)) -> Repository | None:
+    """See app/api/routes/github_integration.py for the read-only GitHub
+    actions (branches, tree, file, snapshots) against the repository this
+    returns."""
+    _get_project_or_404(db, project_id)
+    return db.query(Repository).filter(Repository.project_id == project_id).order_by(Repository.created_at.desc()).first()
+
+
+# 5a. Get a project's configured Jira project, if any --------------------------------
+
+
+@router.get("/{project_id}/jira-project", response_model=JiraProjectLinkRead | None)
+def get_project_jira_project(project_id: uuid.UUID, db: Session = Depends(get_db)) -> JiraProjectLink | None:
+    """See app/api/routes/jira_integration.py for the push-preview/push/
+    sync-status actions against the Jira project this returns."""
+    _get_project_or_404(db, project_id)
+    return db.query(JiraProjectLink).filter(JiraProjectLink.project_id == project_id).first()
+
+
+# 5b. Get a project's configured Confluence space, if any -----------------------------
+
+
+@router.get("/{project_id}/confluence-space", response_model=ConfluenceSpaceLinkRead | None)
+def get_project_confluence_space(project_id: uuid.UUID, db: Session = Depends(get_db)) -> ConfluenceSpaceLink | None:
+    """See app/api/routes/confluence_integration.py for the publish-preview/
+    publish actions against the Confluence space this returns."""
+    _get_project_or_404(db, project_id)
+    return db.query(ConfluenceSpaceLink).filter(ConfluenceSpaceLink.project_id == project_id).first()
+
+
+# 5c. List a project's Maintenance Agent run history -----------------------------------
+
+
+@router.get("/{project_id}/maintenance-runs", response_model=list[MaintenanceRunRead])
+def list_maintenance_runs(project_id: uuid.UUID, db: Session = Depends(get_db)) -> list[MaintenanceRunRead]:
+    _get_project_or_404(db, project_id)
+    runs = db.query(MaintenanceRun).filter(MaintenanceRun.project_id == project_id).order_by(MaintenanceRun.created_at.desc()).all()
+    return [MaintenanceRunRead.from_orm_run(r) for r in runs]
+
+
+# Generate Implementation Plan (rule 6) -----------------------------------------------
+#
+# One action: parses the approved LLD (+ story backlog) into structured,
+# persisted ImplementationTask rows (see
+# app/services/implementation_planner.py), saves the plan as a reviewable
+# Markdown artifact, and resubmits it for review in the same step — mirrors
+# app/services/revision_agent.py's "generate and auto-resubmit" pattern.
+# "Approve Implementation Plan" (rule 7) is deliberately NOT a new endpoint
+# — it's the existing POST /reviews/{id}/approve against the review this
+# creates, the same review-decision endpoint every other stage already
+# uses (which is also what makes rule 8 — coding agents cannot start
+# before this is approved — work for free: `implementation.required_inputs`
+# already includes `implementation_plan`, gated by the exact same
+# approved-artifact mechanism as every other required input).
+
+
+@router.post(
+    "/{project_id}/implementation-plan/generate",
+    response_model=GenerateImplementationPlanResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def generate_implementation_plan(
+    project_id: uuid.UUID, payload: GenerateImplementationPlanRequest, db: Session = Depends(get_db)
+) -> GenerateImplementationPlanResponse:
+    project = _get_project_or_404(db, project_id)
+
+    node = (
+        db.query(WorkflowNode)
+        .filter(WorkflowNode.project_id == project_id, WorkflowNode.node_key == "implementation_planning")
+        .first()
+    )
+    if node is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"Project {project_id}'s workflow has no implementation_planning stage."
+        )
+
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user",
+        )
+    require_can_edit_stage(triggered_by, node.node_key)
+
+    reviewer = db.get(User, payload.reviewer_id)
+    if reviewer is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"reviewer_id {payload.reviewer_id} does not match an existing user")
+
+    # Rule 6: cannot generate before the LLD (and story backlog) are
+    # approved — the same GraphEngineService gate every stage's agent run
+    # already passes through, not a bespoke check.
+    graph_engine = GraphEngineService(db)
+    validation = graph_engine.validate_can_run(project=project, node=node, freeform_context={})
+    if not validation.can_run:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Cannot generate — " + "; ".join(validation.reasons) + ".")
+
+    lld_content = validation.approved_artifact_content.get("lld_document", "")
+    story_backlog_content = validation.approved_artifact_content.get("story_backlog", "")
+
+    graph_engine.mark_running(node)
+    task_drafts = build_implementation_plan(lld_content=lld_content, story_backlog_content=story_backlog_content)
+    plan_markdown = render_plan_markdown(task_drafts)
+
+    artifact = (
+        db.query(Artifact)
+        .filter(Artifact.workflow_node_id == node.id, Artifact.artifact_type == node.output_artifact_type)
+        .order_by(Artifact.created_at.desc())
+        .first()
+    )
+    if artifact is None:
+        artifact = Artifact(
+            project_id=project.id, workflow_node=node, artifact_type=node.output_artifact_type,
+            title=node.name, status=ArtifactStatus.DRAFT, created_by=triggered_by,
+        )
+        db.add(artifact)
+        db.flush()
+        record_audit_log(
+            db, project_id=project.id, actor_user_id=triggered_by.id, action="artifact.created",
+            entity_type="Artifact", entity_id=artifact.id,
+            extra_data={"workflow_node": node.node_key, "artifact_type": artifact.artifact_type},
+        )
+
+    last_version_number = (
+        db.query(ArtifactVersion.version_number)
+        .filter(ArtifactVersion.artifact_id == artifact.id)
+        .order_by(ArtifactVersion.version_number.desc())
+        .limit(1)
+        .scalar()
+    )
+    next_version_number = (last_version_number or 0) + 1
+    version = ArtifactVersion(
+        artifact=artifact, version_number=next_version_number, content_markdown=plan_markdown,
+        created_by=triggered_by,
+        change_summary=f"Generated {len(task_drafts)} implementation task(s) from the approved LLD.",
+    )
+    db.add(version)
+    db.flush()
+
+    artifact.current_version = version
+    artifact.status = ArtifactStatus.READY_FOR_REVIEW
+
+    # Replace this node's task set wholesale (see ImplementationTask's
+    # class docstring) — regenerating is a fresh plan, not a merge.
+    db.query(ImplementationTask).filter(ImplementationTask.workflow_node_id == node.id).delete()
+    task_rows: list[ImplementationTask] = []
+    for i, draft in enumerate(task_drafts):
+        row = ImplementationTask(
+            project_id=project.id, workflow_node_id=node.id, artifact_id=artifact.id, artifact_version_id=version.id,
+            title=draft.title, description=draft.description, linked_story=draft.linked_story,
+            linked_lld_section=draft.linked_lld_section, area=ImplementationTaskArea(draft.area),
+            expected_paths=draft.expected_paths, dependencies=draft.dependencies,
+            acceptance_criteria=draft.acceptance_criteria, test_expectation=draft.test_expectation,
+            risk_level=ImplementationTaskRiskLevel(draft.risk_level), assigned_agent_type=draft.assigned_agent_type,
+            order_index=i,
+        )
+        db.add(row)
+        task_rows.append(row)
+    db.flush()
+
+    graph_engine.mark_waiting_for_review(node)
+
+    review = Review(artifact_version=version, workflow_node=node, reviewer_id=reviewer.id, status=ReviewStatus.PENDING)
+    db.add(review)
+    db.flush()
+
+    record_audit_log(
+        db, project_id=project.id, actor_user_id=triggered_by.id, action="implementation_plan.generated",
+        entity_type="Artifact", entity_id=artifact.id,
+        extra_data={"task_count": len(task_rows), "version_number": next_version_number},
+    )
+    record_audit_log(
+        db, project_id=project.id, actor_user_id=triggered_by.id, action="artifact_version.created",
+        entity_type="ArtifactVersion", entity_id=version.id,
+        extra_data={"artifact_id": str(artifact.id), "version_number": next_version_number},
+    )
+    record_audit_log(
+        db, project_id=project.id, actor_user_id=triggered_by.id, action="workflow_node.status_changed",
+        entity_type="WorkflowNode", entity_id=node.id,
+        extra_data={"node_key": node.node_key, "to": WorkflowStatus.WAITING_FOR_REVIEW.value},
+    )
+    record_audit_log(
+        db, project_id=project.id, actor_user_id=reviewer.id, action="review.created",
+        entity_type="Review", entity_id=review.id,
+        extra_data={"artifact_id": str(artifact.id), "artifact_version_id": str(version.id)},
+    )
+
+    db.commit()
+    db.refresh(artifact)
+    db.refresh(version)
+    db.refresh(review)
+    for row in task_rows:
+        db.refresh(row)
+
+    return GenerateImplementationPlanResponse(
+        artifact_id=artifact.id,
+        artifact_version_id=version.id,
+        tasks=[ImplementationTaskRead.model_validate(r) for r in task_rows],
+        review=ReviewRead.from_orm_review(review),
+    )
+
+
+# Repo Context Preview (rule 7 of the Repo Context Builder requirements) -------------
+#
+# Read-only, stateless — same category as app/api/routes/github_integration.py's
+# get_repository_tree/read_file endpoints (compute-and-return, no
+# persistence, no audit log). Lets a human see exactly what repo context
+# would be sent to a coding agent for one ImplementationTask before any
+# coding agent exists to consume it.
+
+
+@router.get("/{project_id}/implementation-tasks/{task_id}/repo-context-preview", response_model=RepoContextPreviewRead)
+def preview_repo_context(
+    project_id: uuid.UUID,
+    task_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    snapshot_id: uuid.UUID | None = Query(default=None),
+    max_files: int = Query(default=DEFAULT_MAX_FILE_COUNT, ge=1, le=500),
+    max_tokens: int = Query(default=DEFAULT_MAX_CONTEXT_TOKENS, ge=100),
+) -> RepoContextPreviewRead:
+    _get_project_or_404(db, project_id)
+
+    task = db.get(ImplementationTask, task_id)
+    if task is None or task.project_id != project_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Implementation task {task_id} not found in project {project_id}")
+
+    repository = db.query(Repository).filter(Repository.project_id == project_id).order_by(Repository.created_at.desc()).first()
+    if repository is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Project {project_id} has no configured GitHub repository yet.")
+
+    if snapshot_id is not None:
+        snapshot = db.get(RepositorySnapshot, snapshot_id)
+        if snapshot is None or snapshot.repository_id != repository.id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Repository snapshot {snapshot_id} not found for this repository.")
+    else:
+        snapshot = (
+            db.query(RepositorySnapshot)
+            .filter(RepositorySnapshot.repository_id == repository.id)
+            .order_by(RepositorySnapshot.created_at.desc())
+            .first()
+        )
+        if snapshot is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "This repository has no snapshots yet — create one first.")
+
+    # Degrades gracefully rather than failing the whole preview: a missing
+    # or undecryptable credential just means every file comes back
+    # metadata-only ("summary") instead of with fetched content.
+    try:
+        github_token = decrypt_repository_token(repository)
+    except HTTPException:
+        github_token = None
+
+    service = RepoContextBuilderService(db, max_file_count=max_files, max_context_tokens=max_tokens)
+    try:
+        result = service.build(task=task, snapshot=snapshot, github_token=github_token)
+    except GitHubIntegrationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+    return RepoContextPreviewRead.from_result(result)
+
+
+# 6a. List one task's Testing Agent run history ---------------------------------------
+
+
+@router.get("/{project_id}/implementation-tasks/{task_id}/test-runs", response_model=list[TestRunRead])
+def list_task_test_runs(project_id: uuid.UUID, task_id: uuid.UUID, db: Session = Depends(get_db)) -> list[TestRunRead]:
+    _get_project_or_404(db, project_id)
+    task = db.get(ImplementationTask, task_id)
+    if task is None or task.project_id != project_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Implementation task {task_id} not found in project {project_id}")
+    runs = (
+        db.query(TestRun)
+        .filter(TestRun.implementation_task_id == task_id)
+        .order_by(TestRun.created_at.desc())
+        .all()
+    )
+    return [TestRunRead.from_orm_run(r, review_id=get_review_id_for_test_run(db, r)) for r in runs]
+
+
+# 6b. List one task's PR Review Agent run history ---------------------------------------
+
+
+@router.get("/{project_id}/implementation-tasks/{task_id}/pr-review-runs", response_model=list[PRReviewRunRead])
+def list_task_pr_review_runs(project_id: uuid.UUID, task_id: uuid.UUID, db: Session = Depends(get_db)) -> list[PRReviewRunRead]:
+    _get_project_or_404(db, project_id)
+    task = db.get(ImplementationTask, task_id)
+    if task is None or task.project_id != project_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Implementation task {task_id} not found in project {project_id}")
+    runs = (
+        db.query(PRReviewRun)
+        .filter(PRReviewRun.implementation_task_id == task_id)
+        .order_by(PRReviewRun.created_at.desc())
+        .all()
+    )
+    return [PRReviewRunRead.from_orm_run(r) for r in runs]
+
+
+# 6. List one task's Implementation Agent run history --------------------------------
+
+
+@router.get("/{project_id}/implementation-tasks/{task_id}/implementation-runs", response_model=list[ImplementationRunRead])
+def list_task_implementation_runs(project_id: uuid.UUID, task_id: uuid.UUID, db: Session = Depends(get_db)) -> list[ImplementationRun]:
+    _get_project_or_404(db, project_id)
+    task = db.get(ImplementationTask, task_id)
+    if task is None or task.project_id != project_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Implementation task {task_id} not found in project {project_id}")
+    return (
+        db.query(ImplementationRun)
+        .filter(ImplementationRun.implementation_task_id == task_id)
+        .order_by(ImplementationRun.created_at.desc())
+        .all()
+    )
 
 
 # 7. Update workflow node status ---------------------------------------------------

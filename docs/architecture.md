@@ -82,13 +82,27 @@ parallel later, instead of being a fixed linear wizard.
 
 ## MCP integrations (planned)
 
-**Status: foundation only.** The `Integration` model
+**Status: foundation only, except GitHub.** The `Integration` model
 (`app/models/integration.py`) and its CRUD API (`app/api/routes/integrations.py`)
-exist so the Settings UI has real data to show, but no MCP client is wired
-up, no integration ever actually connects, and `POST /integrations/{id}/connect`
-deliberately returns `501 Not Implemented` rather than faking success. This
-section describes the intended shape once that changes — nothing below is
-built yet.
+exist so the Settings UI has real data to show, but for Jira/Confluence/
+Slack/Teams/Azure DevOps no MCP client is wired up, no integration ever
+actually connects, and `POST /integrations/{id}/connect` deliberately
+returns `501 Not Implemented` rather than faking success. This section
+describes the intended shape once that changes — none of it is built yet
+for those five.
+
+**GitHub is the exception** (see `app/services/github_integration.py`,
+`app/api/routes/github_integration.py`, and `docs/github-setup.md`): a
+real, read-only foundation exists today — connect a personal access
+token, save a project's repo, list branches, read the file tree, read a
+file's content, and create a point-in-time snapshot (persisted as
+`Repository`/`RepositorySnapshot`/`RepositoryFileIndex` rows). No push, no
+branch creation, and no MCP server — this predates and doesn't yet follow
+the MCP shape described below; it's a direct REST client. It also
+deliberately diverges from point 2 below: no vault exists in this
+codebase, so the PAT is encrypted at rest with an app-managed key (see
+`app/core/security.py`'s docstring) rather than vault-resolved — a
+disclosed, pragmatic bridge, not the target end state.
 
 ### Why MCP
 
@@ -150,16 +164,20 @@ Likely first uses, once connected:
 |---|---|
 | Jira | Push an approved Story Crafting backlog as Jira issues (see the Export Stories feature, which already produces a clean structured export — the natural predecessor to a real push) |
 | Confluence | Publish an approved artifact (HLD, requirements) as a page |
-| GitHub | Link Implementation-stage work to commits/PRs; read PR/CI status back into a Testing-stage agent's context |
+| GitHub | Read-only repo connection + scan already implemented (see above); linking Implementation-stage work to commits/PRs, and reading PR/CI status into a Testing-stage agent's context, are still planned |
 | Slack / Teams | Notify a channel when a review is pending or decided, or a release ships |
 | Azure DevOps | Sync work items and pipeline status, for orgs standardized on Azure over Jira/GitHub |
 
 ### Non-goals for now
 
-- No real MCP client library is integrated yet.
-- No integration ever actually authenticates or connects — every seeded
-  row is `NOT_CONNECTED` and stays that way until this plan is executed.
-- No secrets/credentials are stored anywhere in this codebase today.
+- No real MCP client library is integrated yet — GitHub's read-only
+  foundation is a direct REST client, not an MCP server.
+- Jira/Confluence/Slack/Teams/Azure DevOps never actually authenticate or
+  connect — every seeded row for those providers is `NOT_CONNECTED` and
+  stays that way until this plan is executed.
+- GitHub has no push and no branch creation, and stores its PAT
+  app-encrypted rather than in a vault (see above) — the only credential
+  persisted anywhere in this codebase today.
 
 ## Non-goals for now
 

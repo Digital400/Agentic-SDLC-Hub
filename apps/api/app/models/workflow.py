@@ -34,6 +34,14 @@ class WorkflowNode(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     output_artifact_type: Mapped[str] = mapped_column(String(100), nullable=False)
     requires_human_approval: Mapped[bool] = mapped_column(Boolean, nullable=False)
     allowed_actions: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # Which of this node's required_inputs this stage directly depends on
+    # the DETAILED content of — see app/services/ai_generation.py's
+    # build_prioritized_context, which uses an approved input's
+    # agent_context_summary by default and only escalates to full content
+    # for an artifact_type listed here (or when the run's own action is
+    # IMPROVE/VALIDATE — see generate()'s docstring for those two other
+    # cases). Empty by default: most stages work fine from a summary.
+    full_content_artifact_types: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
 
     status: Mapped[WorkflowStatus] = mapped_column(
         Enum(WorkflowStatus, native_enum=False, length=30, validate_strings=True),
@@ -49,6 +57,35 @@ class WorkflowNode(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # lives in AuditLog; this is just the latest one, visible on the node
     # itself without joining out to the audit trail.
     override_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A `## <heading>` this stage's artifact must have, with non-empty
+    # content, before a review can approve it (see
+    # GraphEngineService.validate_evidence_requirement) — e.g. "Test
+    # Evidence" on Testing. Null means no such requirement; most stages
+    # have none.
+    required_evidence_section: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Token budgets for this stage's agent calls — see
+    # app/services/token_budget.py's TokenBudgetService, which prioritizes
+    # and fits an agent run's context into context_token_budget, and
+    # app/services/ai_generation.py, which caps the model's response at
+    # output_token_budget. Copied in from the workflow template at
+    # generation time (see workflow_templates.py), same as every other
+    # per-node config field — set here so a heavier stage (e.g.
+    # Implementation) can carry a larger budget than a lighter one (e.g.
+    # Requirement Intake) without a code change.
+    context_token_budget: Mapped[int] = mapped_column(Integer, default=8000, nullable=False)
+    output_token_budget: Mapped[int] = mapped_column(Integer, default=2048, nullable=False)
+
+    # RAG tuning for this stage — see app/services/retrieval.py.
+    # rag_top_k caps how many chunks are even considered before token
+    # budgeting; max_rag_tokens is a separate, dedicated cap on how many
+    # tokens' worth of those chunks retrieval actually keeps (independent
+    # of context_token_budget above, which governs the whole prompt, not
+    # just the RAG slice of it) — a stage that leans harder on retrieved
+    # knowledge (e.g. Implementation citing coding standards) can carry a
+    # bigger allowance than one that mostly works from upstream artifacts.
+    rag_top_k: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    max_rag_tokens: Mapped[int] = mapped_column(Integer, default=2000, nullable=False)
 
     # Display order (matches the template's node order) and canvas position
     # for the React Flow rendering of this project's graph.

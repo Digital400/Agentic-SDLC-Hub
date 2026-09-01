@@ -6,7 +6,14 @@ import "reactflow/dist/style.css";
 
 import { NodeDetailsPanel } from "@/components/workflow/node-details-panel";
 import { StageNode, type StageNodeData } from "@/components/workflow/stage-node";
-import type { DocumentArtifact, ProjectWorkflowEdge, ProjectWorkflowNode, ReviewItem } from "@/lib/types";
+import type {
+  AgentRunDetail,
+  DocumentArtifact,
+  ProjectWorkflowEdge,
+  ProjectWorkflowNode,
+  ReviewItem,
+  ValidatorDefinitionItem,
+} from "@/lib/types";
 
 const nodeTypes = { stage: StageNode };
 
@@ -16,14 +23,25 @@ export function WorkflowCanvas({
   edges,
   documents,
   reviews,
+  agentRuns,
+  validators,
   currentUserId,
+  isAdmin,
 }: {
   projectId: string;
   nodes: ProjectWorkflowNode[];
   edges: ProjectWorkflowEdge[];
   documents: DocumentArtifact[];
   reviews: ReviewItem[];
+  /** All of this project's agent runs, newest-first or in any order — the
+   * canvas picks each node's most recent one for the card/detail panel. */
+  agentRuns: AgentRunDetail[];
+  /** All validator definitions — matched to a node by stage === node.nodeKey. */
+  validators: ValidatorDefinitionItem[];
   currentUserId: string | null;
+  /** Gates the manual override section of the detail panel — see
+   * apps/api/app/services/permissions.py's require_can_override_node. */
+  isAdmin: boolean;
 }) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? null;
@@ -38,22 +56,46 @@ export function WorkflowCanvas({
     [selectedNode, knownArtifactTypes]
   );
 
+  // Each node's most recent agent run (by createdAt) — backs the quality
+  // score / token cost shown on the card and the "Last agent run" /
+  // "Token usage" / "RAG sources used" sections of the detail panel.
+  const lastRunByNodeId = useMemo(() => {
+    const map = new Map<string, AgentRunDetail>();
+    for (const run of agentRuns) {
+      const current = map.get(run.workflowNodeId);
+      if (!current || run.createdAt > current.createdAt) map.set(run.workflowNodeId, run);
+    }
+    return map;
+  }, [agentRuns]);
+
+  const validatorByStage = useMemo(() => {
+    const map = new Map<string, ValidatorDefinitionItem>();
+    for (const v of validators) map.set(v.stage, v);
+    return map;
+  }, [validators]);
+
   const flowNodes = useMemo<Node<StageNodeData>[]>(
     () =>
-      nodes.map((node) => ({
-        id: node.id,
-        type: "stage",
-        position: node.position,
-        data: {
-          label: node.name,
-          status: node.status,
-          assignedRole: node.assignedRole,
-          outputArtifactType: node.outputArtifactType,
-          requiresHumanApproval: node.requiresHumanApproval,
-          selected: node.id === selectedNodeId,
-        },
-      })),
-    [nodes, selectedNodeId]
+      nodes.map((node) => {
+        const lastRun = lastRunByNodeId.get(node.id) ?? null;
+        return {
+          id: node.id,
+          type: "stage",
+          position: node.position,
+          data: {
+            label: node.name,
+            status: node.status,
+            assignedRole: node.assignedRole,
+            outputArtifactType: node.outputArtifactType,
+            requiresHumanApproval: node.requiresHumanApproval,
+            qualityScore: lastRun?.loopQualityScore ?? null,
+            lastRunCost: lastRun?.cost ?? null,
+            blockedReason: node.blockedReason,
+            selected: node.id === selectedNodeId,
+          },
+        };
+      }),
+    [nodes, selectedNodeId, lastRunByNodeId]
   );
 
   const flowEdges = useMemo<Edge[]>(
@@ -102,7 +144,10 @@ export function WorkflowCanvas({
           documents={documents}
           reviews={reviews}
           freeformInputKeys={selectedNodeFreeformInputKeys}
+          lastRun={lastRunByNodeId.get(selectedNode.id) ?? null}
+          validator={validatorByStage.get(selectedNode.nodeKey) ?? null}
           currentUserId={currentUserId}
+          isAdmin={isAdmin}
           onClose={() => setSelectedNodeId(null)}
         />
       ) : null}

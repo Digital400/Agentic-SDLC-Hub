@@ -92,6 +92,21 @@ def parse_story_backlog(content_markdown: str) -> list[Story]:
     return stories
 
 
+def find_related_story(story_backlog_content: str, linked_story: str | None) -> Story | None:
+    """Matches an ImplementationTask's `linked_story` (a title, not a real
+    FK — see app/models/implementation_task.py) against the approved
+    story backlog. Shared by app/api/routes/implementation_runs.py and
+    app/services/pr_review_agent.py — both need "the story this task
+    belongs to" for their own agent's context, and neither should
+    re-derive this lookup independently."""
+    if not linked_story:
+        return None
+    for story in parse_story_backlog(story_backlog_content):
+        if story.title.strip().lower() == linked_story.strip().lower():
+            return story
+    return None
+
+
 def render_markdown(stories: list[Story], backlog_title: str) -> str:
     lines = [f"# {backlog_title}", ""]
     for story in stories:

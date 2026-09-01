@@ -1,0 +1,273 @@
+"""ImplementationAgentService — turns one approved ImplementationTask into
+a *proposed* diff for a human to review, for the four area agents this
+request actually names (Backend/Frontend/Database/Docs — see
+SUPPORTED_AREAS below; Testing/Infra stay unimplemented, same as
+app/services/implementation_planner.py's own forward-looking, not-yet-real
+`AREA_TO_AGENT_TYPE` entries for those two).
+
+Mirrors validator_agent.py's/implementation_planner.py's exact real-AI/
+heuristic split and resilience contract: one JSON-structured call via
+generate_raw_text when a real provider is configured, a deterministic
+heuristic otherwise — or if the real call errors or returns unparseable
+JSON (never let a formatting slip or provider outage block a run).
+
+HARD RULE: this module never writes to a real file, branch, or repository.
+Its only output is a unified diff (via stdlib `difflib` — no diffing
+dependency exists or is needed anywhere else in this codebase) plus
+supporting metadata, meant to be read by a human before anything else ever
+happens to it (see app/api/routes/implementation_runs.py, which is the
+only thing that persists this output, and app/models/implementation_run.py,
+whose class docstring repeats this same boundary).
+"""
+
+from __future__ import annotations
+
+import difflib
+import json
+import logging
+from dataclasses import dataclass, field
+
+from app.models.enums import ImplementationTaskArea
+from app.models.implementation_task import ImplementationTask
+from app.services.ai_generation import AIGenerationError, generate_raw_text, get_active_provider
+from app.services.repo_context_builder import RepoContextPreviewResult
+from app.services.story_export import Story
+
+logger = logging.getLogger(__name__)
+
+# The four agent types this request actually names — see module docstring.
+# Starting a run for a task outside this set is rejected by the route
+# before this service is ever called (app/api/routes/implementation_runs.py).
+SUPPORTED_AREAS = {
+    ImplementationTaskArea.BACKEND,
+    ImplementationTaskArea.FRONTEND,
+    ImplementationTaskArea.DATABASE,
+    ImplementationTaskArea.DOCS,
+}
+
+_DEFAULT_TEST_COMMAND_BY_AREA: dict[str, str] = {
+    "BACKEND": "cd apps/api && .venv/Scripts/python.exe -m pytest -q",
+    "DATABASE": "cd apps/api && .venv/Scripts/python.exe -m pytest -q",
+    "FRONTEND": "cd apps/web && yarn test",
+    "DOCS": "N/A — documentation change; verify by reading the rendered file.",
+}
+
+_VALID_CHANGE_TYPES = {"create", "modify", "delete"}
+
+
+@dataclass
+class ProposedFileChange:
+    path: str
+    change_type: str  # "create" | "modify" | "delete"
+    summary: str
+    # The full proposed final content for this file — None for "delete".
+    # This, not the diff, is what's actually written to GitHub when a PR
+    # is created (see app/services/github_integration.py's
+    # create_or_update_file): applying a unified diff textually would need
+    # a patch-application library this codebase doesn't have and isn't
+    # adding just for this. The diff above remains what a human reads;
+    # this is what an agent-run PR would write.
+    after_content: str | None = None
+
+
+@dataclass
+class ImplementationAgentResult:
+    proposed_file_changes: list[ProposedFileChange] = field(default_factory=list)
+    diff_text: str = ""
+    explanation: str = ""
+    test_command: str = ""
+    risks: list[str] = field(default_factory=list)
+    used_mock: bool = True
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cost: float = 0.0
+
+
+def _placeholder_after_content(task: ImplementationTask) -> str:
+    lines = [
+        f"# TODO(implementation-agent): implement \"{task.title}\"",
+        f"# {task.description}",
+        "#",
+        "# Acceptance criteria to satisfy:",
+    ]
+    lines += [f"# - {c}" for c in task.acceptance_criteria] or ["# (none specified)"]
+    return "\n".join(lines) + "\n"
+
+
+def _unified_diff_for_path(path: str, *, before: str, after: str) -> str:
+    diff_lines = difflib.unified_diff(
+        before.splitlines(keepends=True), after.splitlines(keepends=True),
+        fromfile=f"a/{path}", tofile=f"b/{path}",
+    )
+    return "".join(diff_lines)
+
+
+def _change_type_for_path(path: str, repo_context: RepoContextPreviewResult) -> str:
+    for entry in repo_context.suggested_edit_scope:
+        if entry["path"] == path:
+            return "create" if entry["status"] == "new" else "modify"
+    # Not one of the task's own declared expected_paths (e.g. produced by
+    # the real-AI path) — default to "modify", the safer assumption.
+    return "modify"
+
+
+def _existing_snippet(path: str, repo_context: RepoContextPreviewResult) -> str:
+    for f in repo_context.relevant_files:
+        if f.path == path and f.content_mode == "full" and f.snippet:
+            return f.snippet
+    return ""
+
+
+# --- Heuristic path: no real code synthesis, a clearly-labeled scaffold -------------
+
+
+def _build_heuristic_result(
+    *, task: ImplementationTask, repo_context: RepoContextPreviewResult, story: Story | None, lld_summary: str
+) -> ImplementationAgentResult:
+    paths = task.expected_paths or [f"(no expected path declared for '{task.title}')"]
+    changes: list[ProposedFileChange] = []
+    diff_parts: list[str] = []
+
+    for path in paths:
+        change_type = _change_type_for_path(path, repo_context)
+        before = "" if change_type == "create" else _existing_snippet(path, repo_context)
+        after = _placeholder_after_content(task) if change_type != "delete" else ""
+        diff_parts.append(_unified_diff_for_path(path, before=before, after=after))
+        changes.append(
+            ProposedFileChange(
+                path=path, change_type=change_type, summary=task.description[:300],
+                after_content=after if change_type != "delete" else None,
+            )
+        )
+
+    test_command = task.test_expectation.strip() or _DEFAULT_TEST_COMMAND_BY_AREA.get(task.area.value, "N/A")
+
+    risks = [f"Risk level: {task.risk_level.value}."]
+    if task.acceptance_criteria:
+        risks.append(
+            "This is a scaffold, not working code — every acceptance criterion below still needs a human "
+            "or a real model to actually implement it: " + "; ".join(task.acceptance_criteria)
+        )
+    else:
+        risks.append("No acceptance criteria were declared for this task — scope may be under-specified.")
+    if not repo_context.relevant_files:
+        risks.append("No relevant repository files were found for this task — the repo snapshot may be stale or empty.")
+
+    explanation = (
+        f"Heuristic scaffold for \"{task.title}\" ({task.area.value}). No real model is configured "
+        "(mock provider active), so this is a deterministic placeholder — TODO stubs marking exactly where "
+        "each acceptance criterion needs real implementation, not working code. "
+        f"{'Related story: ' + story.title + '. ' if story else ''}"
+        f"{'LLD context: ' + lld_summary[:200] + '. ' if lld_summary else ''}"
+        "No repository, branch, or file was written by generating this — review the diff below before anything else happens to it."
+    )
+
+    return ImplementationAgentResult(
+        proposed_file_changes=changes,
+        diff_text="\n".join(diff_parts),
+        explanation=explanation,
+        test_command=test_command,
+        risks=risks,
+        used_mock=True,
+    )
+
+
+# --- Real-AI path --------------------------------------------------------------------
+
+_SYSTEM_PROMPT = (
+    "You are an Implementation Agent for one specific area of a software system. Given an approved task, its "
+    "Low-Level Design context, its related user story, relevant existing repository files, coding standards, and "
+    "test expectations, propose the code changes needed to complete the task.\n"
+    "Respond with ONLY a single JSON object (no markdown code fences, no commentary) with exactly these keys:\n"
+    '- "proposed_file_changes": array of objects {"path": string, "change_type": one of "create"/"modify"/"delete", '
+    '"summary": string, "content": string (the FULL proposed final content of the file after this change; omit or '
+    'use null for a "delete")}.\n'
+    '- "diff": a single string containing a unified diff (git-style "--- a/<path>" / "+++ b/<path>" hunks) covering '
+    "every proposed file change — for human review; must be consistent with each file's \"content\" above.\n"
+    '- "explanation": string — what the change does and why.\n'
+    '- "test_command": string — the exact command a human should run to verify this change.\n'
+    '- "risks": array of strings.\n'
+    "RULES: Output a diff only. Do NOT claim the change has been applied, committed, or pushed anywhere — you have "
+    "no ability to do so and must not imply otherwise. Never reference creating or pushing to a branch. Use only the "
+    "repository content given to you; do not invent file contents you weren't shown."
+)
+
+
+def _run_real_agent(
+    *, task: ImplementationTask, repo_context: RepoContextPreviewResult, story: Story | None, lld_summary: str
+) -> ImplementationAgentResult:
+    file_context_parts = []
+    for f in repo_context.relevant_files:
+        if f.content_mode == "full" and f.snippet:
+            file_context_parts.append(f"### {f.path} (existing content)\n{f.snippet}")
+        else:
+            file_context_parts.append(f"### {f.path} ({f.content_mode}, size={f.size})")
+
+    story_text = (
+        f"Title: {story.title}\nUser story: {story.user_story}\n"
+        f"Acceptance criteria: {'; '.join(story.acceptance_criteria)}"
+        if story
+        else "(no related story found)"
+    )
+
+    user_content = (
+        f"# Task\nTitle: {task.title}\nArea: {task.area.value}\nDescription: {task.description}\n"
+        f"Expected files/folders: {', '.join(task.expected_paths) or '(none declared)'}\n"
+        f"Acceptance criteria: {'; '.join(task.acceptance_criteria) or '(none declared)'}\n\n"
+        f"# Approved LLD summary\n{lld_summary or '(not available)'}\n\n"
+        f"# Related story\n{story_text}\n\n"
+        f"# Repository context\nArchitecture summary: {repo_context.architecture_summary}\n"
+        f"Relevant folders: {', '.join(repo_context.relevant_folders) or '(none)'}\n"
+        + "\n".join(file_context_parts)
+        + "\n\n# Test expectation\n"
+        + (task.test_expectation or "(not specified — propose a reasonable test command)")
+    )
+
+    raw = generate_raw_text(system_prompt=_SYSTEM_PROMPT, user_content=user_content, output_token_budget=4096)
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`").removeprefix("json").strip()
+    parsed = json.loads(cleaned)
+
+    changes = []
+    for item in parsed.get("proposed_file_changes", []):
+        change_type = str(item.get("change_type", "modify")).lower()
+        if change_type not in _VALID_CHANGE_TYPES:
+            change_type = "modify"
+        content = item.get("content")
+        changes.append(
+            ProposedFileChange(
+                path=str(item.get("path", "")), change_type=change_type, summary=str(item.get("summary", "")),
+                after_content=(str(content) if content is not None and change_type != "delete" else None),
+            )
+        )
+
+    return ImplementationAgentResult(
+        proposed_file_changes=changes,
+        diff_text=str(parsed.get("diff", "")),
+        explanation=str(parsed.get("explanation", "")),
+        test_command=str(parsed.get("test_command", "")) or _DEFAULT_TEST_COMMAND_BY_AREA.get(task.area.value, "N/A"),
+        risks=[str(r) for r in parsed.get("risks", [])],
+        used_mock=False,
+    )
+
+
+# --- Entry point -----------------------------------------------------------------------
+
+
+def run_implementation_agent(
+    *, task: ImplementationTask, repo_context: RepoContextPreviewResult, story: Story | None, lld_summary: str
+) -> ImplementationAgentResult:
+    """Real AI when configured; the deterministic heuristic otherwise, or if
+    the real call errors or returns unparseable JSON (logged, not raised —
+    same contract as validator_agent.run_validator and
+    implementation_planner.build_implementation_plan)."""
+    if get_active_provider() == "mock":
+        return _build_heuristic_result(task=task, repo_context=repo_context, story=story, lld_summary=lld_summary)
+
+    try:
+        return _run_real_agent(task=task, repo_context=repo_context, story=story, lld_summary=lld_summary)
+    except (AIGenerationError, json.JSONDecodeError, ValueError, TypeError, AttributeError, KeyError) as exc:
+        logger.warning("Real-AI implementation agent failed (%s); falling back to heuristic scaffold.", exc)
+        return _build_heuristic_result(task=task, repo_context=repo_context, story=story, lld_summary=lld_summary)

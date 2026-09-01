@@ -7,14 +7,22 @@ from app.api.routes import (
     agent_definitions,
     agent_runs,
     artifacts,
+    confluence_integration,
+    github_integration,
     health,
+    implementation_runs,
     integrations,
+    jira_integration,
     knowledge,
+    maintenance_runs,
     ops,
+    pr_review_runs,
     projects,
     prompts,
     reviews,
+    test_runs,
     users,
+    validators,
 )
 from app.core.config import get_settings
 
@@ -52,5 +60,13 @@ app.include_router(agent_runs.router)
 app.include_router(agent_definitions.router)
 app.include_router(knowledge.router)
 app.include_router(integrations.router)
+app.include_router(github_integration.router)
+app.include_router(jira_integration.router)
+app.include_router(confluence_integration.router)
+app.include_router(implementation_runs.router)
+app.include_router(test_runs.router)
+app.include_router(pr_review_runs.router)
+app.include_router(maintenance_runs.router)
 app.include_router(ops.router)
 app.include_router(users.router)
+app.include_router(validators.router)

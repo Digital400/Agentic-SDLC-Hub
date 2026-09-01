@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Text
+from sqlalchemy import DateTime, Enum, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, CreatedAtMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -53,6 +53,14 @@ class ReviewComment(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
     review_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reviews.id", ondelete="CASCADE"), nullable=False)
     author_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    # The artifact section (see apps/web/lib/markdown-sections.ts's
+    # `##`-heading split — this stores the heading text, the one part of a
+    # section stable enough to survive a round trip through a new version)
+    # this comment is about, when the reviewer could point at one. Null for
+    # general, document-wide feedback — linking is "where possible", not
+    # guaranteed. Used by app/services/revision_agent.py to scope a
+    # revision to only the section(s) actually named.
+    section_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     review: Mapped["Review"] = relationship("Review", back_populates="comments")
     author: Mapped["User"] = relationship("User")

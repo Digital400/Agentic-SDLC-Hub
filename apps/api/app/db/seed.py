@@ -14,6 +14,8 @@ visible in the data:
 
 - 3 users (an owner, a contributor, an approver)
 - 11 AgentDefinitions + one AgentPrompt each, one per default-workflow stage
+- 11 ValidatorDefinitions, one per default-workflow stage (see
+  app/services/validator_agent.py)
 - 1 project on the default SDLC workflow, with its 11 WorkflowNodes and
   11 WorkflowEdges generated from the template
 - A completed pass through the first stage (Requirement Intake):
@@ -41,6 +43,7 @@ from app.models import (
     IntegrationProvider,
     IntegrationStatus,
     KnowledgeChunk,
+    KnowledgeContentType,
     KnowledgeSource,
     KnowledgeSourceStatus,
     KnowledgeSourceType,
@@ -53,6 +56,7 @@ from app.models import (
     ReviewStatus,
     User,
     UserRole,
+    ValidatorDefinition,
     WorkflowStatus,
 )
 from app.services.audit import record_audit_log
@@ -90,7 +94,8 @@ def _get_or_create_user(db: Session, *, email: str, full_name: str, role: UserRo
 # Hand-authored default prompts for the five agents named in the Prompt
 # Library spec — real prompt-engineering content, not placeholders. Every
 # other agent still gets a generic, template-derived prompt (see
-# _ensure_agent_definitions_and_prompts) so all 11 stages have one.
+# _ensure_agent_definitions_and_prompts) so every stage has one. Currently
+# every stage but "release" has rich content here.
 RICH_DEFAULT_PROMPTS: dict[str, dict] = {
     "requirement_intake": {
         "system_prompt": (
@@ -110,15 +115,43 @@ RICH_DEFAULT_PROMPTS: dict[str, dict] = {
     "problem_discovery": {
         "system_prompt": (
             "You are the Problem Discovery agent. Given an approved Requirement Intake Summary, investigate and "
-            "state the underlying problem clearly enough to design a solution against it: its impact, who it "
-            "affects, and any constraints. Do not propose solutions — that's the next stage's job."
+            "document the underlying problem in depth, following the structured discovery template below exactly "
+            "— this is the organization's standard problem discovery format, used so every project's discovery "
+            "output is comparable. Do not propose solutions — that's the next stage's job. Where the input "
+            "doesn't give you enough to state something as fact, capture it as an Assumption, Risk, or Unknown in "
+            "the '## Assumptions, Risks & Unknowns' section rather than guessing or inventing specifics (names, "
+            "numbers, quotes) that weren't actually given to you."
         ),
-        "output_format": "Markdown with headings: Problem Statement, Impact, Affected Users, Constraints.",
+        "output_format": (
+            "Markdown using exactly these level-2 (`##`) headings, in this order, nothing more, nothing renamed:\n\n"
+            "## Executive Summary — 2-4 sentences: the core problem and its business impact, at a glance.\n\n"
+            "## Background & Context — a Markdown table, columns `Area | Details`, with rows at least for "
+            "Business Context, Current Process, and Known Pain.\n\n"
+            "## Target Users & Stakeholders — a Markdown table, columns `Role | Description | Pain | Influence` "
+            "(Influence: High/Medium/Low), one row per affected role.\n\n"
+            "## Current-State Journey — a Markdown table, columns `Step | Current Tool/Method | Pain Point | "
+            "Impact`, walking through how the problem is experienced today.\n\n"
+            "## Problem Statements — a bulleted list of distinct, specific problem statements, one per affected "
+            "stakeholder group, each stated as a problem (not a solution).\n\n"
+            "## Evidence Collected — a Markdown table, columns `Evidence Type | Source | What It Shows | "
+            "Confidence` (High/Medium/Low). If no real evidence exists yet, say so plainly instead of a table.\n\n"
+            "## Problem Prioritization — a Markdown table, columns `Problem | Priority` (High/Medium/Low).\n\n"
+            "## Success Metrics — a Markdown table, columns `Problem Area | Goal | Success Metric (KPI)`.\n\n"
+            "## Assumptions, Risks & Unknowns — a Markdown table, columns `Type | Item | Validation Method` "
+            "(Type: Assumption/Risk/Unknown/Constraint). Everything not confirmed by the input belongs here, not "
+            "silently skipped.\n\n"
+            "## Recommended Decision — a short paragraph recommending whether to proceed, continue discovery, or "
+            "stop, followed by a bulleted list of what to validate before moving to Solution Discovery."
+        ),
         "validation_checklist": [
-            "Problem is stated as a problem, not a solution",
-            "Impact is quantified or clearly qualified",
-            "Affected users/systems are named",
-            "Traces back to the intake summary's request",
+            "All ten '##' sections are present, in the exact order specified, and none are renamed",
+            "Background & Context, Target Users & Stakeholders, Current-State Journey, Evidence Collected, "
+            "Problem Prioritization, Success Metrics, and Assumptions/Risks/Unknowns are real Markdown tables, "
+            "not prose or bullet lists",
+            "Nothing is proposed as a solution — every statement describes a problem, not a fix",
+            "Anything not confirmed by the input is captured as an Assumption, Risk, or Unknown rather than "
+            "invented as if it were fact",
+            "Problem statements trace back to the approved intake summary's request",
         ],
     },
     "solution_discovery": {
@@ -174,15 +207,333 @@ RICH_DEFAULT_PROMPTS: dict[str, dict] = {
             "Every story states Epic, Feature, User Story, Priority, Dependencies, and Definition of Done",
         ],
     },
+    "lld": {
+        "system_prompt": (
+            "You are the LLD Agent. Given the approved Solution Discovery, High-Level Design, and Story "
+            "Crafting artifacts, generate a Low-Level Design document for the in-scope stories: API contracts, "
+            "database changes, the frontend component/state plan, and the business, validation, permission, "
+            "error-handling, and test detail a developer needs to build this without guessing.\n\n"
+            "Rules:\n"
+            "1. Use only approved artifacts — the Solution Discovery, HLD, and story backlog you were given. "
+            "Do not draw on anything else.\n"
+            "2. Do not invent missing business rules. If the input doesn't state a rule this feature needs, "
+            "say so under Risks and Assumptions instead of making one up.\n"
+            "3. Ask clarification questions when required — if the input genuinely doesn't give you enough to "
+            "design a section responsibly, use the clarification-questions response format instead of guessing.\n"
+            "4. Do not write production code. Describe the design; Implementation writes the code.\n"
+            "5. Output must be developer-ready — concrete enough that a developer could start building from it "
+            "without needing to ask you or anyone else what you meant.\n"
+            "6. Include API, database, frontend, validation, permission, error-handling, and test details — "
+            "every one of them, not just the ones that feel most relevant.\n"
+            "7. Highlight risks and assumptions explicitly — anything you're relying on being true, or any "
+            "open question the input didn't resolve.\n"
+            "8. This design requires Tech Lead review before Implementation can start — write it for that "
+            "reviewer, not just for yourself."
+        ),
+        # This exact section set/order is the company's standard LLD
+        # structure and is required — not just descriptive prose. Keep in
+        # sync with packages/prompts/agents/lld-agent.md.
+        "output_format": (
+            "Markdown with exactly these `## ` headings, in this order: Feature Overview, Stories Covered, API "
+            "Contracts, Request/Response DTOs, Database Changes, Business Rules, Validation Rules, Permission "
+            "Rules, Frontend Component Plan, State Management Plan, Error Handling, Audit/Logging Requirements, "
+            "Test Cases, Implementation Task Breakdown, Risks and Assumptions. Write 'None.' for a section that "
+            "genuinely doesn't apply rather than omitting it or leaving it blank."
+        ),
+        "validation_checklist": [
+            "All 15 required sections are present, in order, and none are blank without an explicit 'None.'",
+            "Uses only the approved Solution Discovery, HLD, and story backlog — nothing outside them",
+            "No business rule is invented — anything not stated by the input is under Risks and Assumptions",
+            "Output is developer-ready: concrete enough to implement directly, not just descriptive",
+            "Every in-scope story (Stories Covered) maps to at least one API contract or component in this design",
+            "API Contracts and Request/Response DTOs are concrete enough to implement directly, not just named",
+            "Database Changes describe the actual schema/migration impact, not just 'update the database'",
+            "Permission Rules reference real roles (see app/services/permissions.py's UserRole), not invented ones",
+            "Test Cases cover the Validation and Permission rules stated earlier in the document, not just happy paths",
+            "Nothing already decided in the HLD or Solution Discovery is silently re-decided",
+            "Every unresolved decision or dependency is captured under Risks and Assumptions, not silently assumed",
+        ],
+    },
+    "infrastructure_planning": {
+        "system_prompt": (
+            "You are the Infrastructure Planning agent, working on behalf of DevOps. Given the approved "
+            "High-Level Design and Low-Level Design (and, if one already exists, the Implementation Plan's task "
+            "breakdown), plan the environments, pipeline, and operational readiness this change needs to release "
+            "safely. Ground every cloud/platform standard you reference in the retrieved company standards — cite "
+            "them, don't invent your own.\n\n"
+            "Rules:\n"
+            "1. Use only the approved HLD and LLD you were given (plus the Implementation Plan, if provided) and "
+            "the retrieved company cloud standards. Do not draw on anything else.\n"
+            "2. Do not invent infrastructure decisions the input doesn't support — if something genuinely isn't "
+            "resolved by the HLD/LLD, say so under Rollback Plan or flag it as an open question rather than "
+            "guessing.\n"
+            "3. Never write an actual secret value (a real key, password, or token) anywhere in this document — "
+            "Secrets Management describes *how* secrets are managed (which vault, how they're referenced), never "
+            "the secrets themselves.\n"
+            "4. This is a plan for a human DevOps approver to act on — not an action itself. Never write as if "
+            "any environment, pipeline, or resource has already been created, deployed, or provisioned; every "
+            "section describes what should happen once approved, not what has happened.\n"
+            "5. The Release Checklist must explicitly state that DevOps approval is required before any step in "
+            "it is executed.\n"
+            "6. Output must be concrete enough for DevOps to act on directly — name real environments, real "
+            "pipeline stages, real rollback triggers, not vague placeholders."
+        ),
+        # This exact section set/order is the company's standard
+        # infrastructure planning structure and is required — not just
+        # descriptive prose.
+        "output_format": (
+            "Markdown with exactly these `## ` headings, in this order: Environment Plan, Service Architecture, "
+            "CI/CD Pipeline, Database Migration Plan, Secrets Management, Monitoring & Logging, Security "
+            "Controls, Rollback Plan, Cost Considerations, Release Checklist. Write 'None.' for a section that "
+            "genuinely doesn't apply rather than omitting it or leaving it blank."
+        ),
+        "validation_checklist": [
+            "All 10 required sections are present, in order, and none are blank without an explicit 'None.'",
+            "Uses only the approved HLD, LLD, and (if provided) Implementation Plan — nothing invented",
+            "Every cloud/platform standard referenced traces back to a retrieved company standard, not an invented one",
+            "Secrets Management never contains an actual secret value — only how secrets are managed",
+            "Nothing is described as already deployed, provisioned, or executed — this is a plan, not an action log",
+            "Release Checklist explicitly states DevOps approval is required before execution",
+            "Rollback Plan is concrete and actionable, not a vague 'roll back if something goes wrong'",
+            "Cost Considerations is grounded in the actual proposed architecture, not generic boilerplate",
+        ],
+    },
+    "implementation_planning": {
+        "system_prompt": (
+            "You are the Implementation Planner agent. Given the approved Low-Level Design and the in-scope "
+            "stories, break the design into a structured, assignable list of implementation tasks, split across "
+            "exactly these areas: BACKEND, FRONTEND, DATABASE, TESTING, INFRA, DOCS. Every task must trace back "
+            "to a specific story and a specific LLD section — do not invent work the LLD doesn't call for. This "
+            "plan is what a developer (or, eventually, a coding agent) picks up directly; it must be approved "
+            "before that work starts."
+        ),
+        # The dedicated Implementation Planner service (see
+        # app/services/implementation_planner.py) is the primary path for
+        # producing this artifact and its structured ImplementationTask
+        # rows — this prompt exists so the stage also has a normal
+        # drafting-agent entry like every other stage, and to keep the
+        # expected shape documented in one place.
+        "output_format": (
+            "Markdown with one `## <Area>` heading per area that has tasks (BACKEND, FRONTEND, DATABASE, "
+            "TESTING, INFRA, DOCS, in that order — omit an area with no tasks), and under each, one `### <task "
+            "title>` block per task with these exact bold-labeled fields: **Description:**, **Linked Story:**, "
+            "**Linked LLD Section:**, **Expected Files/Folders:** (a list), **Dependencies:** (other task "
+            "titles, or 'None.'), **Acceptance Criteria:** (a checklist), **Test Expectation:**, **Risk Level:** "
+            "(Low/Medium/High)."
+        ),
+        "validation_checklist": [
+            "Every task names a real area: BACKEND, FRONTEND, DATABASE, TESTING, INFRA, or DOCS",
+            "Every task traces back to a specific story and a specific LLD section — nothing invented",
+            "Expected Files/Folders is concrete enough to start from, not a vague description",
+            "Acceptance Criteria and Test Expectation are both present and specific per task",
+            "Dependencies reference other task titles in this same plan, not vague prose",
+            "Risk Level is stated for every task",
+        ],
+    },
+    "implementation": {
+        "system_prompt": (
+            "You are the Implementation agent. Given the approved Low-Level Design and the in-scope stories, "
+            "describe the code change that satisfies them: which files/modules change and why, the key logic "
+            "introduced, and how it maps back to the LLD's interfaces. This is a change description for review, "
+            "not literal source code — be concrete about what changes and why, not just what the outcome is."
+        ),
+        "output_format": "Markdown with headings: Summary, Files/Modules Changed, Key Logic, Mapping to LLD, Risks.",
+        "validation_checklist": [
+            "Every changed file/module has a stated reason for changing",
+            "Key logic decisions are explained, not just asserted to work",
+            "Explicitly maps back to the LLD's interfaces/contracts",
+            "Risks or edge cases the change doesn't handle are called out, not hidden",
+        ],
+    },
+    "pr_review": {
+        "system_prompt": (
+            "You are a senior software engineer performing a pull request review for a company-grade software "
+            "delivery platform.\n\n"
+            "Your job is to review the PR against:\n"
+            "1. Approved LLD\n"
+            "2. Related user stories\n"
+            "3. Acceptance criteria\n"
+            "4. Company coding standards\n"
+            "5. Security rules\n"
+            "6. Existing architecture\n"
+            "7. Test expectations\n\n"
+            "Review categories:\n"
+            "- Functional correctness\n"
+            "- Requirement alignment\n"
+            "- Architecture alignment\n"
+            "- Code quality\n"
+            "- Security\n"
+            "- Performance\n"
+            "- Error handling\n"
+            "- Observability\n"
+            "- Test coverage\n"
+            "- Maintainability\n\n"
+            "Rules:\n"
+            "- Be specific.\n"
+            "- Reference changed files when possible.\n"
+            "- Do not invent issues.\n"
+            "- Do not approve if critical tests are missing.\n"
+            "- Do not merge the PR.\n"
+            "- Human reviewer has final authority."
+        ),
+        "output_format": (
+            "Markdown with these headings, in this order:\n"
+            "1. Overall Recommendation — exactly one of APPROVE, REQUEST_CHANGES, COMMENT_ONLY\n"
+            "2. Summary\n"
+            "3. Critical Findings (or 'None.')\n"
+            "4. Major Findings (or 'None.')\n"
+            "5. Minor Findings (or 'None.')\n"
+            "6. Missing Tests (or 'None.')\n"
+            "7. Suggested GitHub Comments — one per finding worth raising inline, each naming a file/line where "
+            "possible\n"
+            "8. Risk Score — an integer from 0 to 100\n"
+            "9. Final Reviewer Note — a closing note that states plainly the human reviewer has final authority "
+            "and this PR has not been merged"
+        ),
+        "validation_checklist": [
+            "Overall Recommendation is exactly one of APPROVE, REQUEST_CHANGES, COMMENT_ONLY — never any other wording",
+            "Never recommends APPROVE when Missing Tests names a critical gap",
+            "Every finding (Critical/Major/Minor) references a specific changed file or behavior, not a generic complaint",
+            "Suggested GitHub Comments are concrete enough to post as-is, each tied to a specific file where possible",
+            "Risk Score is a single integer between 0 and 100, consistent with the findings' severity",
+            "Never claims to have merged, or offers to merge, the PR — the Final Reviewer Note states the human reviewer has final authority",
+            "Does not invent a finding that isn't actually supported by the diff, LLD, stories, acceptance criteria, or standards it was given",
+        ],
+    },
+    "testing": {
+        "system_prompt": (
+            "You are the Testing agent. Given the reviewed code change, validate it against the in-scope stories' "
+            "acceptance criteria and produce a test report. You must document real evidence of what was actually "
+            "run — test counts, pass/fail results, and links to logs or CI runs where available — not just a "
+            "claim that testing occurred."
+        ),
+        # The exact "## Test Evidence" heading is required — it's checked
+        # programmatically by GraphEngineService.validate_evidence_requirement
+        # (see WorkflowNode.required_evidence_section) before this stage's
+        # review can be approved, not just read as prose.
+        "output_format": (
+            "Markdown with headings: Summary, Acceptance Criteria Coverage, Test Evidence (test counts, "
+            "pass/fail results, and links to logs/CI runs — required, never leave this empty), Defects Found "
+            "(or 'None.')."
+        ),
+        "validation_checklist": [
+            "Every in-scope acceptance criterion is explicitly addressed",
+            "Includes a non-empty Test Evidence section with concrete results, not a bare assertion",
+            "Defects found are described specifically enough to act on",
+            "Doesn't claim coverage the evidence doesn't actually support",
+        ],
+    },
+    "infrastructure": {
+        "system_prompt": (
+            "You are the Infrastructure Provisioning agent. Given a tested change ready to release, define the "
+            "infrastructure and environment configuration required to deploy it safely: what's provisioned or "
+            "changed, required environment variables/secrets (names only, never values), and a rollback approach."
+        ),
+        "output_format": "Markdown with headings: Infrastructure Changes, Environment Configuration, Rollback Plan, Risks.",
+        "validation_checklist": [
+            "States exactly what infrastructure is provisioned or changed",
+            "Never includes an actual secret value, only names/placeholders",
+            "Includes a concrete rollback plan, not just 'roll back if needed'",
+            "Risks specific to this deployment are named",
+        ],
+    },
+    "maintenance": {
+        "system_prompt": (
+            "You are the Maintenance agent. Given a released change, summarize its post-release status: any "
+            "incidents or issues observed, feedback received, and learnings worth feeding back into a future "
+            "intake. Be factual about what's been observed — don't speculate about issues that haven't occurred."
+        ),
+        "output_format": "Markdown with headings: Post-Release Status, Incidents & Feedback (or 'None reported.'), Learnings for Future Intake.",
+        "validation_checklist": [
+            "Distinguishes observed facts from speculation",
+            "Any incident/feedback entry is specific enough to act on",
+            "Learnings are phrased so a future intake could actually use them",
+        ],
+    },
 }
 
 
+def _build_improve_system_prompt(node_data: dict) -> str:
+    """The IMPROVE role's system prompt (see AgentPromptRole) — revising
+    an existing draft against specific feedback, not drafting from
+    scratch. build_prioritized_context (see app/services/ai_generation.py)
+    already injects the prior draft/validation feedback as context for an
+    IMPROVE-action run; this just sets the revision framing the model
+    needs on top of that."""
+    return (
+        f"You are the {node_data['name']} agent, now revising your own previous draft of the "
+        f"{node_data['outputArtifactType']}. You will be given the prior draft plus specific feedback "
+        "(validation issues and/or reviewer comments) to address. Produce a complete, revised version of "
+        "the full document — do not just describe the changes. Preserve everything that already satisfies "
+        "the feedback or was never called into question; only change what the feedback actually raises. "
+        "Do not introduce new problems, invent unrelated content, or remove material the feedback didn't "
+        "ask you to remove."
+    )
+
+
+def _sync_default_prompt(
+    db: Session,
+    *,
+    agent: AgentDefinition,
+    role: AgentPromptRole,
+    stage_key: str,
+    name: str,
+    system_prompt: str,
+    output_format: str,
+    validation_checklist: list[str],
+) -> None:
+    """Ensure this (agent, role) lineage's active version matches the
+    current default content above — the same way ValidatorDefinition's
+    criteria are kept in sync on every reseed (see
+    _ensure_validator_definitions), but respecting AgentPrompt's own
+    versioning: a change here creates a new version and activates it
+    (exactly what editing a prompt through the Prompt Library does via
+    POST /prompts/{id}/versions + /activate), rather than mutating an
+    existing row's content in place. Without this, a RICH_DEFAULT_PROMPTS
+    edit for a stage that was already seeded (e.g. from an earlier
+    project's workflow generation) would silently never reach the
+    database — the stage would keep serving its original content forever."""
+    active = next((p for p in agent.prompts if p.role == role and p.is_active), None)
+    if (
+        active is not None
+        and active.system_prompt == system_prompt
+        and active.output_format == output_format
+        and active.validation_checklist == validation_checklist
+    ):
+        return  # already in sync — nothing to do
+
+    next_version = max((p.version for p in agent.prompts if p.role == role), default=0) + 1
+    if active is not None:
+        active.is_active = False
+    db.add(
+        AgentPrompt(
+            agent_definition=agent,
+            role=role,
+            version=next_version,
+            name=name,
+            stage=stage_key,
+            system_prompt=system_prompt,
+            output_format=output_format,
+            validation_checklist=validation_checklist,
+            is_active=True,
+        )
+    )
+    db.flush()
+
+
 def _ensure_agent_definitions_and_prompts(db: Session, template: dict) -> dict[str, AgentDefinition]:
-    """Ensure all 11 AgentDefinitions + an active v1 DRAFT AgentPrompt exist.
+    """Ensure every template node's AgentDefinition + an active DRAFT and
+    IMPROVE AgentPrompt each exist, with content matching this file's
+    current RICH_DEFAULT_PROMPTS (VALIDATE is a separate concept — see
+    app/services/validator_agent.py's ValidatorDefinition, not an
+    AgentPrompt role).
 
     Not project-owned data, so this runs unconditionally (unlike the rest
-    of seed(), which is skipped once the sample project exists) and is
-    idempotent by agent_key / (agent_definition, role, version).
+    of seed(), which is skipped once the sample project exists). Creating
+    the AgentDefinition/first version is idempotent by agent_key; keeping
+    an existing lineage's *content* in sync with a later
+    RICH_DEFAULT_PROMPTS edit is handled by _sync_default_prompt, which
+    creates and activates a new version rather than mutating history.
     """
     agent_definitions: dict[str, AgentDefinition] = {}
     for node_data in template["nodes"]:
@@ -203,35 +554,122 @@ def _ensure_agent_definitions_and_prompts(db: Session, template: dict) -> dict[s
     for node_data in template["nodes"]:
         stage_key = node_data["id"]
         agent = agent_definitions[node_data["agentKey"]]
-        has_draft_prompt = any(p.role == AgentPromptRole.DRAFT and p.version == 1 for p in agent.prompts)
-        if has_draft_prompt:
-            continue
-
         rich = RICH_DEFAULT_PROMPTS.get(stage_key)
-        db.add(
-            AgentPrompt(
-                agent_definition=agent,
-                role=AgentPromptRole.DRAFT,
-                version=1,
-                name=f"{node_data['name']} — Draft Prompt",
-                stage=stage_key,
-                system_prompt=rich["system_prompt"] if rich else (
-                    f"You are the {node_data['name']} agent. Given the following inputs: "
-                    f"{', '.join(node_data['requiredInputs']) or 'none'}, draft a "
-                    f"{node_data['outputArtifactType']}. {node_data['description']}"
-                ),
-                output_format=rich["output_format"] if rich else "Markdown document.",
-                validation_checklist=rich["validation_checklist"] if rich else [
-                    "Addresses all of the stage's required inputs",
-                    "Uses valid Markdown formatting",
-                ],
-                is_active=True,  # the only version so far — active by definition
-            )
+        default_system_prompt = rich["system_prompt"] if rich else (
+            f"You are the {node_data['name']} agent. Given the following inputs: "
+            f"{', '.join(node_data['requiredInputs']) or 'none'}, draft a "
+            f"{node_data['outputArtifactType']}. {node_data['description']}"
         )
+        default_output_format = rich["output_format"] if rich else "Markdown document."
+        default_checklist = rich["validation_checklist"] if rich else [
+            "Addresses all of the stage's required inputs",
+            "Uses valid Markdown formatting",
+        ]
+        _sync_default_prompt(
+            db, agent=agent, role=AgentPromptRole.DRAFT, stage_key=stage_key,
+            name=f"{node_data['name']} — Draft Prompt",
+            system_prompt=default_system_prompt, output_format=default_output_format, validation_checklist=default_checklist,
+        )
+
+    for node_data in template["nodes"]:
+        stage_key = node_data["id"]
+        agent = agent_definitions[node_data["agentKey"]]
+        # Same output_format/validation_checklist as the DRAFT prompt — an
+        # improve pass produces the same kind of document, just revised;
+        # only the system_prompt's framing (draft vs. revise) differs.
+        rich = RICH_DEFAULT_PROMPTS.get(stage_key)
+        default_output_format = rich["output_format"] if rich else "Markdown document."
+        default_checklist = rich["validation_checklist"] if rich else [
+            "Addresses all of the stage's required inputs",
+            "Uses valid Markdown formatting",
+        ]
+        _sync_default_prompt(
+            db, agent=agent, role=AgentPromptRole.IMPROVE, stage_key=stage_key,
+            name=f"{node_data['name']} — Improve Prompt",
+            system_prompt=_build_improve_system_prompt(node_data),
+            output_format=default_output_format, validation_checklist=default_checklist,
+        )
+
     db.flush()
     return agent_definitions
 
 
+# Generic fallback criteria for a stage with no entry in RICH_DEFAULT_PROMPTS
+# above — a validator's own rubric is deliberately not identical to the
+# drafting agent's validation_checklist (see app/models/validator.py), so
+# this adds a risk/clarity angle the agent's own self-check doesn't cover.
+_GENERIC_VALIDATOR_CRITERIA = [
+    "Covers the stage's required inputs and output artifact type",
+    "Calls out relevant risks, constraints, or assumptions explicitly",
+    "Is clearly structured (headings/sections), not one unbroken block of text",
+]
+
+
+def _ensure_validator_definitions(db: Session, template: dict) -> dict[str, ValidatorDefinition]:
+    """Ensure one ValidatorDefinition exists per default-workflow stage
+    (see app/services/validator_agent.py) — idempotent by stage, like
+    _ensure_agent_definitions_and_prompts above, and likewise runs
+    unconditionally rather than being gated by the sample project check.
+
+    Unlike AgentPrompt (versioned — editing an active version is refused,
+    see app/api/routes/prompts.py), a validator has no version history, so
+    its `criteria` is kept in sync with RICH_DEFAULT_PROMPTS on every run
+    rather than only set at creation — otherwise a stage's rubric silently
+    goes stale the moment its DRAFT prompt's output_format changes (a real
+    bug: a validator kept scoring against the *old* template's checklist
+    after the prompt moved to a new one, tanking every real draft's
+    completeness score for no good reason).
+    """
+    validators: dict[str, ValidatorDefinition] = {}
+    for node_data in template["nodes"]:
+        stage_key = node_data["id"]
+        rich = RICH_DEFAULT_PROMPTS.get(stage_key)
+        criteria = rich["validation_checklist"] if rich else list(_GENERIC_VALIDATOR_CRITERIA)
+
+        validator = db.query(ValidatorDefinition).filter(ValidatorDefinition.stage == stage_key).first()
+        if validator is None:
+            validator = ValidatorDefinition(
+                validator_key=f"{stage_key}-validator",
+                name=f"{node_data['name']} Validator",
+                stage=stage_key,
+                description=f"Independently scores a drafted {node_data['outputArtifactType']} for the "
+                f"{node_data['name']} stage before it's shown to a human reviewer.",
+                model_name="stub-no-model-configured",  # no real AI call required — see get_active_provider
+                criteria=criteria,
+            )
+            db.add(validator)
+            db.flush()
+        elif validator.criteria != criteria:
+            validator.criteria = criteria
+        validators[stage_key] = validator
+    return validators
+
+
+def _kb_chunk(
+    content: str,
+    *,
+    content_type: KnowledgeContentType = KnowledgeContentType.OTHER,
+    stage: str | None = None,
+    domain: str | None = None,
+    project_type: str | None = None,
+    tags: list[str] | None = None,
+) -> dict:
+    return {
+        "content": content,
+        "content_type": content_type,
+        "stage": stage,
+        "domain": domain,
+        "project_type": project_type,
+        "tags": tags or [],
+    }
+
+
+# Deliberately covers all five KnowledgeContentType values RAG is required
+# to support (see app/services/retrieval.py's module docstring) —
+# company standards and architecture rules are stage-agnostic (no `stage`,
+# so every stage can retrieve them); past artifacts/UI guidelines/testing
+# standards are tagged to the stage(s) that would actually use them, to
+# demonstrate stage-aware retrieval filtering them out elsewhere.
 KNOWLEDGE_BASE_SAMPLES: list[dict] = [
     {
         "title": "Company Engineering Handbook",
@@ -239,8 +677,140 @@ KNOWLEDGE_BASE_SAMPLES: list[dict] = [
         "source_type": KnowledgeSourceType.UPLOADED_DOCUMENT,
         "status": KnowledgeSourceStatus.INDEXED,
         "chunks": [
-            "All new services must expose a /health endpoint returning 200 when ready to serve traffic.",
-            "Database migrations are reviewed the same way as code — no direct schema changes in production.",
+            _kb_chunk(
+                "All new services must expose a /health endpoint returning 200 when ready to serve traffic.",
+                content_type=KnowledgeContentType.COMPANY_STANDARD,
+                domain="engineering",
+                tags=["health-check", "service-standards"],
+            ),
+            _kb_chunk(
+                "Database migrations are reviewed the same way as code — no direct schema changes in production.",
+                content_type=KnowledgeContentType.COMPANY_STANDARD,
+                domain="engineering",
+                tags=["database", "change-management"],
+            ),
+        ],
+    },
+    {
+        "title": "Testing Standards",
+        "category": "Engineering Standards",
+        "source_type": KnowledgeSourceType.UPLOADED_DOCUMENT,
+        "status": KnowledgeSourceStatus.INDEXED,
+        "chunks": [
+            _kb_chunk(
+                "Every pull request must include automated tests for new behavior; a PR that only adds code "
+                "without tests is not merged.",
+                content_type=KnowledgeContentType.TESTING_STANDARD,
+                domain="engineering",
+                stage="testing",
+                tags=["tests", "pull-requests"],
+            ),
+            _kb_chunk(
+                "A test report must state pass/fail counts, list any skipped tests with a reason, and call out "
+                "coverage gaps explicitly rather than silently omitting untested paths.",
+                content_type=KnowledgeContentType.TESTING_STANDARD,
+                domain="quality",
+                stage="testing",
+                tags=["test-report", "coverage"],
+            ),
+        ],
+    },
+    {
+        "title": "Architecture Decision Standards",
+        "category": "Engineering Standards",
+        "source_type": KnowledgeSourceType.UPLOADED_DOCUMENT,
+        "status": KnowledgeSourceStatus.INDEXED,
+        "chunks": [
+            _kb_chunk(
+                "Services communicate asynchronously via events for cross-boundary side effects; synchronous "
+                "calls are reserved for request/response reads within a single bounded context.",
+                content_type=KnowledgeContentType.ARCHITECTURE_RULE,
+                domain="architecture",
+                stage="hld",
+                tags=["event-driven", "service-boundaries"],
+            ),
+            _kb_chunk(
+                "Every new external integration goes through the shared API gateway — application code never "
+                "calls a third-party service directly.",
+                content_type=KnowledgeContentType.ARCHITECTURE_RULE,
+                domain="architecture",
+                stage="hld",
+                tags=["integrations", "api-gateway"],
+            ),
+        ],
+    },
+    {
+        "title": "Cloud Infrastructure Standards",
+        "category": "Engineering Standards",
+        "source_type": KnowledgeSourceType.UPLOADED_DOCUMENT,
+        "status": KnowledgeSourceStatus.INDEXED,
+        "chunks": [
+            _kb_chunk(
+                "All production environments are provisioned via Infrastructure-as-Code (Terraform); no manual "
+                "console changes are permitted against a production account.",
+                content_type=KnowledgeContentType.COMPANY_STANDARD,
+                domain="cloud-infrastructure",
+                stage="infrastructure_planning",
+                tags=["iac", "provisioning"],
+            ),
+            _kb_chunk(
+                "Secrets are never stored in application config or source control — only in the organization's "
+                "secrets manager, referenced by name at deploy time.",
+                content_type=KnowledgeContentType.COMPANY_STANDARD,
+                domain="cloud-infrastructure",
+                stage="infrastructure_planning",
+                tags=["secrets", "security"],
+            ),
+            _kb_chunk(
+                "Every service ships structured logs and at least one health/liveness metric to the central "
+                "observability stack before it can go to production.",
+                content_type=KnowledgeContentType.COMPANY_STANDARD,
+                domain="cloud-infrastructure",
+                stage="infrastructure_planning",
+                tags=["monitoring", "observability"],
+            ),
+        ],
+    },
+    {
+        "title": "UI Design System Guidelines",
+        "category": "Design",
+        "source_type": KnowledgeSourceType.UPLOADED_DOCUMENT,
+        "status": KnowledgeSourceStatus.INDEXED,
+        "chunks": [
+            _kb_chunk(
+                "Primary actions use the filled button style; secondary or destructive actions use outline or "
+                "text buttons — never two filled buttons side by side.",
+                content_type=KnowledgeContentType.UI_GUIDELINE,
+                domain="ux",
+                project_type="web-app",
+                stage="story_crafting",
+                tags=["buttons", "visual-hierarchy"],
+            ),
+            _kb_chunk(
+                "All interactive elements must meet WCAG 2.1 AA contrast ratios (4.5:1 for normal text) and be "
+                "reachable via keyboard alone.",
+                content_type=KnowledgeContentType.UI_GUIDELINE,
+                domain="accessibility",
+                stage="story_crafting",
+                tags=["accessibility", "wcag"],
+            ),
+        ],
+    },
+    {
+        "title": "Past Project Retrospective — Fraud Detection Overhaul",
+        "category": "Project Artifact",
+        "source_type": KnowledgeSourceType.PROJECT_ARTIFACT,
+        "status": KnowledgeSourceStatus.INDEXED,
+        "chunks": [
+            _kb_chunk(
+                "The Fraud Detection Overhaul project underestimated data migration effort by roughly 3x; "
+                "projects touching the same legacy ledger tables should budget migration as its own phase, not "
+                "a sub-task of implementation.",
+                content_type=KnowledgeContentType.PAST_ARTIFACT,
+                domain="delivery",
+                stage="lld",
+                tags=["retrospective", "estimation"],
+            ),
         ],
     },
     {
@@ -250,13 +820,19 @@ KNOWLEDGE_BASE_SAMPLES: list[dict] = [
         "file_url": "https://example.com/research/loyalty-programs-2026",
         "status": KnowledgeSourceStatus.INDEXED,
         "chunks": [
-            "Points-based loyalty programs see the strongest repeat purchase impact when redemption is "
-            "simple: customers should be able to see their points balance and redeem it in two taps or fewer.",
-            "Competitor loyalty programs in retail typically award 1 point per $1 spent and set redemption "
-            "thresholds low enough (around 100-200 points) that a customer's first reward feels achievable "
-            "within a few purchases, which drives early engagement.",
-            "Loyalty programs that expire points aggressively see higher churn; a rolling 12-month expiry "
-            "window is a common balance between encouraging return visits and not feeling punitive.",
+            _kb_chunk(
+                "Points-based loyalty programs see the strongest repeat purchase impact when redemption is "
+                "simple: customers should be able to see their points balance and redeem it in two taps or fewer."
+            ),
+            _kb_chunk(
+                "Competitor loyalty programs in retail typically award 1 point per $1 spent and set redemption "
+                "thresholds low enough (around 100-200 points) that a customer's first reward feels achievable "
+                "within a few purchases, which drives early engagement."
+            ),
+            _kb_chunk(
+                "Loyalty programs that expire points aggressively see higher churn; a rolling 12-month expiry "
+                "window is a common balance between encouraging return visits and not feeling punitive."
+            ),
         ],
     },
     {
@@ -270,9 +846,11 @@ KNOWLEDGE_BASE_SAMPLES: list[dict] = [
 
 
 def _ensure_knowledge_base_samples(db: Session, uploaded_by: User) -> int:
-    """Ensure a few sample KnowledgeSource rows exist, one per source_type,
-    so the Knowledge Base UI has something to show, and so agent runs
-    against the sample project have something real to retrieve (see
+    """Ensure a few sample KnowledgeSource rows exist, spanning every
+    KnowledgeContentType RAG is required to support (see
+    KNOWLEDGE_BASE_SAMPLES's own comment), so the Knowledge Base UI has
+    something to show, and so agent runs against the sample project have
+    something real, stage-tagged, and content-type-tagged to retrieve (see
     app/services/retrieval.py). Idempotent by title. Chunks are embedded
     immediately with the same app/services/embeddings.py function real
     ingestion would use — these aren't placeholder vectors.
@@ -294,8 +872,20 @@ def _ensure_knowledge_base_samples(db: Session, uploaded_by: User) -> int:
         db.add(source)
         db.flush()
 
-        for i, content in enumerate(sample["chunks"]):
-            db.add(KnowledgeChunk(source=source, chunk_index=i, content=content, embedding=embed_text(content)))
+        for i, chunk_data in enumerate(sample["chunks"]):
+            db.add(
+                KnowledgeChunk(
+                    source=source,
+                    chunk_index=i,
+                    content=chunk_data["content"],
+                    content_type=chunk_data["content_type"],
+                    stage=chunk_data["stage"],
+                    domain=chunk_data["domain"],
+                    project_type=chunk_data["project_type"],
+                    tags=chunk_data["tags"],
+                    embedding=embed_text(chunk_data["content"]),
+                )
+            )
 
         created += 1
     db.flush()
@@ -440,6 +1030,7 @@ def _ensure_integration_placeholders(db: Session) -> int:
 def seed(db: Session) -> None:
     template = load_workflow_template()
     agent_definitions = _ensure_agent_definitions_and_prompts(db, template)
+    validator_definitions = _ensure_validator_definitions(db, template)
 
     # Not project-owned, so — like agent definitions/prompts above — this
     # runs unconditionally rather than being gated by the sample project
@@ -463,6 +1054,7 @@ def seed(db: Session) -> None:
         db.commit()
         print(f"Sample project '{SAMPLE_PROJECT_NAME}' already exists (id={existing.id}); skipping project seed.")
         print(f"Agent definitions ensured: {len(agent_definitions)}.")
+        print(f"Validator definitions ensured: {len(validator_definitions)}.")
         print(f"Knowledge sources created: {knowledge_sources_created}.")
         print(f"Story export demo artifact created: {story_demo_created}.")
         print(f"Integration placeholders created: {integrations_created}.")
@@ -694,6 +1286,7 @@ def seed(db: Session) -> None:
     print(f"  Users: owner={owner.email}, contributor={contributor.email}, approver={approver.email}")
     print(f"  Workflow nodes: {len(project.workflow_nodes)}, edges: {len(project.workflow_edges)}")
     print(f"  {intake_node.name}: {intake_node.status.value} -> {problem_discovery_node.name}: {problem_discovery_node.status.value}")
+    print(f"  Validator definitions ensured: {len(validator_definitions)}.")
     print(f"  Knowledge sources created: {knowledge_sources_created}.")
     print(f"  Story export demo artifact created: {story_demo_created}.")
 

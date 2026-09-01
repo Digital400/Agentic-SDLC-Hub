@@ -22,6 +22,12 @@ class WorkflowNodeRead(BaseModel):
     status: WorkflowStatus
     blocked_reason: str | None
     override_reason: str | None
+    context_token_budget: int
+    output_token_budget: int
+    full_content_artifact_types: list[str]
+    rag_top_k: int
+    max_rag_tokens: int
+    required_evidence_section: str | None
     order_index: int
     position_x: float
     position_y: float

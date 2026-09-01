@@ -1,8 +1,9 @@
+import Link from "next/link";
 import { Github, MessageSquare, Slack, Trello, Workflow } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { IntegrationStatusBadge } from "@/components/status-badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { IntegrationItem, IntegrationProvider } from "@/lib/types";
 
@@ -65,15 +66,36 @@ export function IntegrationCard({
             </div>
           ) : null}
         </dl>
-        <Button
-          variant="outline"
-          size="sm"
-          className="w-full"
-          disabled={integration.status === "CONNECTED" || busy}
-          onClick={() => onConnect(integration.id)}
-        >
-          {integration.status === "CONNECTED" ? "Connected" : "Connect"}
-        </Button>
+        {integration.provider === "GITHUB" || integration.provider === "JIRA" || integration.provider === "CONFLUENCE" ? (
+          // GitHub, Jira, and Confluence are the three real integrations
+          // (see app/services/github_integration.py / jira_integration.py /
+          // confluence_integration.py) — each needs a real form
+          // (credentials + project/space config), not the generic
+          // one-click connect every other provider still uses (that one
+          // stays a documented 501 until an MCP client exists for them too).
+          <Link
+            href={
+              integration.provider === "GITHUB"
+                ? "/settings/integrations/github"
+                : integration.provider === "JIRA"
+                  ? "/settings/integrations/jira"
+                  : "/settings/integrations/confluence"
+            }
+            className={buttonVariants({ variant: "outline", size: "sm", className: "w-full" })}
+          >
+            {integration.status === "CONNECTED" ? "Manage connection" : "Configure"}
+          </Link>
+        ) : (
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full"
+            disabled={integration.status === "CONNECTED" || busy}
+            onClick={() => onConnect(integration.id)}
+          >
+            {integration.status === "CONNECTED" ? "Connected" : "Connect"}
+          </Button>
+        )}
       </CardContent>
     </Card>
   );

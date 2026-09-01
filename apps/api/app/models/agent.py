@@ -125,6 +125,20 @@ class AgentRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # call will report; the numbers themselves are not meaningful yet.
     token_usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # --- Token Budget Service (see app/services/token_budget.py) ------------
+    #
+    # The node's budgets at the time this run executed (a node's config can
+    # change later; this is what actually applied here). estimated_context_
+    # tokens is computed BEFORE the model call, from the assembled/fitted
+    # context; token_usage.prompt_tokens above is the ACTUAL count the
+    # provider reports back afterward — comparing the two is how you'd spot
+    # the estimate heuristic drifting from reality. token_budget_report is
+    # the full per-block breakdown (included/truncated/dropped) behind that
+    # estimate — see TokenBudgetResult.to_report_dict.
+    context_token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estimated_context_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    token_budget_report: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Knowledge Base chunks retrieved for this run's context (see
     # app/services/retrieval.py), captured at run time so the Agent Run
     # Detail UI can show what was cited without re-running retrieval.
@@ -156,10 +170,16 @@ class AgentRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     loop_iteration: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     loop_max_iterations: Mapped[int | None] = mapped_column(Integer, nullable=True)
     loop_quality_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
-    # The latest VALIDATE step's score/issues — i.e. the ones that produced
-    # loop_status's final decision. Each entry: {severity, message}.
+    # The latest VALIDATE step's score/critical issues — i.e. the ones that
+    # produced loop_status's final decision. loop_validation_result is the
+    # full structured ValidatorResult (see
+    # app/services/validator_agent.py): quality/completeness/clarity/
+    # risk_coverage scores, critical_issues, suggestions, and
+    # approval_recommendation — this is what the Agent Run Detail API
+    # shows (see AgentRunRead).
     loop_quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    loop_validation_issues: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    loop_validation_issues: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    loop_validation_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     project: Mapped["Project"] = relationship("Project")
     workflow_node: Mapped["WorkflowNode"] = relationship("WorkflowNode", back_populates="agent_runs")
@@ -194,8 +214,13 @@ class AgentRunLoopEvent(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
         Enum(LoopStepType, native_enum=False, length=20, validate_strings=True), nullable=False
     )
     # Set only on VALIDATE (and echoed onto the final READY_FOR_REVIEW row).
+    # validation_result is the full structured ValidatorResult (see
+    # app/services/validator_agent.py); validation_issues is just its
+    # critical_issues list, kept alongside for a quick glance without
+    # unpacking the full dict.
     quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    validation_issues: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    validation_issues: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    validation_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # The generated content at this step — set on GENERATE_DRAFT/IMPROVE
     # only, so "improvement history" (this run's content over time) can be
     # reconstructed without re-deriving it from token counts.

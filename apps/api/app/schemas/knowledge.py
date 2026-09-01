@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import KnowledgeSourceStatus, KnowledgeSourceType
+from app.models.enums import KnowledgeContentType, KnowledgeSourceStatus, KnowledgeSourceType
 from app.schemas.validators import NonBlankStr
 
 
@@ -66,11 +66,21 @@ class KnowledgeChunkCreate(BaseModel):
     chunk's `content` is supplied directly, e.g. by a future upload
     handler or by hand for fixtures. Its embedding is generated
     server-side on creation (see app/services/embeddings.py), never
-    client-supplied — a chunk and its embedding must never disagree."""
+    client-supplied — a chunk and its embedding must never disagree.
+
+    stage/domain/project_type/content_type/tags are the retrieval-filtering
+    metadata app/services/retrieval.py's stage-aware retrieval uses — see
+    app/models/knowledge.py's KnowledgeChunk. All optional: a chunk with
+    none of them set is stage-agnostic, untagged, and classified OTHER."""
 
     chunk_index: int = Field(..., ge=0)
     content: NonBlankStr
     metadata_json: dict[str, Any] | None = None
+    stage: str | None = Field(default=None, max_length=100, description="A WorkflowNode.node_key, or null for every stage.")
+    domain: str | None = Field(default=None, max_length=100)
+    project_type: str | None = Field(default=None, max_length=100)
+    content_type: KnowledgeContentType = KnowledgeContentType.OTHER
+    tags: list[str] = Field(default_factory=list)
 
 
 class KnowledgeChunkRead(BaseModel):
@@ -82,6 +92,11 @@ class KnowledgeChunkRead(BaseModel):
     content: str
     metadata_json: dict[str, Any] | None
     created_at: datetime
+    stage: str | None
+    domain: str | None
+    project_type: str | None
+    content_type: KnowledgeContentType
+    tags: list[str]
 
     # The embedding vector itself is never returned — callers only need to
     # know retrieval can consider this chunk, not its raw coordinates.
@@ -96,6 +111,11 @@ class KnowledgeChunkRead(BaseModel):
             content=chunk.content,
             metadata_json=chunk.metadata_json,
             created_at=chunk.created_at,
+            stage=chunk.stage,
+            domain=chunk.domain,
+            project_type=chunk.project_type,
+            content_type=chunk.content_type,
+            tags=chunk.tags,
             has_embedding=chunk.embedding is not None,
         )
 
@@ -110,3 +130,8 @@ class KnowledgeSearchResult(BaseModel):
     chunk_index: int
     content: str
     similarity: float
+    stage: str | None
+    domain: str | None
+    project_type: str | None
+    content_type: KnowledgeContentType
+    tags: list[str]

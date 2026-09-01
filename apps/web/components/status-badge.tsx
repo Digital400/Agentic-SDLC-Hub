@@ -3,6 +3,8 @@ import type { WorkflowStatus } from "@agentic-sdlc-hub/shared";
 import type {
   AgentRunStatus,
   ArtifactStatus,
+  ImplementationTaskRiskLevel,
+  ImplementationTaskStatus,
   IntegrationStatus,
   KnowledgeSourceStatus,
   ProjectStatus,
@@ -194,6 +196,57 @@ export function IntegrationStatusBadge({ status, className }: { status: Integrat
   return (
     <Badge variant={INTEGRATION_STATUS_VARIANT[status]} className={className}>
       {INTEGRATION_STATUS_LABEL[status]}
+    </Badge>
+  );
+}
+
+// Matches apps/api/app/models/enums.py's ImplementationTaskStatus. No
+// coding agent exists yet to advance a task past PENDING — see that
+// enum's own docstring.
+const IMPLEMENTATION_TASK_STATUS_VARIANT: Record<ImplementationTaskStatus, BadgeProps["variant"]> = {
+  PENDING: "gray",
+  IN_PROGRESS: "info",
+  COMPLETED: "success",
+  BLOCKED: "destructive",
+};
+
+const IMPLEMENTATION_TASK_STATUS_LABEL: Record<ImplementationTaskStatus, string> = {
+  PENDING: "Pending",
+  IN_PROGRESS: "In progress",
+  COMPLETED: "Completed",
+  BLOCKED: "Blocked",
+};
+
+export function ImplementationTaskStatusBadge({
+  status,
+  className,
+}: {
+  status: ImplementationTaskStatus;
+  className?: string;
+}) {
+  return (
+    <Badge variant={IMPLEMENTATION_TASK_STATUS_VARIANT[status]} className={className}>
+      {IMPLEMENTATION_TASK_STATUS_LABEL[status]}
+    </Badge>
+  );
+}
+
+const IMPLEMENTATION_TASK_RISK_VARIANT: Record<ImplementationTaskRiskLevel, BadgeProps["variant"]> = {
+  LOW: "success",
+  MEDIUM: "warning",
+  HIGH: "destructive",
+};
+
+export function ImplementationTaskRiskBadge({
+  riskLevel,
+  className,
+}: {
+  riskLevel: ImplementationTaskRiskLevel;
+  className?: string;
+}) {
+  return (
+    <Badge variant={IMPLEMENTATION_TASK_RISK_VARIANT[riskLevel]} className={className}>
+      {riskLevel.charAt(0) + riskLevel.slice(1).toLowerCase()} risk
     </Badge>
   );
 }

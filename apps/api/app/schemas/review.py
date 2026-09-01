@@ -4,6 +4,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import ReviewStatus
+from app.schemas.agent_run import AgentRunRead
 from app.schemas.validators import NonBlankStr
 
 
@@ -19,6 +20,10 @@ class ReviewCommentRead(BaseModel):
     review_id: uuid.UUID
     author_id: uuid.UUID
     body: str
+    # Matches an ArtifactSection heading on the frontend when the reviewer
+    # linked this comment to one — see ReviewComment.section_title. Null
+    # for general, document-wide feedback.
+    section_title: str | None = None
     created_at: datetime
 
 
@@ -71,12 +76,64 @@ class ReviewApproveRequest(BaseModel):
 
 
 class ReviewDecisionWithReasonRequest(BaseModel):
-    """Body for request-changes / reject — a reason is required for both:
-    a reviewer can't ask for changes or reject with no feedback."""
+    """Body for reject — a reason is required: a reviewer can't reject with
+    no feedback. See ReviewRequestChangesRequest for the structured-comment
+    equivalent used by request-changes."""
 
     comment: NonBlankStr
+
+
+class ReviewCommentInput(BaseModel):
+    """One structured piece of reviewer feedback — see
+    ReviewComment.section_title. `section_title` should match one of the
+    artifact's current section headings (case-insensitively) when the
+    reviewer could point at a specific one; omit it for feedback that
+    applies to the document as a whole."""
+
+    body: NonBlankStr
+    section_title: str | None = Field(
+        default=None, description="An ArtifactSection title this comment is about, if it can be linked to one."
+    )
+
+
+class ReviewRequestChangesRequest(BaseModel):
+    """Body for request-changes — rule 1 of the review-gate revision loop:
+    at least one structured comment is required (a reviewer can't ask for
+    changes with nothing to change), each optionally linked to a section
+    (rule 2) so app/services/revision_agent.py can scope its revision."""
+
+    comments: list[ReviewCommentInput] = Field(..., min_length=1)
 
 
 class ReviewCommentCreate(BaseModel):
     author_id: uuid.UUID = Field(..., description="Existing user id.")
     body: NonBlankStr
+    section_title: str | None = None
+
+
+class RunRevisionAgentRequest(BaseModel):
+    triggered_by_user_id: uuid.UUID = Field(
+        ..., description="Existing user id — attributes the revision agent run and the new artifact version."
+    )
+
+
+class RevisionAgentRunResponse(BaseModel):
+    """Response for POST /reviews/{id}/run-revision-agent — see
+    app/services/revision_agent.py. `new_review` is set only when the
+    revision succeeded and was resubmitted for review (rule 9); it's null
+    when the agent instead asked a clarification question
+    (`needs_clarification`), since nothing was saved or resubmitted in
+    that case."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    agent_run: AgentRunRead
+    needs_clarification: bool
+    # The artifact section titles the revision actually rewrote — see
+    # app/services/revision_agent.py's merge_section_revisions. Empty when
+    # nothing was saved (needs_clarification or a failed run).
+    sections_updated: list[str] = []
+    artifact_version_id: uuid.UUID | None = None
+    artifact_status: str | None = None
+    workflow_node_status: str
+    new_review: ReviewRead | None = None

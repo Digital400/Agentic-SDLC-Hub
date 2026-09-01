@@ -89,6 +89,17 @@ class AgentRunStatus(str, enum.Enum):
     FAILED = "FAILED"
 
 
+class ApprovalRecommendation(str, enum.Enum):
+    """A validator agent's own recommendation — see
+    app/services/validator_agent.py — distinct from an actual human
+    ReviewStatus decision: this is advisory input a reviewer sees, not a
+    decision by itself."""
+
+    APPROVE = "APPROVE"
+    REVISE = "REVISE"
+    REJECT = "REJECT"
+
+
 class LoopStepType(str, enum.Enum):
     """One step of an agent run's self-improvement loop — see
     app/services/loop_engine.py's LoopEngineService, the only code that
@@ -183,3 +194,178 @@ class KnowledgeSourceStatus(str, enum.Enum):
     PROCESSING = "PROCESSING"
     INDEXED = "INDEXED"
     FAILED = "FAILED"
+
+
+class KnowledgeContentType(str, enum.Enum):
+    """What KIND of guidance a chunk represents — a chunk-level tag,
+    distinct from KnowledgeSource.source_type (which tracks WHERE the
+    content came from: an upload, a link, or a project artifact). Maps to
+    the "sourceType" chunk-metadata requirement in the RAG improvement
+    spec; named `content_type` here to avoid colliding with
+    KnowledgeSource's own, differently-scoped `source_type` column.
+
+    This is the fixed set RAG is required to support explicitly — see
+    app/services/retrieval.py's module docstring."""
+
+    COMPANY_STANDARD = "COMPANY_STANDARD"
+    PAST_ARTIFACT = "PAST_ARTIFACT"
+    UI_GUIDELINE = "UI_GUIDELINE"
+    ARCHITECTURE_RULE = "ARCHITECTURE_RULE"
+    TESTING_STANDARD = "TESTING_STANDARD"
+    OTHER = "OTHER"
+
+
+class ImplementationTaskArea(str, enum.Enum):
+    """Which part of the system an ImplementationTask belongs to — see
+    app/models/implementation_task.py. Fixed set per the Implementation
+    Planner's spec; each maps 1:1 to an `assigned_agent_type` string
+    (see app/services/implementation_planner.py's AREA_TO_AGENT_TYPE)."""
+
+    BACKEND = "BACKEND"
+    FRONTEND = "FRONTEND"
+    DATABASE = "DATABASE"
+    TESTING = "TESTING"
+    INFRA = "INFRA"
+    DOCS = "DOCS"
+
+
+class ImplementationTaskRiskLevel(str, enum.Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class ImplementationTaskStatus(str, enum.Enum):
+    """A single task's own lifecycle — distinct from WorkflowStatus (the
+    owning Implementation Planning *stage*'s lifecycle) and ArtifactStatus
+    (the plan document's own review lifecycle). No coding agent exists yet
+    to advance a task past PENDING (see app/services/implementation_planner.py's
+    module docstring) — the full lifecycle is modeled now so wiring one up
+    later doesn't require a schema change, same reasoning as
+    IntegrationStatus."""
+
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    BLOCKED = "BLOCKED"
+
+
+class ImplementationRunStatus(str, enum.Enum):
+    """One Implementation Agent execution's own lifecycle — see
+    app/models/implementation_run.py. Deliberately separate from
+    AgentRunStatus: this run isn't keyed to a WorkflowNode/AgentPrompt
+    role, so it doesn't share AgentRun's shape, just the same PENDING/
+    RUNNING/COMPLETED/FAILED vocabulary every run-like model in this
+    codebase uses."""
+
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class ImplementationRunReviewStatus(str, enum.Enum):
+    """A human's accept/reject decision on a COMPLETED run's proposed
+    diff — see app/models/implementation_run.py's class docstring for why
+    this is a full status of its own rather than piggybacking on the
+    generic Review/ArtifactStatus machinery: no artifact exists for this
+    output. Neither Accept nor Reject itself ever touches GitHub — only
+    once ACCEPTED does a separate, explicit action become available
+    (create a PR; see PullRequestLink and
+    app/api/routes/implementation_runs.py's create_pull_request), and even
+    then it only ever writes to a newly created feature branch, never the
+    repository's default branch."""
+
+    PENDING_REVIEW = "PENDING_REVIEW"
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+
+
+class PullRequestStatus(str, enum.Enum):
+    """A GitHub pull request's own state, mirrored at creation time — see
+    app/models/pull_request_link.py. No webhook exists to keep this in
+    sync after creation, so it starts OPEN and stays whatever it was last
+    set to; that's a disclosed gap, not a faked live sync."""
+
+    OPEN = "OPEN"
+    MERGED = "MERGED"
+    CLOSED = "CLOSED"
+
+
+class TestRunStatus(str, enum.Enum):
+    """One Testing Agent execution's own lifecycle — see
+    app/models/test_run.py. Same PENDING/RUNNING/COMPLETED/FAILED
+    vocabulary as ImplementationRunStatus/AgentRunStatus."""
+
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class TestAgentType(str, enum.Enum):
+    """Which of the five Testing Agent types produced a TestRun — see
+    app/services/testing_agent.py. A human picks one when starting a run;
+    nothing here infers it from ImplementationTask.area (a different
+    axis — what part of the system vs. what kind of testing)."""
+
+    UNIT = "UNIT"
+    API = "API"
+    UI = "UI"
+    REGRESSION = "REGRESSION"
+    SECURITY = "SECURITY"
+
+
+class PRReviewRunStatus(str, enum.Enum):
+    """One PR Review Agent execution's own lifecycle — see
+    app/models/pr_review_run.py. Same PENDING/RUNNING/COMPLETED/FAILED
+    vocabulary as every other run-like model in this codebase."""
+
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class PRReviewRecommendation(str, enum.Enum):
+    """A PRReviewRun's overall recommendation — never a merge decision.
+    'Human reviewer decides final approval' happens on the real GitHub PR
+    itself; this is advisory input to that human, not a gate this app
+    enforces."""
+
+    APPROVE = "APPROVE"
+    REQUEST_CHANGES = "REQUEST_CHANGES"
+    COMMENT_ONLY = "COMMENT_ONLY"
+
+
+class JiraSourceType(str, enum.Enum):
+    """Which internal entity kind a JiraIssueLink was created from — see
+    app/models/jira_issue_link.py. Epics have no dedicated model in this
+    codebase (see Story.epic) — an EPIC link's source_key is the raw epic
+    name string, grouped from stories at preview/push time."""
+
+    EPIC = "EPIC"
+    STORY = "STORY"
+    IMPLEMENTATION_TASK = "IMPLEMENTATION_TASK"
+    TESTING_BUG = "TESTING_BUG"
+
+
+class MaintenanceRunStatus(str, enum.Enum):
+    """One Maintenance Agent execution's own lifecycle — see
+    app/models/maintenance_run.py. Same PENDING/RUNNING/COMPLETED/FAILED
+    vocabulary as every other run-like model in this codebase."""
+
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class RepositoryFileEntryType(str, enum.Enum):
+    """One entry in a RepositorySnapshot's file index — see
+    app/models/repository.py's RepositoryFileIndex. Mirrors GitHub's own
+    Git Trees API entry `type` field ("blob"/"tree"), renamed to something
+    self-explanatory outside a Git-internals context."""
+
+    FILE = "FILE"
+    DIRECTORY = "DIRECTORY"

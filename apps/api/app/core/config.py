@@ -29,9 +29,13 @@ class Settings(BaseSettings):
     # key is configured, so the system stays fully testable without a paid
     # key. Set ANTHROPIC_API_KEY in apps/api/.env to turn on real Claude
     # calls; if that's unset but GEMINI_API_KEY is, Gemini is used instead
-    # (Google AI Studio issues Gemini API keys with a free tier) — Claude
-    # takes priority when both are set. Mock is the fallback only when
-    # neither is configured.
+    # (Google AI Studio issues Gemini API keys with a free tier); if both of
+    # those are unset but NVIDIA_API_KEY is, NVIDIA's hosted "Build" API
+    # (build.nvidia.com — an OpenAI-compatible /v1/chat/completions
+    # endpoint, no local GPU/compute needed) is used; Ollama (local, no key
+    # at all) is the last resort before mock. Priority: Anthropic > Gemini >
+    # NVIDIA > Ollama > mock — NVIDIA is placed ahead of Ollama because it's
+    # a fast hosted call, not slow local CPU inference.
     ANTHROPIC_API_KEY: str | None = None
     AI_MODEL: str = "claude-opus-5"
     GEMINI_API_KEY: str | None = None
@@ -40,11 +44,38 @@ class Settings(BaseSettings):
     # on it — Google's own error message names gemini-3.6-flash as the
     # replacement, confirmed against a real key.
     GEMINI_MODEL: str = "gemini-3.6-flash"
-    # Kept well below the ~16k default for a fresh chat response — these are
-    # short, structured SDLC stage documents (see packages/prompts), not
-    # long-form essays, so a smaller ceiling is a deliberate cost control,
-    # not a generic default.
+    # NVIDIA's hosted "Build" API (https://build.nvidia.com) — issues free
+    # API keys for prototyping against a catalog of hosted models via a
+    # single OpenAI-compatible endpoint. moonshotai/kimi-k3 is the default
+    # (a large MoE model with a 1M context window), but NVIDIA_MODEL can
+    # point at any model in their catalog using the same endpoint shape.
+    NVIDIA_API_KEY: str | None = None
+    NVIDIA_MODEL: str = "moonshotai/kimi-k3"
+    NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
+    # Ollama local inference (free, no API key needed). Runs at
+    # http://localhost:11434 by default.
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "llama3.1:8b"
+    # Superseded by each WorkflowNode's own output_token_budget (see
+    # app/models/workflow.py and app/services/token_budget.py) — every real
+    # model call is now capped by the node's budget instead of this global
+    # ceiling (workflow_templates.py's own DEFAULT_OUTPUT_TOKEN_BUDGET is
+    # the fallback when a template omits outputTokenBudget). No longer read
+    # anywhere on the actual call path; kept only so an existing .env
+    # setting this doesn't suddenly become an unknown-key error.
     AI_MAX_TOKENS: int = 4096
+
+    # Encrypts the GitHub PAT at rest (see app/core/security.py) — a
+    # pragmatic MVP bridge, NOT the vault-based design docs/architecture.md's
+    # MCP integrations section actually calls for (no vault exists anywhere
+    # in this codebase yet). Must be a valid Fernet key (44 url-safe base64
+    # chars) — generate one with
+    # `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+    # Left unset here on purpose: app/core/security.py derives a clearly-
+    # marked dev-only fallback when this is empty, so the app stays runnable
+    # out of the box, but a real deployment MUST set a real one — a token
+    # encrypted under the dev-only key is only as safe as this repo itself.
+    GITHUB_TOKEN_ENCRYPTION_KEY: str | None = None
 
     class Config:
         env_file = ".env"

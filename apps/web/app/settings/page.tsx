@@ -74,8 +74,8 @@ export default async function SettingsPage() {
       <div>
         <h2 className="text-base font-semibold">Integrations</h2>
         <p className="mb-4 mt-1 text-sm text-muted-foreground">
-          External systems agents will be able to reach through MCP tools — see docs/architecture.md. Nothing
-          connects yet.
+          External systems agents will be able to reach through MCP tools — see docs/architecture.md. GitHub is the
+          first real connection (read-only repository scan); the rest don&apos;t connect yet.
         </p>
         <IntegrationsSection integrations={integrations} />
       </div>

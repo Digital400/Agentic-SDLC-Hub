@@ -72,15 +72,19 @@ const RAW_RUNTIME_STATE =
         "packageDependencies": [\
           ["@agentic-sdlc-hub/shared", "workspace:packages/shared"],\
           ["@agentic-sdlc-hub/web", "workspace:apps/web"],\
+          ["@tailwindcss/typography", "virtual:b3bb08a464141f501dd4aabd89b2fa3ce705aca54bb8a30410d36824b0c681610027f00d27e1a07e3ea7ae94d1661be28655a9b7b1782039c238a423ae20484d#npm:0.5.20"],\
+          ["@types/dompurify", "npm:3.0.5"],\
           ["@types/node", "npm:20.19.43"],\
           ["@types/react", "npm:18.3.31"],\
           ["@types/react-dom", "virtual:b3bb08a464141f501dd4aabd89b2fa3ce705aca54bb8a30410d36824b0c681610027f00d27e1a07e3ea7ae94d1661be28655a9b7b1782039c238a423ae20484d#npm:18.3.7"],\
           ["autoprefixer", "virtual:b3bb08a464141f501dd4aabd89b2fa3ce705aca54bb8a30410d36824b0c681610027f00d27e1a07e3ea7ae94d1661be28655a9b7b1782039c238a423ae20484d#npm:10.5.4"],\
           ["class-variance-authority", "npm:0.7.1"],\
           ["clsx", "npm:2.1.1"],\
+          ["dompurify", "npm:3.4.14"],\
           ["eslint", "npm:8.57.1"],\
           ["eslint-config-next", "virtual:b3bb08a464141f501dd4aabd89b2fa3ce705aca54bb8a30410d36824b0c681610027f00d27e1a07e3ea7ae94d1661be28655a9b7b1782039c238a423ae20484d#npm:14.2.35"],\
           ["lucide-react", "virtual:b3bb08a464141f501dd4aabd89b2fa3ce705aca54bb8a30410d36824b0c681610027f00d27e1a07e3ea7ae94d1661be28655a9b7b1782039c238a423ae20484d#npm:0.427.0"],\
+          ["marked", "npm:14.1.4"],\
           ["next", "virtual:b3bb08a464141f501dd4aabd89b2fa3ce705aca54bb8a30410d36824b0c681610027f00d27e1a07e3ea7ae94d1661be28655a9b7b1782039c238a423ae20484d#npm:14.2.35"],\
           ["postcss", "npm:8.5.26"],\
           ["react", "npm:18.3.1"],\
@@ -697,6 +701,29 @@ const RAW_RUNTIME_STATE =
         "linkType": "HARD"\
       }]\
     ]],\
+    ["@tailwindcss/typography", [\
+      ["npm:0.5.20", {\
+        "packageLocation": "./.yarn/cache/@tailwindcss-typography-npm-0.5.20-ec83b02e34-e42f9347a7.zip/node_modules/@tailwindcss/typography/",\
+        "packageDependencies": [\
+          ["@tailwindcss/typography", "npm:0.5.20"]\
+        ],\
+        "linkType": "SOFT"\
+      }],\
+      ["virtual:b3bb08a464141f501dd4aabd89b2fa3ce705aca54bb8a30410d36824b0c681610027f00d27e1a07e3ea7ae94d1661be28655a9b7b1782039c238a423ae20484d#npm:0.5.20", {\
+        "packageLocation": "./.yarn/__virtual__/@tailwindcss-typography-virtual-01916993f3/0/cache/@tailwindcss-typography-npm-0.5.20-ec83b02e34-e42f9347a7.zip/node_modules/@tailwindcss/typography/",\
+        "packageDependencies": [\
+          ["@tailwindcss/typography", "virtual:b3bb08a464141f501dd4aabd89b2fa3ce705aca54bb8a30410d36824b0c681610027f00d27e1a07e3ea7ae94d1661be28655a9b7b1782039c238a423ae20484d#npm:0.5.20"],\
+          ["@types/tailwindcss", null],\
+          ["postcss-selector-parser", "npm:6.0.10"],\
+          ["tailwindcss", "npm:3.4.19"]\
+        ],\
+        "packagePeers": [\
+          "@types/tailwindcss",\
+          "tailwindcss"\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
     ["@tybys/wasm-util", [\
       ["npm:0.10.3", {\
         "packageLocation": "./.yarn/cache/@tybys-wasm-util-npm-0.10.3-502dc15495-fd2bd2a79c.zip/node_modules/@tybys/wasm-util/",\
@@ -1029,6 +1056,16 @@ const RAW_RUNTIME_STATE =
         "linkType": "HARD"\
       }]\
     ]],\
+    ["@types/dompurify", [\
+      ["npm:3.0.5", {\
+        "packageLocation": "./.yarn/cache/@types-dompurify-npm-3.0.5-1338d8e659-a34dcc4498.zip/node_modules/@types/dompurify/",\
+        "packageDependencies": [\
+          ["@types/dompurify", "npm:3.0.5"],\
+          ["@types/trusted-types", "npm:2.0.7"]\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
     ["@types/geojson", [\
       ["npm:7946.0.16", {\
         "packageLocation": "./.yarn/cache/@types-geojson-npm-7946.0.16-7a73d95991-1ff24a288b.zip/node_modules/@types/geojson/",\
@@ -1093,6 +1130,15 @@ const RAW_RUNTIME_STATE =
         ],\
         "packagePeers": [\
           "@types/react"\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
+    ["@types/trusted-types", [\
+      ["npm:2.0.7", {\
+        "packageLocation": "./.yarn/cache/@types-trusted-types-npm-2.0.7-a07fc44f59-4c4855f10d.zip/node_modules/@types/trusted-types/",\
+        "packageDependencies": [\
+          ["@types/trusted-types", "npm:2.0.7"]\
         ],\
         "linkType": "HARD"\
       }]\
@@ -2444,6 +2490,16 @@ const RAW_RUNTIME_STATE =
         "packageDependencies": [\
           ["doctrine", "npm:3.0.0"],\
           ["esutils", "npm:2.0.3"]\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
+    ["dompurify", [\
+      ["npm:3.4.14", {\
+        "packageLocation": "./.yarn/cache/dompurify-npm-3.4.14-d78221b639-feca07ece3.zip/node_modules/dompurify/",\
+        "packageDependencies": [\
+          ["@types/trusted-types", "npm:2.0.7"],\
+          ["dompurify", "npm:3.4.14"]\
         ],\
         "linkType": "HARD"\
       }]\
@@ -4152,6 +4208,15 @@ const RAW_RUNTIME_STATE =
         "linkType": "HARD"\
       }]\
     ]],\
+    ["marked", [\
+      ["npm:14.1.4", {\
+        "packageLocation": "./.yarn/cache/marked-npm-14.1.4-dbc94c7053-7ccc4c9b58.zip/node_modules/marked/",\
+        "packageDependencies": [\
+          ["marked", "npm:14.1.4"]\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
     ["math-intrinsics", [\
       ["npm:1.1.0", {\
         "packageLocation": "./.yarn/cache/math-intrinsics-npm-1.1.0-9204d80e7d-7579ff94e8.zip/node_modules/math-intrinsics/",\
@@ -4831,6 +4896,15 @@ const RAW_RUNTIME_STATE =
       }]\
     ]],\
     ["postcss-selector-parser", [\
+      ["npm:6.0.10", {\
+        "packageLocation": "./.yarn/cache/postcss-selector-parser-npm-6.0.10-a4d7aaa270-a0b27c5e3f.zip/node_modules/postcss-selector-parser/",\
+        "packageDependencies": [\
+          ["cssesc", "npm:3.0.0"],\
+          ["postcss-selector-parser", "npm:6.0.10"],\
+          ["util-deprecate", "npm:1.0.2"]\
+        ],\
+        "linkType": "HARD"\
+      }],\
       ["npm:6.1.4", {\
         "packageLocation": "./.yarn/cache/postcss-selector-parser-npm-6.1.4-45600dece5-996f3290de.zip/node_modules/postcss-selector-parser/",\
         "packageDependencies": [\

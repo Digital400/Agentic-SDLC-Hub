@@ -39,12 +39,12 @@ _DEPENDENCY_SPLIT_RE = re.compile(r"\s*[,;\n]\s*")
 _NONE_DEPENDENCY_VALUES = {"", "none", "none.", "n/a", "-"}
 
 
-def _slugify_label(text: str) -> str:
+def slugify_jira_label(text: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return slug or "unlabeled"
 
 
-def _normalize_priority(priority: str) -> tuple[str | None, str | None]:
+def normalize_jira_priority(priority: str) -> tuple[str | None, str | None]:
     """Returns (normalized_value, error) — error is None when the input
     matched (case-insensitively) one of Jira's standard priorities."""
     if not priority.strip():
@@ -55,13 +55,13 @@ def _normalize_priority(priority: str) -> tuple[str | None, str | None]:
     return None, f"Priority '{priority}' doesn't match Jira's standard scale ({', '.join(_JIRA_PRIORITIES)})."
 
 
-def _split_dependencies(raw: str) -> list[str]:
+def split_jira_dependencies(raw: str) -> list[str]:
     if raw.strip().lower() in _NONE_DEPENDENCY_VALUES:
         return []
     return [d.strip().rstrip(".") for d in _DEPENDENCY_SPLIT_RE.split(raw) if d.strip()]
 
 
-def _render_description(story: Story) -> str:
+def render_story_jira_description(story: Story) -> str:
     """Acceptance Criteria -> Jira description. Includes the user story
     line for context, since a Jira Story's description is where a reader
     actually looks for the full picture — the checklist alone would be
@@ -150,20 +150,20 @@ def build_jira_export_preview(stories: list[Story]) -> JiraExportPreview:
         if not story.acceptance_criteria:
             errors.append("Acceptance Criteria is missing.")
 
-        priority, priority_error = _normalize_priority(story.priority)
+        priority, priority_error = normalize_jira_priority(story.priority)
         if priority_error:
             errors.append(priority_error)
 
-        dependency_titles = _split_dependencies(story.dependencies)
+        dependency_titles = split_jira_dependencies(story.dependencies)
         for dep_title in dependency_titles:
             if dep_title not in known_titles:
                 errors.append(f"Dependency '{dep_title}' doesn't match any story title in this backlog.")
 
         mapping = JiraFieldMapping(
             epic=story.epic or None,
-            labels=[_slugify_label(story.feature)] if story.feature else [],
+            labels=[slugify_jira_label(story.feature)] if story.feature else [],
             summary=story.user_story or story.title,
-            description=_render_description(story),
+            description=render_story_jira_description(story),
             priority=priority,
             linked_issues_placeholder=dependency_titles,
         )

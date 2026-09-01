@@ -24,8 +24,13 @@ from app.schemas.artifact import (
     ArtifactRead,
     ArtifactVersionCreate,
     ArtifactVersionRead,
+    GithubPrPreviewRead,
 )
+from app.services.artifact_summary import apply_summaries_to_version
 from app.services.audit import record_audit_log
+from app.services.document_export import DocumentExportError, render_html_document, render_pdf_document
+from app.services.github_export import build_github_pr_preview
+from app.services.graph_engine import GraphEngineService
 from app.services.permissions import require_can_edit_stage
 from app.services.story_export import STORY_BACKLOG_ARTIFACT_TYPE, parse_story_backlog, render_csv, render_json, render_markdown
 
@@ -250,16 +255,44 @@ def submit_artifact_for_review(artifact_id: uuid.UUID, db: Session = Depends(get
         )
 
     previous_status = artifact.status
-    artifact.status = ArtifactStatus.READY_FOR_REVIEW
+    node = artifact.workflow_node
 
-    record_audit_log(
-        db,
-        project_id=artifact.project_id,
-        action="artifact.submitted_for_review",
-        entity_type="Artifact",
-        entity_id=artifact.id,
-        extra_data={"from": previous_status.value, "to": ArtifactStatus.READY_FOR_REVIEW.value},
-    )
+    # A stage with no approval gate (requires_human_approval=False, e.g.
+    # Implementation/Maintenance) has no review to submit for — nothing
+    # else in the codebase ever moves such a stage's artifact to APPROVED
+    # (see GraphEngineService.mark_completed's docstring), so a manually
+    # edited/submitted version needs the same auto-finalize this artifact
+    # would get from a VALIDATE agent run (see
+    # app/api/routes/agent_runs.py's save_agent_output_to_artifact) rather
+    # than sitting at READY_FOR_REVIEW forever.
+    if node.requires_human_approval:
+        artifact.status = ArtifactStatus.READY_FOR_REVIEW
+        record_audit_log(
+            db,
+            project_id=artifact.project_id,
+            action="artifact.submitted_for_review",
+            entity_type="Artifact",
+            entity_id=artifact.id,
+            extra_data={"from": previous_status.value, "to": ArtifactStatus.READY_FOR_REVIEW.value},
+        )
+    else:
+        artifact.status = ArtifactStatus.APPROVED
+        graph_engine = GraphEngineService(db)
+        graph_engine.mark_completed(node)
+        apply_summaries_to_version(artifact.current_version, artifact_type=artifact.artifact_type)
+        unlocked = graph_engine.unlock_next_nodes(node)
+        record_audit_log(
+            db,
+            project_id=artifact.project_id,
+            action="artifact.auto_approved",
+            entity_type="Artifact",
+            entity_id=artifact.id,
+            extra_data={
+                "from": previous_status.value,
+                "reason": "stage does not require human approval",
+                "unlocked": [n.node_key for n in unlocked],
+            },
+        )
 
     db.commit()
     db.refresh(artifact)
@@ -324,11 +357,87 @@ def export_story_backlog(
     )
     db.commit()
 
-    safe_title = "".join(c if c.isalnum() or c in "-_ " else "_" for c in artifact.title).strip() or "story-backlog"
-    filename = f"{safe_title}.{_EXPORT_EXTENSIONS[format]}"
+    filename = f"{_safe_filename_stem(artifact.title, fallback='story-backlog')}.{_EXPORT_EXTENSIONS[format]}"
 
     return Response(
         content=body,
         media_type=_EXPORT_CONTENT_TYPES[format],
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# 9. Export any artifact's current content as a document -------------------------
+
+
+_DOCUMENT_EXPORT_CONTENT_TYPES = {"html": "text/html; charset=utf-8", "pdf": "application/pdf"}
+
+
+def _safe_filename_stem(title: str, *, fallback: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_ " else "_" for c in title).strip() or fallback
+
+
+@router.get("/{artifact_id}/export/document")
+def export_document(
+    artifact_id: uuid.UUID, db: Session = Depends(get_db), format: Literal["html", "pdf"] = Query(...)
+) -> Response:
+    """Exports this artifact's current version as a standalone HTML or PDF
+    file (see app/services/document_export.py) — the Document Editor's
+    "Export HTML"/"Export PDF" buttons. Unlike the Story Crafting export
+    above, this works for any artifact type or status: it's just "give me
+    what's on screen as a file", not a workflow-gated deliverable."""
+    artifact = _get_artifact_or_404(db, artifact_id)
+    if artifact.current_version is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Artifact has no version to export.")
+
+    subtitle = f"{artifact.artifact_type} · v{artifact.current_version.version_number} · exported from Agentic SDLC Hub"
+
+    try:
+        if format == "html":
+            body: str | bytes = render_html_document(
+                title=artifact.title, subtitle=subtitle, content_markdown=artifact.current_version.content_markdown
+            )
+        else:
+            body = render_pdf_document(
+                title=artifact.title, subtitle=subtitle, content_markdown=artifact.current_version.content_markdown
+            )
+    except DocumentExportError as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
+
+    record_audit_log(
+        db, project_id=artifact.project_id, action="artifact.document_exported", entity_type="Artifact",
+        entity_id=artifact.id, extra_data={"format": format, "version_number": artifact.current_version.version_number},
+    )
+    db.commit()
+
+    filename = f"{_safe_filename_stem(artifact.title, fallback='document')}.{format}"
+    return Response(
+        content=body,
+        media_type=_DOCUMENT_EXPORT_CONTENT_TYPES[format],
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# 10. GitHub PR description preview -------------------------------------------------
+
+
+@router.get("/{artifact_id}/github-pr-preview", response_model=GithubPrPreviewRead)
+def preview_github_pr(artifact_id: uuid.UUID, db: Session = Depends(get_db)) -> GithubPrPreviewRead:
+    """Review-before-paste preview for a code_change artifact -> a real
+    GitHub PR (see app/services/github_export.py) — no real GitHub
+    connection exists. Like export_document, this works for any artifact's
+    current version; the frontend only surfaces the button for code_change
+    artifacts, but nothing here hard-requires that type."""
+    artifact = _get_artifact_or_404(db, artifact_id)
+    if artifact.current_version is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Artifact has no version to preview.")
+
+    preview = build_github_pr_preview(
+        artifact_title=artifact.title,
+        version_number=artifact.current_version.version_number,
+        content_markdown=artifact.current_version.content_markdown,
+    )
+    return GithubPrPreviewRead(
+        suggested_title=preview.suggested_title,
+        description_markdown=preview.description_markdown,
+        checklist=preview.checklist,
     )

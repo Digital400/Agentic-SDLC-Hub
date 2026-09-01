@@ -22,15 +22,19 @@ __metadata:
   resolution: "@agentic-sdlc-hub/web@workspace:apps/web"
   dependencies:
     "@agentic-sdlc-hub/shared": "workspace:*"
+    "@tailwindcss/typography": "npm:^0.5.15"
+    "@types/dompurify": "npm:^3.0.5"
     "@types/node": "npm:^20.14.15"
     "@types/react": "npm:^18.3.3"
     "@types/react-dom": "npm:^18.3.0"
     autoprefixer: "npm:^10.4.19"
     class-variance-authority: "npm:^0.7.0"
     clsx: "npm:^2.1.1"
+    dompurify: "npm:^3.1.7"
     eslint: "npm:^8.57.0"
     eslint-config-next: "npm:^14.2.5"
     lucide-react: "npm:^0.427.0"
+    marked: "npm:^14.1.2"
     next: "npm:^14.2.5"
     postcss: "npm:^8.4.41"
     react: "npm:^18.3.1"
@@ -461,6 +465,17 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@tailwindcss/typography@npm:^0.5.15":
+  version: 0.5.20
+  resolution: "@tailwindcss/typography@npm:0.5.20"
+  dependencies:
+    postcss-selector-parser: "npm:6.0.10"
+  peerDependencies:
+    tailwindcss: "*"
+  checksum: 10c0/e42f9347a7802d620c56ea3379dc7986c0eece9af2d0ae170d530a8c8ef9815f6fdb6b23b2ae76c9832314dcca125e6a166bfec1c88326495896afeab64c1c2e
+  languageName: node
+  linkType: hard
+
 "@tybys/wasm-util@npm:^0.10.3":
   version: 0.10.3
   resolution: "@tybys/wasm-util@npm:0.10.3"
@@ -742,6 +757,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@types/dompurify@npm:^3.0.5":
+  version: 3.0.5
+  resolution: "@types/dompurify@npm:3.0.5"
+  dependencies:
+    "@types/trusted-types": "npm:*"
+  checksum: 10c0/a34dcc4498ca250815ccf9aecbe82df96ba5db247d0440cf266a876757d47c52519c240db3475e794d7deb0d6b1af23328e02879be368ad0e26b20c0f0865dba
+  languageName: node
+  linkType: hard
+
 "@types/geojson@npm:*":
   version: 7946.0.16
   resolution: "@types/geojson@npm:7946.0.16"
@@ -788,6 +812,13 @@ __metadata:
     "@types/prop-types": "npm:*"
     csstype: "npm:^3.2.2"
   checksum: 10c0/44180549dd045f536ececd39e39aacdf828e76adc1c4a90b132f453e23cc370c4648d9102ae401172ebd8fd8b1977a901a39e214e53ec77171b27514b588c179
+  languageName: node
+  linkType: hard
+
+"@types/trusted-types@npm:*, @types/trusted-types@npm:^2.0.7":
+  version: 2.0.7
+  resolution: "@types/trusted-types@npm:2.0.7"
+  checksum: 10c0/4c4855f10de7c6c135e0d32ce462419d8abbbc33713b31d294596c0cc34ae1fa6112a2f9da729c8f7a20707782b0d69da3b1f8df6645b0366d08825ca1522e0c
   languageName: node
   linkType: hard
 
@@ -1838,6 +1869,18 @@ __metadata:
   dependencies:
     esutils: "npm:^2.0.2"
   checksum: 10c0/c96bdccabe9d62ab6fea9399fdff04a66e6563c1d6fb3a3a063e8d53c3bb136ba63e84250bbf63d00086a769ad53aef92d2bd483f03f837fc97b71cbee6b2520
+  languageName: node
+  linkType: hard
+
+"dompurify@npm:^3.1.7":
+  version: 3.4.14
+  resolution: "dompurify@npm:3.4.14"
+  dependencies:
+    "@types/trusted-types": "npm:^2.0.7"
+  dependenciesMeta:
+    "@types/trusted-types":
+      optional: true
+  checksum: 10c0/feca07ece3805d1d4e33e847c11196888dcdc97b2afe0bb8a2fd11de4e62bfdc434c2403ee3fb3c7771e903325041d062febec6c5518796391fdc0419a90a873
   languageName: node
   linkType: hard
 
@@ -3271,6 +3314,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"marked@npm:^14.1.2":
+  version: 14.1.4
+  resolution: "marked@npm:14.1.4"
+  bin:
+    marked: bin/marked.js
+  checksum: 10c0/7ccc4c9b58d430b68eb878133fc284235ef3022b1a465345d2464712bf7d47507203b54639826839b6cb8d8847cf46f2e382588b9e1fc1d98b657520e16bfa62
+  languageName: node
+  linkType: hard
+
 "math-intrinsics@npm:^1.1.0":
   version: 1.1.0
   resolution: "math-intrinsics@npm:1.1.0"
@@ -3782,6 +3834,16 @@ __metadata:
   peerDependencies:
     postcss: ^8.2.14
   checksum: 10c0/7f9c3f2d764191a39364cbdcec350f26a312431a569c9ef17408021424726b0d67995ff5288405e3724bb7152a4c92f73c027e580ec91e798800ed3c52e2bc6e
+  languageName: node
+  linkType: hard
+
+"postcss-selector-parser@npm:6.0.10":
+  version: 6.0.10
+  resolution: "postcss-selector-parser@npm:6.0.10"
+  dependencies:
+    cssesc: "npm:^3.0.0"
+    util-deprecate: "npm:^1.0.2"
+  checksum: 10c0/a0b27c5e3f7604c8dc7cd83f145fdd7b21448e0d86072da99e0d78e536ba27aa9db2d42024c50aa530408ee517c4bdc0260529e1afb56608f9a82e839c207e82
   languageName: node
   linkType: hard
 

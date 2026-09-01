@@ -36,20 +36,47 @@ from app.models import (
     Artifact,
     ArtifactStatus,
     ArtifactVersion,
+    KnowledgeContentType,
     Project,
     User,
+    ValidatorDefinition,
     WorkflowNode,
     WorkflowStatus,
 )
 from app.schemas.agent_run import AgentRunCreate, AgentRunLoopEventRead, AgentRunRead, SaveAgentOutputResponse
 from app.services.ai_generation import CLARIFICATION_MARKER, AIGenerationError, generate
+from app.services.artifact_summary import apply_summaries_to_version
 from app.services.audit import record_audit_log
+from app.services.context_builder import fetch_recent_review_comments
 from app.services.graph_engine import GraphEngineService
-from app.services.loop_engine import LoopEngineService
+from app.services.loop_engine import DEFAULT_QUALITY_THRESHOLD, LoopEngineService
 from app.services.permissions import require_can_edit_stage
 from app.services.retrieval import retrieve_relevant_chunks
 
 router = APIRouter(prefix="/agent-runs", tags=["agent-runs"])
+
+
+def _merge_optional_context(db: Session, project: Project, node: WorkflowNode, validation) -> None:
+    """Best-effort, non-blocking extra context (see
+    OPTIONAL_CONTEXT_ARTIFACT_TYPES above): unlike node.required_inputs,
+    an entry here never blocks the run if no APPROVED artifact of that
+    type exists yet — it's purely additive to what build_prioritized_context
+    (see app/services/ai_generation.py) ends up seeing, since that
+    function iterates whatever keys are present in approved_artifact_content,
+    not just node.required_inputs."""
+    for extra_type in OPTIONAL_CONTEXT_ARTIFACT_TYPES.get(node.node_key, []):
+        if extra_type in validation.approved_artifact_content:
+            continue  # already a required input — don't override it
+        artifact = (
+            db.query(Artifact)
+            .filter(Artifact.project_id == project.id, Artifact.artifact_type == extra_type, Artifact.status == ArtifactStatus.APPROVED)
+            .order_by(Artifact.updated_at.desc())
+            .first()
+        )
+        if artifact is not None and artifact.current_version is not None:
+            validation.approved_artifact_content[extra_type] = artifact.current_version.content_markdown
+            if artifact.current_version.agent_context_summary:
+                validation.approved_artifact_summaries[extra_type] = artifact.current_version.agent_context_summary
 
 # The node status a run's action leaves the workflow node in once its
 # output is saved: draft/improve mean the agent is still producing/revising
@@ -65,6 +92,28 @@ ARTIFACT_STATUS_BY_ACTION: dict[AgentPromptRole, ArtifactStatus] = {
     AgentPromptRole.DRAFT: ArtifactStatus.DRAFT,
     AgentPromptRole.IMPROVE: ArtifactStatus.DRAFT,
     AgentPromptRole.VALIDATE: ArtifactStatus.READY_FOR_REVIEW,
+}
+
+# Best-effort, non-blocking extra context for specific stages: an artifact
+# type here is folded into approved_artifact_content/summaries if an
+# APPROVED version of it exists, but — unlike node.required_inputs — its
+# absence never blocks the run (see GraphEngineService.resolve_required_
+# inputs, which only gates on node.required_inputs). Currently just
+# Infrastructure Planning's optional Implementation Plan summary: that
+# stage is only required to wait on approved HLD+LLD (see
+# workflows/sdlc-workflow.json), but benefits from the Implementation
+# Plan's task breakdown when one happens to already be approved.
+OPTIONAL_CONTEXT_ARTIFACT_TYPES: dict[str, list[str]] = {
+    "infrastructure_planning": ["implementation_plan"],
+}
+
+# Per-stage RAG narrowing: omitted for every stage except where one
+# specifically needs a narrower slice of the Knowledge Base than "whatever
+# is similar enough" — see retrieve_relevant_chunks's content_types param.
+# Mirrors the same narrowing app/api/routes/pr_review_runs.py and
+# test_runs.py already do for their own bespoke retrieval calls.
+NODE_CONTENT_TYPE_FILTERS: dict[str, list[KnowledgeContentType]] = {
+    "infrastructure_planning": [KnowledgeContentType.COMPANY_STANDARD, KnowledgeContentType.ARCHITECTURE_RULE],
 }
 
 
@@ -128,6 +177,11 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
         input_context=payload.input_context,
         input_artifact_ids=[str(i) for i in payload.input_artifact_ids],
         started_at=now,
+        # Snapshot the node's budgets as they are right now (see
+        # app/services/token_budget.py) — a node's config can change later,
+        # this is what actually applies to this run.
+        context_token_budget=node.context_token_budget,
+        output_token_budget=node.output_token_budget,
     )
     db.add(run)
     db.flush()
@@ -165,17 +219,28 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
     if not validation.can_run:
         return _fail("Cannot run — " + "; ".join(validation.reasons) + ".")
 
+    _merge_optional_context(db, project, node, validation)
+
     # Retrieval-augmented context: pull whatever the Knowledge Base has that's
     # relevant to this project/stage/input/upstream-artifacts combination
-    # (see app/services/retrieval.py). An empty result is a normal outcome,
-    # not a failure — the run proceeds on project context alone.
+    # (see app/services/retrieval.py) — stage-aware, and capped by this
+    # node's own rag_top_k/max_rag_tokens config. An empty result is a
+    # normal outcome, not a failure — the run proceeds on project context
+    # alone.
     retrieved_chunks = retrieve_relevant_chunks(
         db,
         project=project,
         node=node,
         freeform_context=payload.input_context,
         approved_inputs=validation.approved_artifact_content,
+        top_k=node.rag_top_k,
+        max_rag_tokens=node.max_rag_tokens,
+        content_types=NODE_CONTENT_TYPE_FILTERS.get(node.node_key),
     )
+    # This run's AgentRunContext for RAG (rule 6): the exact chunks that
+    # were selected and made it into the prompt, with enough metadata to
+    # show sources/filter by kind later without re-querying the Knowledge
+    # Base — see app/services/retrieval.py's RetrievedChunk.
     run.retrieved_sources = [
         {
             "chunk_id": c.chunk_id,
@@ -184,9 +249,24 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
             "chunk_index": c.chunk_index,
             "snippet": c.content[:300],
             "similarity": c.similarity,
+            "stage": c.stage,
+            "domain": c.domain,
+            "project_type": c.project_type,
+            "content_type": c.content_type,
+            "tags": c.tags,
         }
         for c in retrieved_chunks
     ]
+    review_comments = fetch_recent_review_comments(db, node)
+    # One ValidatorDefinition per workflow stage (see
+    # app/models/validator.py) — None is a normal outcome for a stage that
+    # hasn't had one configured yet; run_validator falls back to a
+    # criteria-less heuristic check rather than blocking the loop.
+    validator = (
+        db.query(ValidatorDefinition)
+        .filter(ValidatorDefinition.stage == node.node_key, ValidatorDefinition.is_active.is_(True))
+        .first()
+    )
 
     # Only now, having passed every pre-flight check, does the node itself
     # start reflecting that a run is actually in progress.
@@ -205,9 +285,14 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
                 node=node,
                 action=payload.action,
                 active_prompt=active_prompt,
-                approved_inputs=validation.approved_artifact_content,
+                approved_artifact_content=validation.approved_artifact_content,
+                approved_artifact_summaries=validation.approved_artifact_summaries,
                 freeform_context=payload.input_context,
+                full_content_artifact_types=set(node.full_content_artifact_types),
                 retrieved_chunks=retrieved_chunks,
+                review_comments=review_comments,
+                validator=validator,
+                quality_threshold=validator.quality_threshold if validator else DEFAULT_QUALITY_THRESHOLD,
             )
             result_content = loop_result.content_markdown
             result_needs_clarification = loop_result.needs_clarification
@@ -218,10 +303,13 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
                 "total_tokens": loop_result.total_tokens,
             }
             cost = loop_result.cost
+            estimated_context_tokens = loop_result.estimated_context_tokens
+            token_budget_report = loop_result.token_budget_report
             extra_audit_data = {
                 "loop_status": loop_result.loop_status.value,
                 "loop_iterations": loop_result.iterations_run,
                 "loop_quality_score": loop_result.quality_score,
+                "approval_recommendation": loop_result.validation_result.get("approval_recommendation"),
             }
         else:
             result = generate(
@@ -229,9 +317,14 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
                 node=node,
                 action=payload.action,
                 active_prompt=active_prompt,
-                approved_inputs=validation.approved_artifact_content,
+                approved_artifact_content=validation.approved_artifact_content,
+                approved_artifact_summaries=validation.approved_artifact_summaries,
                 freeform_context=payload.input_context,
+                context_token_budget=node.context_token_budget,
+                output_token_budget=node.output_token_budget,
+                full_content_artifact_types=set(node.full_content_artifact_types),
                 retrieved_chunks=retrieved_chunks,
+                review_comments=review_comments,
             )
             result_content = result.content_markdown
             result_needs_clarification = result.needs_clarification
@@ -242,6 +335,8 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
                 "total_tokens": result.total_tokens,
             }
             cost = result.cost
+            estimated_context_tokens = result.estimated_context_tokens
+            token_budget_report = result.token_budget_report
             extra_audit_data = {}
     except AIGenerationError as exc:
         graph_engine.mark_failed(node)
@@ -250,6 +345,8 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
     run.output_text = result_content
     run.token_usage = token_usage
     run.cost = cost
+    run.estimated_context_tokens = estimated_context_tokens
+    run.token_budget_report = token_budget_report
     run.status = AgentRunStatus.COMPLETED
     run.completed_at = datetime.now(timezone.utc)
 
@@ -268,6 +365,7 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
             "agent_key": agent.agent_key,
             "prompt_version": active_prompt.version,
             "token_usage": run.token_usage,
+            "estimated_context_tokens": estimated_context_tokens,
             "used_mock": result_used_mock,
             "needs_clarification": result_needs_clarification,
             "retrieved_source_count": len(retrieved_chunks),
@@ -368,6 +466,33 @@ def save_agent_output_to_artifact(run_id: uuid.UUID, db: Session = Depends(get_d
     artifact.status = ArtifactStatus.DRAFT if needs_clarification else ARTIFACT_STATUS_BY_ACTION[run.action]
     node.status = WorkflowStatus.WAITING_FOR_INPUT if needs_clarification else NODE_STATUS_BY_ACTION[run.action]
     run.output_artifact_id = artifact.id
+
+    graph_engine = GraphEngineService(db)
+    # A VALIDATE run is normally what pushes an artifact to
+    # READY_FOR_REVIEW/WAITING_FOR_REVIEW for a human review gate — but a
+    # stage with requires_human_approval=False (e.g. Implementation,
+    # Maintenance) has no review gate to wait on. Without this, its
+    # artifact would sit at READY_FOR_REVIEW forever: nothing else in the
+    # codebase ever moves a no-approval artifact to APPROVED (see
+    # GraphEngineService.mark_completed's docstring), so a downstream
+    # stage listing it as a required_input could never be satisfied.
+    # Auto-finalize instead, the same way a human approval would, minus
+    # the human: APPROVED (the "usable downstream" artifact state),
+    # COMPLETED (the node's own "no approval gate" terminal status), a
+    # compression summary, and unlocking whatever comes next.
+    auto_finalized = (
+        not needs_clarification and run.action == AgentPromptRole.VALIDATE and not node.requires_human_approval
+    )
+    if auto_finalized:
+        artifact.status = ArtifactStatus.APPROVED
+        graph_engine.mark_completed(node)
+        apply_summaries_to_version(version, artifact_type=artifact.artifact_type)
+        unlocked = graph_engine.unlock_next_nodes(node)
+        record_audit_log(
+            db, project_id=run.project_id, actor_agent_run_id=run.id, action="artifact.auto_approved",
+            entity_type="Artifact", entity_id=artifact.id,
+            extra_data={"reason": "stage does not require human approval", "unlocked": [n.node_key for n in unlocked]},
+        )
 
     record_audit_log(
         db, project_id=run.project_id, actor_agent_run_id=run.id, action="artifact_version.created",

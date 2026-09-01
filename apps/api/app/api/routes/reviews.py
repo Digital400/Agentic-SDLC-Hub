@@ -22,6 +22,7 @@ from app.models import (
     User,
     WorkflowStatus,
 )
+from app.schemas.agent_run import AgentRunRead
 from app.schemas.review import (
     ReviewApproveRequest,
     ReviewCommentCreate,
@@ -29,10 +30,15 @@ from app.schemas.review import (
     ReviewCreate,
     ReviewDecisionWithReasonRequest,
     ReviewRead,
+    ReviewRequestChangesRequest,
+    RevisionAgentRunResponse,
+    RunRevisionAgentRequest,
 )
+from app.services.artifact_summary import apply_summaries_to_version
 from app.services.audit import record_audit_log
 from app.services.graph_engine import GraphEngineService
-from app.services.permissions import require_can_approve_stage
+from app.services.permissions import require_can_approve_stage, require_can_edit_stage
+from app.services.revision_agent import RevisionAgentError, run_revision_agent
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 
@@ -190,12 +196,37 @@ def approve_review(review_id: uuid.UUID, payload: ReviewApproveRequest, db: Sess
     node = review.workflow_node
     require_can_approve_stage(review.reviewer, node.node_key)
 
+    # Rule 8's evidence gate — a stage can require a specific, non-empty
+    # section (e.g. Testing's "Test Evidence") before its review can be
+    # approved at all, not just a human's checklist tick. See
+    # GraphEngineService.validate_evidence_requirement.
+    evidence_error = GraphEngineService(db).validate_evidence_requirement(node, review.artifact_version)
+    if evidence_error:
+        raise HTTPException(status.HTTP_409_CONFLICT, evidence_error)
+
     _record_decision(
         db, review=review, artifact=artifact, decision_status=ReviewStatus.APPROVED,
         action="review.approved", comment=payload.comment,
     )
 
     artifact.status = ArtifactStatus.APPROVED
+
+    # Generate/refresh this version's compression summaries now that it's
+    # approved (see app/services/artifact_summary.py) — every later stage's
+    # context builder (app/services/ai_generation.py's
+    # build_prioritized_context) uses agent_context_summary by default
+    # instead of the full content once this is set.
+    apply_summaries_to_version(review.artifact_version, artifact_type=artifact.artifact_type)
+    record_audit_log(
+        db,
+        project_id=artifact.project_id,
+        actor_agent_run_id=None,
+        action="artifact_version.summarized",
+        entity_type="ArtifactVersion",
+        entity_id=review.artifact_version_id,
+        extra_data={"artifact_id": str(artifact.id), "artifact_type": artifact.artifact_type},
+    )
+
     graph_engine = GraphEngineService(db)
     graph_engine.mark_approved(node)
     record_audit_log(
@@ -230,16 +261,36 @@ def approve_review(review_id: uuid.UUID, payload: ReviewApproveRequest, db: Sess
 
 @router.post("/{review_id}/request-changes", response_model=ReviewRead)
 def request_changes(
-    review_id: uuid.UUID, payload: ReviewDecisionWithReasonRequest, db: Session = Depends(get_db)
+    review_id: uuid.UUID, payload: ReviewRequestChangesRequest, db: Session = Depends(get_db)
 ) -> ReviewRead:
+    """Rule 1: captures one or more structured comments (rule 2: each
+    optionally linked to an artifact section — see
+    ReviewComment.section_title) explaining what needs to change. Rule 3:
+    moves the workflow node to NEEDS_CHANGES, same as the artifact itself —
+    from there, POST /reviews/{id}/run-revision-agent drives the rest of
+    the agentic revision loop (rules 4-9)."""
     review = _get_review_or_404(db, review_id)
     artifact = _get_reviewable_artifact_or_409(db, review)
     node = review.workflow_node
     require_can_approve_stage(review.reviewer, node.node_key)
 
-    _record_decision(
-        db, review=review, artifact=artifact, decision_status=ReviewStatus.NEEDS_CHANGES,
-        action="review.changes_requested", comment=payload.comment,
+    review.status = ReviewStatus.NEEDS_CHANGES
+    review.decided_at = datetime.now(timezone.utc)
+    for comment in payload.comments:
+        db.add(ReviewComment(review=review, author_id=review.reviewer_id, body=comment.body, section_title=comment.section_title))
+
+    record_audit_log(
+        db,
+        project_id=artifact.project_id,
+        actor_user_id=review.reviewer_id,
+        action="review.changes_requested",
+        entity_type="Review",
+        entity_id=review.id,
+        extra_data={
+            "artifact_id": str(artifact.id),
+            "comment_count": len(payload.comments),
+            "section_titles": [c.section_title for c in payload.comments if c.section_title],
+        },
     )
 
     artifact.status = ArtifactStatus.NEEDS_CHANGES
@@ -257,6 +308,46 @@ def request_changes(
     db.commit()
     db.refresh(review)
     return ReviewRead.from_orm_review(review)
+
+
+# 5b. Run revision agent -------------------------------------------------------------
+
+
+@router.post("/{review_id}/run-revision-agent", response_model=RevisionAgentRunResponse, status_code=status.HTTP_201_CREATED)
+def run_revision_agent_endpoint(
+    review_id: uuid.UUID, payload: RunRevisionAgentRequest, db: Session = Depends(get_db)
+) -> RevisionAgentRunResponse:
+    """Rules 4-9: runs the revision agent against a NEEDS_CHANGES review —
+    see app/services/revision_agent.py for the full pipeline (structured
+    comments + validation result + stage rules + the artifact's current
+    content -> a section-scoped revision -> a new version with a change
+    summary -> resubmitted for review)."""
+    review = _get_review_or_404(db, review_id)
+    node = review.workflow_node
+    triggered_by = _get_user_or_400(db, payload.triggered_by_user_id, "triggered_by_user_id")
+    require_can_edit_stage(triggered_by, node.node_key)
+
+    try:
+        result = run_revision_agent(db, review=review, triggered_by=triggered_by)
+    except RevisionAgentError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    db.commit()
+    db.refresh(result.agent_run)
+    if result.artifact_version is not None:
+        db.refresh(result.artifact_version)
+    if result.new_review is not None:
+        db.refresh(result.new_review)
+
+    return RevisionAgentRunResponse(
+        agent_run=AgentRunRead.from_orm_run(result.agent_run),
+        needs_clarification=result.needs_clarification,
+        sections_updated=result.sections_updated,
+        artifact_version_id=result.artifact_version.id if result.artifact_version else None,
+        artifact_status=result.artifact_version.artifact.status.value if result.artifact_version else None,
+        workflow_node_status=node.status.value,
+        new_review=ReviewRead.from_orm_review(result.new_review) if result.new_review else None,
+    )
 
 
 # 6. Reject review ------------------------------------------------------------------
@@ -302,7 +393,7 @@ def add_review_comment(review_id: uuid.UUID, payload: ReviewCommentCreate, db: S
     review = _get_review_or_404(db, review_id)
     author = _get_user_or_400(db, payload.author_id, "author_id")
 
-    comment = ReviewComment(review=review, author=author, body=payload.body)
+    comment = ReviewComment(review=review, author=author, body=payload.body, section_title=payload.section_title)
     db.add(comment)
     db.flush()
 

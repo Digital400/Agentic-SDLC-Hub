@@ -26,7 +26,16 @@ export default async function ProjectWorkspacePage({ params }: { params: { proje
   ]);
 
   const nodes = apiNodes.map(toWorkflowNode);
-  const completedCount = nodes.filter((n) => n.status === "COMPLETED").length;
+  // A stage counts as done once it reaches any of the graph engine's own
+  // "satisfied predecessor" statuses (see
+  // apps/api/app/services/graph_engine.py's _SATISFIED_PREDECESSOR_STATUSES):
+  // APPROVED for a stage that went through human review (most stages),
+  // COMPLETED for one that doesn't require approval (e.g. Implementation),
+  // or SKIPPED via a manual override. Counting only COMPLETED here would
+  // permanently show 0/11 for a normal project, since most stages finish
+  // as APPROVED, not COMPLETED.
+  const DONE_STATUSES = new Set(["APPROVED", "COMPLETED", "SKIPPED"]);
+  const completedCount = nodes.filter((n) => DONE_STATUSES.has(n.status)).length;
   const progressPct = nodes.length > 0 ? Math.round((completedCount / nodes.length) * 100) : 0;
 
   const documents = apiArtifacts.map(toDocumentArtifact).slice(0, 4);

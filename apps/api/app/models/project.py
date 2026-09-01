@@ -62,6 +62,9 @@ class Project(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     audit_logs: Mapped[list["AuditLog"]] = relationship(
         "AuditLog", back_populates="project", cascade="all, delete-orphan"
     )
+    repositories: Mapped[list["Repository"]] = relationship(
+        "Repository", back_populates="project", cascade="all, delete-orphan"
+    )
 
 
 class ProjectMember(Base, UUIDPrimaryKeyMixin, TimestampMixin):

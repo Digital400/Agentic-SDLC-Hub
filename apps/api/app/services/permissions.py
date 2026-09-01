@@ -32,7 +32,10 @@ STAGE_EDIT_ROLES: dict[str, set[UserRole]] = {
     "hld": {UserRole.ARCHITECT},  # inferred default
     "story_crafting": {UserRole.BA, UserRole.PRODUCT_OWNER},  # inferred default
     "lld": {UserRole.ARCHITECT, UserRole.TECH_LEAD},  # inferred default
+    "implementation_planning": {UserRole.ARCHITECT, UserRole.TECH_LEAD},  # inferred default — same owners as lld
+    "infrastructure_planning": {UserRole.DEVOPS, UserRole.ARCHITECT},  # inferred default — co-owned, like lld
     "implementation": {UserRole.DEVELOPER, UserRole.TECH_LEAD},  # inferred default
+    "pr_review": {UserRole.DEVELOPER, UserRole.TECH_LEAD},  # inferred default — same owners as implementation
     "testing": {UserRole.QA},  # inferred default
     "infrastructure": {UserRole.DEVOPS},  # inferred default
     "release": {UserRole.DEVOPS},  # inferred default
@@ -49,7 +52,10 @@ STAGE_APPROVE_ROLES: dict[str, set[UserRole]] = {
     "story_crafting": {UserRole.PRODUCT_OWNER},
     "hld": {UserRole.ARCHITECT},
     "lld": {UserRole.TECH_LEAD},
+    "implementation_planning": {UserRole.TECH_LEAD},
+    "infrastructure_planning": {UserRole.DEVOPS},  # rule: DevOps approval is required
     "implementation": {UserRole.TECH_LEAD},
+    "pr_review": {UserRole.TECH_LEAD},
     "testing": {UserRole.QA},
     "infrastructure": {UserRole.DEVOPS},
     "release": {UserRole.DEVOPS},

@@ -33,8 +33,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import Artifact, ArtifactStatus, Project, WorkflowNode, WorkflowStatus
+from app.models import Artifact, ArtifactStatus, ArtifactVersion, Project, WorkflowNode, WorkflowStatus
 from app.services.audit import record_audit_log
+from app.services.markdown_sections import find_section
 
 # A node may only be run from one of these states. Everything else is
 # rejected by validate_can_run with a clear reason:
@@ -62,7 +63,11 @@ _SATISFIED_PREDECESSOR_STATUSES = (WorkflowStatus.APPROVED, WorkflowStatus.COMPL
 
 @dataclass
 class RequiredInputsResult:
-    approved_artifact_content: dict[str, str] = field(default_factory=dict)  # artifact_type -> content_markdown
+    approved_artifact_content: dict[str, str] = field(default_factory=dict)  # artifact_type -> content_markdown (fullContent)
+    # artifact_type -> agentContextSummary (see app/services/artifact_summary.py)
+    # — what app/services/ai_generation.py's build_prioritized_context uses
+    # by default instead of the full content above.
+    approved_artifact_summaries: dict[str, str] = field(default_factory=dict)
     missing_reasons: list[str] = field(default_factory=list)  # empty means nothing is missing
 
 
@@ -71,6 +76,7 @@ class GraphValidationResult:
     can_run: bool
     reasons: list[str] = field(default_factory=list)
     approved_artifact_content: dict[str, str] = field(default_factory=dict)
+    approved_artifact_summaries: dict[str, str] = field(default_factory=dict)
 
 
 class GraphEngineService:
@@ -113,7 +119,15 @@ class GraphEngineService:
                 if artifact is None or artifact.current_version is None:
                     result.missing_reasons.append(f"required input '{required}' has no approved artifact yet")
                 else:
-                    result.approved_artifact_content[required] = artifact.current_version.content_markdown
+                    version = artifact.current_version
+                    result.approved_artifact_content[required] = version.content_markdown
+                    # Falls back to the full content itself only if this
+                    # version predates app/services/artifact_summary.py or
+                    # summarization hasn't run for some other reason —
+                    # build_prioritized_context truncates that fallback
+                    # itself (see its _fallback_summary), so the full text
+                    # is passed through here rather than pre-truncated.
+                    result.approved_artifact_summaries[required] = version.agent_context_summary or version.content_markdown
             elif not freeform_context.get(required):
                 result.missing_reasons.append(f"required input '{required}' was not provided in input_context")
 
@@ -136,7 +150,10 @@ class GraphEngineService:
         reasons.extend(inputs.missing_reasons)
 
         return GraphValidationResult(
-            can_run=not reasons, reasons=reasons, approved_artifact_content=inputs.approved_artifact_content
+            can_run=not reasons,
+            reasons=reasons,
+            approved_artifact_content=inputs.approved_artifact_content,
+            approved_artifact_summaries=inputs.approved_artifact_summaries,
         )
 
     # --- State transitions a run drives -------------------------------------------
@@ -277,3 +294,32 @@ class GraphEngineService:
                 unlocked.append(candidate)
 
         return unlocked
+
+    # --- Evidence gate: approval can require a documented, non-empty section ---------
+
+    def validate_evidence_requirement(self, node: WorkflowNode, version: ArtifactVersion) -> str | None:
+        """A stage can name a required section (`WorkflowNode.
+        required_evidence_section`, e.g. "Test Evidence" on Testing) that
+        must actually be present, and non-empty, in the artifact version
+        being approved — not just a human's checklist tick. Returns None
+        when the node has no such requirement, or when it's satisfied;
+        otherwise a human-readable reason to reject the approval.
+
+        This is a structural check (the heading exists and has real
+        content) — it does not verify the substance of what's written
+        there (e.g. that linked CI results are genuine)."""
+        if not node.required_evidence_section:
+            return None
+
+        section = find_section(version.content_markdown, node.required_evidence_section)
+        if section is None:
+            return (
+                f"Cannot approve — this stage requires a '{node.required_evidence_section}' section "
+                "documenting evidence, and the current version doesn't have one."
+            )
+        if not section["content"].strip():
+            return (
+                f"Cannot approve — the '{node.required_evidence_section}' section is present but empty; "
+                "it must document real evidence before this stage can be approved."
+            )
+        return None

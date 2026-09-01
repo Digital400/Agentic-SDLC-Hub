@@ -14,7 +14,7 @@ import type {
 const FULL_REVIEW_ACTIONS = ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"];
 const NO_REVIEW_ACTIONS = ["draft", "edit", "submit_for_review", "complete"];
 
-// Mirrors workflows/sdlc-workflow.json's 11 stages exactly (name,
+// Mirrors workflows/sdlc-workflow.json's 12 stages exactly (name,
 // description, agentKey, requiredInputs, outputArtifactType,
 // requiresHumanApproval, allowedActions, position) so the mock Workflow
 // page matches the real template. `assignedRole` is a frontend-only
@@ -29,7 +29,8 @@ const TEMPLATE_STAGES = [
   { key: "story_crafting", name: "Story Crafting", description: "Break the approved high-level design into implementable stories/tasks with acceptance criteria.", agentKey: "story-crafting-agent", assignedRole: "Product Manager", requiredInputs: ["hld_document"], outputArtifactType: "story_backlog", requiresHumanApproval: true, allowedActions: FULL_REVIEW_ACTIONS, x: 880 },
   { key: "lld", name: "Low-Level Design", description: "Detail module/component-level design, data models, and interfaces for the stories in scope.", agentKey: "lld-agent", assignedRole: "Tech Lead", requiredInputs: ["story_backlog"], outputArtifactType: "lld_document", requiresHumanApproval: true, allowedActions: FULL_REVIEW_ACTIONS, x: 1100 },
   { key: "implementation", name: "Implementation", description: "Write the code changes that satisfy the low-level design and the in-scope stories' acceptance criteria.", agentKey: "implementation-agent", assignedRole: "Software Engineer", requiredInputs: ["lld_document", "story_backlog"], outputArtifactType: "code_change", requiresHumanApproval: false, allowedActions: NO_REVIEW_ACTIONS, x: 1320 },
-  { key: "testing", name: "Testing", description: "Validate the implementation against acceptance criteria and produce a test report.", agentKey: "testing-agent", assignedRole: "QA Engineer", requiredInputs: ["code_change"], outputArtifactType: "test_report", requiresHumanApproval: true, allowedActions: FULL_REVIEW_ACTIONS, x: 1540 },
+  { key: "pr_review", name: "PR Review", description: "Review the implementation's code change for correctness, design alignment, and risk before it moves to testing.", agentKey: "pr-review-agent", assignedRole: "Tech Lead", requiredInputs: ["code_change"], outputArtifactType: "pr_review_report", requiresHumanApproval: true, allowedActions: FULL_REVIEW_ACTIONS, x: 1430 },
+  { key: "testing", name: "Testing", description: "Validate the implementation against acceptance criteria and produce a test report with documented evidence.", agentKey: "testing-agent", assignedRole: "QA Engineer", requiredInputs: ["code_change"], outputArtifactType: "test_report", requiresHumanApproval: true, allowedActions: FULL_REVIEW_ACTIONS, x: 1540 },
   { key: "infrastructure", name: "Infrastructure Provisioning", description: "Provision and configure the infrastructure and environments required to release the change.", agentKey: "infrastructure-agent", assignedRole: "DevOps Engineer", requiredInputs: ["test_report"], outputArtifactType: "infrastructure_plan", requiresHumanApproval: true, allowedActions: FULL_REVIEW_ACTIONS, x: 1760 },
   { key: "release", name: "Release", description: "Deploy the change to production and record the deployment outcome.", agentKey: "release-agent", assignedRole: "Release Manager", requiredInputs: ["infrastructure_plan"], outputArtifactType: "deployment_record", requiresHumanApproval: true, allowedActions: FULL_REVIEW_ACTIONS, x: 1980 },
   { key: "maintenance", name: "Maintenance", description: "Monitor the released change, capture incidents and feedback, and feed learnings back into future intake.", agentKey: "maintenance-agent", assignedRole: "Support Engineer", requiredInputs: ["deployment_record"], outputArtifactType: "maintenance_log", requiresHumanApproval: false, allowedActions: NO_REVIEW_ACTIONS, x: 2200 },
@@ -49,6 +50,14 @@ function buildWorkflowNodes(projectId: string, statuses: WorkflowStatus[]): Proj
     requiresHumanApproval: stage.requiresHumanApproval,
     allowedActions: [...stage.allowedActions],
     status: statuses[i] ?? "LOCKED",
+    blockedReason: null,
+    overrideReason: null,
+    contextTokenBudget: 8000,
+    outputTokenBudget: 4096,
+    fullContentArtifactTypes: [],
+    ragTopK: 5,
+    maxRagTokens: 2000,
+    requiredEvidenceSection: stage.key === "testing" ? "Test Evidence" : null,
     orderIndex: i,
     position: { x: stage.x, y: 0 },
   }));

@@ -28,12 +28,31 @@ from app.models import (
     ArtifactVersion,
     AuditLog,
     Base,
+    ImplementationRun,
+    ImplementationTask,
+    ImplementationTaskArea,
+    ImplementationTaskRiskLevel,
+    ImplementationTaskStatus,
+    Integration,
+    PullRequestLink,
+    TestRun,
+    PRReviewRun,
+    MaintenanceRun,
+    JiraProjectLink,
+    JiraIssueLink,
+    ConfluenceSpaceLink,
+    ConfluencePageLink,
+    IntegrationConnection,
     Project,
     ProjectMember,
+    Repository,
+    RepositoryFileIndex,
+    RepositorySnapshot,
     Review,
     ReviewComment,
     User,
     UserRole,
+    ValidatorDefinition,
     WorkflowEdge,
     WorkflowNode,
 )
@@ -54,6 +73,22 @@ TEST_TABLES = [
     AgentPrompt.__table__,
     AgentRun.__table__,
     AgentRunLoopEvent.__table__,
+    ValidatorDefinition.__table__,
+    ImplementationTask.__table__,
+    ImplementationRun.__table__,
+    PullRequestLink.__table__,
+    TestRun.__table__,
+    PRReviewRun.__table__,
+    MaintenanceRun.__table__,
+    JiraProjectLink.__table__,
+    JiraIssueLink.__table__,
+    ConfluenceSpaceLink.__table__,
+    ConfluencePageLink.__table__,
+    Integration.__table__,
+    IntegrationConnection.__table__,
+    Repository.__table__,
+    RepositorySnapshot.__table__,
+    RepositoryFileIndex.__table__,
 ]
 
 
@@ -110,6 +145,8 @@ def make_node(
     status: WorkflowStatus = WorkflowStatus.LOCKED,
     required_inputs: list[str] | None = None,
     output_artifact_type: str | None = None,
+    requires_human_approval: bool = True,
+    required_evidence_section: str | None = None,
 ) -> WorkflowNode:
     """Helper (not a fixture, since tests need several nodes with different
     keys) for building one workflow node with sensible defaults."""
@@ -121,7 +158,8 @@ def make_node(
         agent_key=f"{node_key}_agent",
         required_inputs=required_inputs or [],
         output_artifact_type=output_artifact_type or f"{node_key}_doc",
-        requires_human_approval=True,
+        requires_human_approval=requires_human_approval,
+        required_evidence_section=required_evidence_section,
         allowed_actions=["DRAFT", "IMPROVE", "VALIDATE"],
         status=status,
         order_index=order_index,
@@ -171,22 +209,79 @@ def make_approved_artifact(
     return artifact
 
 
-def make_agent_prompt(
-    db: Session, *, stage: str = "node_a", checklist: list[str] | None = None
-) -> AgentPrompt:
-    """An AgentDefinition + its active DRAFT prompt — the pair
-    LoopEngineService.run_loop needs as `active_prompt`."""
-    agent = AgentDefinition(agent_key=f"{stage}_agent", name=f"{stage} Agent", model_name="mock")
-    db.add(agent)
+def make_implementation_task(
+    db: Session,
+    project: Project,
+    node: WorkflowNode,
+    artifact: Artifact,
+    *,
+    title: str = "Add password reset endpoint",
+    description: str = "Add a POST /auth/password-reset endpoint.",
+    linked_story: str | None = None,
+    linked_lld_section: str | None = None,
+    area: ImplementationTaskArea = ImplementationTaskArea.BACKEND,
+    expected_paths: list[str] | None = None,
+    dependencies: list[str] | None = None,
+    acceptance_criteria: list[str] | None = None,
+    test_expectation: str = "",
+    risk_level: ImplementationTaskRiskLevel = ImplementationTaskRiskLevel.MEDIUM,
+    assigned_agent_type: str = "backend-coding-agent",
+    status: ImplementationTaskStatus = ImplementationTaskStatus.PENDING,
+    order_index: int = 0,
+) -> ImplementationTask:
+    """One ImplementationTask row, tied to `artifact`'s current version —
+    mirrors what app/api/routes/projects.py's generate_implementation_plan
+    actually persists, for tests that need a task without going through
+    that whole endpoint."""
+    task = ImplementationTask(
+        project_id=project.id,
+        workflow_node_id=node.id,
+        artifact_id=artifact.id,
+        artifact_version_id=artifact.current_version_id,
+        title=title,
+        description=description,
+        linked_story=linked_story,
+        linked_lld_section=linked_lld_section,
+        area=area,
+        expected_paths=expected_paths or [],
+        dependencies=dependencies or [],
+        acceptance_criteria=acceptance_criteria or [],
+        test_expectation=test_expectation,
+        risk_level=risk_level,
+        assigned_agent_type=assigned_agent_type,
+        status=status,
+        order_index=order_index,
+    )
+    db.add(task)
     db.flush()
+    db.refresh(task)
+    return task
+
+
+def make_agent_prompt(
+    db: Session,
+    *,
+    stage: str = "node_a",
+    checklist: list[str] | None = None,
+    role: AgentPromptRole = AgentPromptRole.DRAFT,
+    agent: AgentDefinition | None = None,
+) -> AgentPrompt:
+    """An AgentDefinition (unless one is passed in, e.g. to add a second
+    role's prompt to the same agent) + its active prompt for `role` — the
+    pair LoopEngineService.run_loop / revision_agent.run_revision_agent
+    need as `active_prompt`."""
+    if agent is None:
+        agent = AgentDefinition(agent_key=f"{stage}_agent", name=f"{stage} Agent", model_name="mock")
+        db.add(agent)
+        db.flush()
 
     prompt = AgentPrompt(
         agent_definition_id=agent.id,
-        role=AgentPromptRole.DRAFT,
+        role=role,
         version=1,
-        name=f"{stage} draft prompt",
+        name=f"{stage} {role.value} prompt",
         stage=stage,
-        system_prompt="Draft the stage output.",
+        system_prompt=f"{role.value.title()} the stage output.",
         output_format="Markdown.",
         validation_checklist=checklist or [],
         is_active=True,
@@ -208,3 +303,19 @@ def make_agent_run(db: Session, project: Project, node: WorkflowNode, prompt: Ag
     db.add(run)
     db.flush()
     return run
+
+
+def make_validator_definition(
+    db: Session, *, stage: str = "node_a", criteria: list[str] | None = None, quality_threshold: float = 0.8
+) -> ValidatorDefinition:
+    validator = ValidatorDefinition(
+        validator_key=f"{stage}-validator",
+        name=f"{stage} Validator",
+        stage=stage,
+        model_name="mock",
+        quality_threshold=quality_threshold,
+        criteria=criteria or [],
+    )
+    db.add(validator)
+    db.flush()
+    return validator

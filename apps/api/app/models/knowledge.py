@@ -7,7 +7,7 @@ from sqlalchemy import JSON, Enum, ForeignKey, Index, Integer, String, Text, Uni
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, CreatedAtMixin, TimestampMixin, UUIDPrimaryKeyMixin
-from app.models.enums import KnowledgeSourceStatus, KnowledgeSourceType
+from app.models.enums import KnowledgeContentType, KnowledgeSourceStatus, KnowledgeSourceType
 from app.services.embeddings import EMBEDDING_DIM
 
 
@@ -91,5 +91,35 @@ class KnowledgeChunk(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
     # decides what's useful to carry.
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
+
+    # --- Retrieval-filtering metadata (see app/services/retrieval.py) ------------
+    #
+    # All five are used for stage-aware, targeted retrieval rather than
+    # forced into metadata_json, since they're first-class filter/display
+    # dimensions now, not incidental chunking detail.
+    #
+    # A WorkflowNode.node_key (e.g. "hld", "testing") this chunk is most
+    # relevant to — null means stage-agnostic (eligible for every stage),
+    # e.g. a company-wide coding standard. Non-null narrows a chunk to
+    # only the stage(s) that would actually use it, so a UI-guideline
+    # chunk doesn't surface during, say, Infrastructure Provisioning.
+    stage: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Freeform subject-matter tag (e.g. "engineering", "security", "ux") —
+    # informational/filterable, not hard-filtered by automatic retrieval.
+    domain: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Freeform project archetype this chunk is written for (e.g. "web-app",
+    # "mobile", "api") — null means generic/applies to any project type.
+    project_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # What KIND of guidance this is — see KnowledgeContentType. The fixed
+    # set RAG is required to support: company standards, past artifacts,
+    # UI guidelines, architecture rules, testing standards.
+    content_type: Mapped[KnowledgeContentType] = mapped_column(
+        Enum(KnowledgeContentType, native_enum=False, length=30, validate_strings=True),
+        default=KnowledgeContentType.OTHER,
+        nullable=False,
+    )
+    # Additional freeform labels for search/filtering beyond the four
+    # structured fields above (e.g. ["accessibility", "checkout-flow"]).
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
 
     source: Mapped["KnowledgeSource"] = relationship("KnowledgeSource", back_populates="chunks")

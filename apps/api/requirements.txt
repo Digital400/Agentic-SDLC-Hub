@@ -1,5 +1,8 @@
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
+# Required by FastAPI's File()/Form() (multipart request parsing) — see
+# app/api/routes/knowledge.py's upload_knowledge_source.
+python-multipart==0.0.32
 # Bumped from 2.8.2 — google-genai (below) requires a newer pydantic-core;
 # verified the app still boots and serves real data on 2.13.5 (fastapi
 # 0.111's own pydantic v2 support isn't version-pinned tightly).
@@ -11,8 +14,30 @@ anthropic==1.2.0
 # Optional real-AI provider, used when ANTHROPIC_API_KEY isn't set but
 # GEMINI_API_KEY is — see app/services/ai_generation.py.
 google-genai==2.20.0
+# Ollama client for local LLM inference (free, no API key needed).
+ollama==0.4.6
+# Already an anthropic/google-genai transitive dependency — pinned
+# explicitly since app/services/github_integration.py now imports it
+# directly for the real (read-only) GitHub REST API calls.
+httpx==0.27.2
+# Already a transitive dependency — pinned explicitly since
+# app/core/security.py now imports it directly (Fernet) to encrypt the
+# GitHub PAT at rest. See that module's docstring: this is a disclosed,
+# pragmatic bridge, not the vault-based design docs/architecture.md
+# actually calls for.
+cryptography==50.0.1
 psycopg2-binary==2.9.10
 python-dotenv==1.0.1
 pgvector==0.5.0
+# Markdown -> HTML for Export HTML, and (via xhtml2pdf, built on reportlab)
+# HTML -> PDF for Export PDF — see app/services/document_export.py. Both
+# are pure-Python, no native/system build tools needed (verified on
+# Windows), unlike e.g. WeasyPrint which needs system Cairo/Pango.
+markdown==3.7
+xhtml2pdf==0.2.16
+# PDF text extraction for the Knowledge Base upload pipeline (see
+# app/services/document_ingestion.py) — .txt/.md files are read directly;
+# this covers .pdf uploads. Pure Python, no native deps.
+pypdf==5.1.0
 # Test-only dependency — apps/api/tests/.
 pytest==8.3.3

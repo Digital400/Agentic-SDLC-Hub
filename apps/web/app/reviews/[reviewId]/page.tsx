@@ -30,6 +30,7 @@ export default async function ReviewDetailPage({ params }: { params: { reviewId:
     authorName: userNameById.get(c.author_id) ?? "Unknown",
     body: c.body,
     createdAt: c.created_at,
+    sectionTitle: c.section_title,
   }));
 
   // Every other, already-decided round against this same artifact — the
@@ -48,6 +49,7 @@ export default async function ReviewDetailPage({ params }: { params: { reviewId:
 
   const artifactDocument = toArtifactDocument(artifact, versions, currentVersion?.content_markdown ?? "", reviewComments);
   const reviewDetail = toReviewDetail(review, artifactDocument, history);
+  const currentUserId = users[0]?.id ?? null;
 
-  return <ReviewDetail review={reviewDetail} />;
+  return <ReviewDetail review={reviewDetail} currentUserId={currentUserId} />;
 }
