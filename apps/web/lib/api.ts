@@ -913,8 +913,11 @@ export interface ApiConfluencePageLink {
   project_id: string;
   confluence_space_link_id: string;
   artifact_type: string;
-  artifact_id: string;
-  artifact_version_id: string;
+  // Null for a story-scoped page — see story_id/story_artifact_id below.
+  artifact_id: string | null;
+  artifact_version_id: string | null;
+  story_id: string | null;
+  story_artifact_id: string | null;
   confluence_page_id: string;
   confluence_page_url: string;
   confluence_page_title: string;
@@ -950,6 +953,24 @@ export interface ApiConfluencePublishResultItem {
 
 export interface ApiConfluencePublishResponse {
   results: ApiConfluencePublishResultItem[];
+}
+
+// Story-scoped publishing (e.g. Story LLD) — see
+// app/services/story_confluence_publish.py.
+export interface ApiStoryConfluencePublishItem {
+  artifact_type: string;
+  label: string;
+  story_artifact_id: string | null;
+  content_preview: string;
+  validation_errors: string[];
+  already_published: ApiConfluencePageLink | null;
+  update_available: boolean;
+}
+
+export interface ApiStoryConfluencePublishPreview {
+  story_id: string;
+  space_key: string;
+  items: ApiStoryConfluencePublishItem[];
 }
 
 // See app/services/github_export.py — no real GitHub connection exists;
@@ -1600,6 +1621,14 @@ export const api = {
     publishPreview: (projectId: string) => get<ApiConfluencePublishPreview>(`/confluence/projects/${projectId}/publish-preview`),
     publish: (body: { project_id: string; triggered_by_user_id: string; artifact_types: string[] }) =>
       post<ApiConfluencePublishResponse>("/confluence/publish", body),
+    // Story-scoped (e.g. Story LLD) — see
+    // app/services/story_confluence_publish.py. Same "preview then
+    // publish exactly what's named" contract as the project-level pair
+    // above.
+    storyPublishPreview: (storyId: string) =>
+      get<ApiStoryConfluencePublishPreview>(`/confluence/stories/${storyId}/publish-preview`),
+    storyPublish: (storyId: string, body: { triggered_by_user_id: string; artifact_types: string[] }) =>
+      post<ApiConfluencePublishResponse>(`/confluence/stories/${storyId}/publish`, body),
   },
 
   ops: {

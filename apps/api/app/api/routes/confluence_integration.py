@@ -40,6 +40,8 @@ from app.models import (
     IntegrationProvider,
     IntegrationStatus,
     Project,
+    Story,
+    StoryArtifact,
     User,
 )
 from app.schemas.confluence_integration import (
@@ -53,6 +55,9 @@ from app.schemas.confluence_integration import (
     ConfluenceSpaceLinkRead,
     ConnectConfluenceRequest,
     CreateConfluenceSpaceLinkRequest,
+    StoryConfluencePublishItemRead,
+    StoryConfluencePublishPreviewRead,
+    StoryConfluencePublishRequest,
 )
 from app.services import confluence_integration as confluence_api
 from app.services.audit import record_audit_log
@@ -61,6 +66,11 @@ from app.services.confluence_publish_preview import (
     CONFLUENCE_ARTIFACT_TYPES,
     ConfluencePublishItem,
     build_confluence_publish_preview,
+)
+from app.services.story_confluence_publish import (
+    STORY_CONFLUENCE_ARTIFACT_TYPES,
+    StoryConfluencePublishItem,
+    build_story_confluence_publish_preview,
 )
 
 router = APIRouter(prefix="/confluence", tags=["confluence"])
@@ -78,6 +88,13 @@ def _get_project_or_404(db: Session, project_id: uuid.UUID) -> Project:
     if project is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Project {project_id} not found")
     return project
+
+
+def _get_story_or_404(db: Session, story_id: uuid.UUID) -> Story:
+    story = db.get(Story, story_id)
+    if story is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} not found")
+    return story
 
 
 def _get_space_link_or_404(db: Session, project_id: uuid.UUID) -> ConfluenceSpaceLink:
@@ -340,6 +357,112 @@ def publish_to_confluence(payload: ConfluencePublishRequest, db: Session = Depen
                 results.append(ConfluencePublishResultItem(artifact_type=artifact_type, status="published", confluence_page_id=page.id, confluence_page_url=page.url))
         except ConfluenceIntegrationError as exc:
             # One item's failure doesn't abort the batch.
+            results.append(ConfluencePublishResultItem(artifact_type=artifact_type, status="failed", errors=[str(exc)]))
+            continue
+
+    db.commit()
+    return ConfluencePublishResponse(results=results)
+
+
+# 5. Story-scoped publishing (e.g. Story LLD) — see
+# app/services/story_confluence_publish.py -------------------------------
+
+
+def _to_story_item_read(item: StoryConfluencePublishItem) -> StoryConfluencePublishItemRead:
+    return StoryConfluencePublishItemRead(
+        artifact_type=item.artifact_type, label=item.label, story_artifact_id=item.story_artifact_id,
+        content_preview=item.content_preview, validation_errors=item.validation_errors,
+        already_published=ConfluencePageLinkRead.model_validate(item.already_published) if item.already_published else None,
+        update_available=item.update_available,
+    )
+
+
+@router.get("/stories/{story_id}/publish-preview", response_model=StoryConfluencePublishPreviewRead)
+def get_story_confluence_publish_preview(story_id: uuid.UUID, db: Session = Depends(get_db)) -> StoryConfluencePublishPreviewRead:
+    story = _get_story_or_404(db, story_id)
+    space_link = _get_space_link_or_404(db, story.project_id)
+
+    preview = build_story_confluence_publish_preview(db, story=story, space_link=space_link)
+    return StoryConfluencePublishPreviewRead(
+        story_id=story_id, space_key=space_link.space_key, items=[_to_story_item_read(i) for i in preview.items],
+    )
+
+
+@router.post("/stories/{story_id}/publish", response_model=ConfluencePublishResponse)
+def publish_story_to_confluence(
+    story_id: uuid.UUID, payload: StoryConfluencePublishRequest, db: Session = Depends(get_db)
+) -> ConfluencePublishResponse:
+    story = _get_story_or_404(db, story_id)
+    space_link = _get_space_link_or_404(db, story.project_id)
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+
+    connection = space_link.connection
+    config = _config(connection.integration)
+    token = decrypt_confluence_token(connection)  # a real write cannot silently degrade to "no token"
+    base_url = config.get("base_url", "")
+    email = config.get("email", "")
+
+    # Re-validate against the live DB — never trust a stale client preview.
+    preview = build_story_confluence_publish_preview(db, story=story, space_link=space_link)
+    items_by_type = {i.artifact_type: i for i in preview.items}
+
+    results: list[ConfluencePublishResultItem] = []
+
+    for artifact_type in payload.artifact_types:
+        item = items_by_type.get(artifact_type)
+        if item is None:
+            results.append(ConfluencePublishResultItem(
+                artifact_type=artifact_type, status="skipped_invalid",
+                errors=[f"\"{artifact_type}\" is not a publishable Confluence artifact type."] if artifact_type not in STORY_CONFLUENCE_ARTIFACT_TYPES else ["Item not found in the current preview."],
+            ))
+            continue
+        if not item.is_valid:
+            results.append(ConfluencePublishResultItem(artifact_type=artifact_type, status="skipped_invalid", errors=item.validation_errors))
+            continue
+
+        story_artifact = db.get(StoryArtifact, uuid.UUID(item.story_artifact_id))
+        title = f"{story.title} — {item.label}"
+
+        try:
+            if item.already_published is not None:
+                live_page = confluence_api.get_page(base_url, email, token, item.already_published.confluence_page_id)
+                page = confluence_api.update_page(
+                    base_url, email, token, page_id=live_page.id, title=title,
+                    body_markdown=item.content_preview, version=live_page.version + 1,
+                )
+                link = item.already_published
+                link.story_artifact_id = story_artifact.id
+                link.confluence_page_version = page.version
+                link.triggered_by_user_id = triggered_by.id
+                db.flush()
+                record_audit_log(
+                    db, project_id=story.project_id, actor_user_id=triggered_by.id, action="confluence_page.updated",
+                    entity_type="ConfluencePageLink", entity_id=link.id,
+                    extra_data={"artifact_type": artifact_type, "story_id": str(story.id), "confluence_page_id": page.id, "confluence_page_version": page.version},
+                )
+                results.append(ConfluencePublishResultItem(artifact_type=artifact_type, status="updated", confluence_page_id=page.id, confluence_page_url=page.url))
+            else:
+                page = confluence_api.create_page(
+                    base_url, email, token, space_key=space_link.space_key, title=title,
+                    body_markdown=item.content_preview, parent_id=space_link.root_page_id,
+                )
+                link = ConfluencePageLink(
+                    project_id=story.project_id, confluence_space_link_id=space_link.id, artifact_type=artifact_type,
+                    story_id=story.id, story_artifact_id=story_artifact.id,
+                    confluence_page_id=page.id, confluence_page_url=page.url, confluence_page_title=title,
+                    confluence_page_version=page.version, triggered_by_user_id=triggered_by.id,
+                )
+                db.add(link)
+                db.flush()
+                record_audit_log(
+                    db, project_id=story.project_id, actor_user_id=triggered_by.id, action="confluence_page.published",
+                    entity_type="ConfluencePageLink", entity_id=link.id,
+                    extra_data={"artifact_type": artifact_type, "story_id": str(story.id), "confluence_page_id": page.id, "confluence_page_version": page.version},
+                )
+                results.append(ConfluencePublishResultItem(artifact_type=artifact_type, status="published", confluence_page_id=page.id, confluence_page_url=page.url))
+        except ConfluenceIntegrationError as exc:
             results.append(ConfluencePublishResultItem(artifact_type=artifact_type, status="failed", errors=[str(exc)]))
             continue
 

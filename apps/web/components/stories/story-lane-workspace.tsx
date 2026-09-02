@@ -20,6 +20,7 @@ import {
   ApiPullRequestLink,
   ApiStory,
   ApiStoryArtifact,
+  ApiStoryConfluencePublishItem,
   ApiStoryDeliveryLane,
   ApiStoryDeliveryNode,
   ApiStoryTestExecution,
@@ -73,6 +74,8 @@ export function StoryLaneWorkspace({
   initialPrReviewRuns,
   initialTestReport,
   initialTestExecutions,
+  confluenceConnected,
+  initialConfluenceItem,
   users,
   currentUserId,
 }: {
@@ -89,6 +92,10 @@ export function StoryLaneWorkspace({
   initialPrReviewRuns: ApiPRReviewRun[];
   initialTestReport: ApiStoryArtifact | null;
   initialTestExecutions: ApiStoryTestExecution[];
+  /** Whether the project has a Confluence space configured — gates the
+   * "Publish to Confluence" action on the Story LLD tab. */
+  confluenceConnected: boolean;
+  initialConfluenceItem: ApiStoryConfluencePublishItem | null;
   users: ApiUser[];
   currentUserId: string | null;
 }) {
@@ -96,6 +103,8 @@ export function StoryLaneWorkspace({
   const [lane, setLane] = useState(initialLane);
   const [nodes, setNodes] = useState(initialNodes);
   const [lld, setLld] = useState(initialLld);
+  const [confluenceItem, setConfluenceItem] = useState<ApiStoryConfluencePublishItem | null>(initialConfluenceItem);
+  const [confluenceBusy, setConfluenceBusy] = useState(false);
   const [implementationPlan, setImplementationPlan] = useState(initialImplementationPlan);
   const [testScenarios, setTestScenarios] = useState(initialTestScenarios);
   const [implementationTask, setImplementationTask] = useState(initialImplementationTask);
@@ -507,6 +516,27 @@ export function StoryLaneWorkspace({
     }
   }
 
+  async function handlePublishLldToConfluence() {
+    if (currentUserId === null) return;
+    setConfluenceBusy(true);
+    setError(null);
+    try {
+      const preview = await api.confluence.storyPublishPreview(story.id);
+      const item = preview.items.find((i) => i.artifact_type === "story_lld") ?? null;
+      if (item && item.validation_errors.length > 0) {
+        setConfluenceItem(item);
+        return;
+      }
+      await api.confluence.storyPublish(story.id, { triggered_by_user_id: currentUserId, artifact_types: ["story_lld"] });
+      const refreshed = await api.confluence.storyPublishPreview(story.id);
+      setConfluenceItem(refreshed.items.find((i) => i.artifact_type === "story_lld") ?? null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to publish the Story LLD to Confluence.");
+    } finally {
+      setConfluenceBusy(false);
+    }
+  }
+
   async function handleDraftImplementationPlan() {
     if (currentUserId === null || implementationPlanNode === null) return;
     setBusyNodeId(implementationPlanNode.id);
@@ -704,15 +734,45 @@ export function StoryLaneWorkspace({
               </Button>
             )}
           </CardHeader>
-          <CardContent>
+          <CardContent className="flex flex-col gap-4">
             {storyLldNode?.status === "LOCKED" ? (
               <p className="text-sm text-muted-foreground">
                 Story LLD is locked — Story Ready must complete first.
               </p>
             ) : lld ? (
-              <div className="max-h-[70vh] overflow-y-auto rounded-md border border-border bg-muted/30 p-4">
-                <pre className="whitespace-pre-wrap font-sans text-sm">{lld.content_markdown}</pre>
-              </div>
+              <>
+                <div className="max-h-[70vh] overflow-y-auto rounded-md border border-border bg-muted/30 p-4">
+                  <pre className="whitespace-pre-wrap font-sans text-sm">{lld.content_markdown}</pre>
+                </div>
+
+                <div className="flex flex-col gap-2 border-t pt-3">
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm" variant="outline" onClick={handlePublishLldToConfluence}
+                      disabled={confluenceBusy || currentUserId === null || !confluenceConnected}
+                      title={confluenceConnected ? undefined : "Connect Confluence for this project first (Settings)."}
+                    >
+                      {confluenceBusy && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+                      {confluenceItem?.already_published ? "Re-publish to Confluence" : "Publish to Confluence"}
+                    </Button>
+                    {!confluenceConnected && (
+                      <span className="text-xs text-muted-foreground">Connect Confluence for this project first.</span>
+                    )}
+                  </div>
+                  {confluenceItem?.already_published && (
+                    <a
+                      href={confluenceItem.already_published.confluence_page_url}
+                      target="_blank" rel="noreferrer"
+                      className="inline-flex w-fit items-center gap-1 text-xs font-medium text-primary underline-offset-2 hover:underline"
+                    >
+                      Open in Confluence (v{confluenceItem.already_published.confluence_page_version})
+                    </a>
+                  )}
+                  {confluenceItem && confluenceItem.validation_errors.length > 0 && (
+                    <p className="text-xs text-destructive">{confluenceItem.validation_errors.join(" ")}</p>
+                  )}
+                </div>
+              </>
             ) : (
               <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
                 <FileText className="h-6 w-6" />

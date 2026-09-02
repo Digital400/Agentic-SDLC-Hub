@@ -60,6 +60,9 @@ export default async function StoryLanePage({ params }: { params: { projectId: s
   ]);
 
   const currentUserId = users[0]?.id ?? null;
+  const confluenceSpace = await api.projects.confluenceSpace(project.id).catch(() => null);
+  const confluencePreview = confluenceSpace ? await api.confluence.storyPublishPreview(story.id).catch(() => null) : null;
+  const initialConfluenceItem = confluencePreview?.items.find((i) => i.artifact_type === "story_lld") ?? null;
 
   return (
     <div>
@@ -84,6 +87,8 @@ export default async function StoryLanePage({ params }: { params: { projectId: s
         initialPrReviewRuns={prReviewRuns}
         initialTestReport={testReport}
         initialTestExecutions={testExecutions}
+        confluenceConnected={confluenceSpace !== null}
+        initialConfluenceItem={initialConfluenceItem}
         users={users}
         currentUserId={currentUserId}
       />
