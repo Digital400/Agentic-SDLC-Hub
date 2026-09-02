@@ -18,6 +18,16 @@ export function WorkspaceTabs({ projectId }: { projectId: string }) {
       active: pathname === `/projects/${projectId}/workflow`,
     },
     {
+      label: "Stories",
+      href: `/projects/${projectId}/stories`,
+      active: pathname === `/projects/${projectId}/stories`,
+    },
+    {
+      label: "Sprint Planning",
+      href: `/projects/${projectId}/sprint-planning`,
+      active: pathname === `/projects/${projectId}/sprint-planning`,
+    },
+    {
       label: "Implementation Plan",
       href: `/projects/${projectId}/implementation-plan`,
       active: pathname === `/projects/${projectId}/implementation-plan`,

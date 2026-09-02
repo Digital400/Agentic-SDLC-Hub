@@ -9,6 +9,7 @@ import { WORKFLOW_STATUSES, type WorkflowStatus } from "@agentic-sdlc-hub/shared
 import { AgentRunStatusBadge, ReviewStatusBadge, WorkflowStatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
@@ -18,6 +19,13 @@ import { runAgentAndApply } from "@/lib/run-agent";
 import type { AgentRunDetail, DocumentArtifact, ProjectWorkflowNode, ReviewItem, ValidatorDefinitionItem } from "@/lib/types";
 
 type AgentAction = "draft" | "improve" | "validate";
+
+// Scrum story lanes, requirement 2/3/4 — mirrors
+// app/db/seed.py's story_crafting system prompt.
+const STORY_CRAFTING_MODE_HELPER_TEXT: Record<"VERTICAL" | "HORIZONTAL", string> = {
+  VERTICAL: "Creates end-to-end user value stories suitable for Scrum sprint delivery.",
+  HORIZONTAL: "Creates technical layer stories such as frontend, backend, database, integration, infra, testing, or documentation.",
+};
 
 export function NodeDetailsPanel({
   projectId,
@@ -59,6 +67,17 @@ export function NodeDetailsPanel({
 
   const [action, setAction] = useState<AgentAction>("draft");
   const [freeformValues, setFreeformValues] = useState<Record<string, string>>({});
+  // Scrum story lanes, requirement 2 — the one deliberately special-cased
+  // extra control on this stage (see app/db/seed.py's story_crafting
+  // system prompt for what VERTICAL/HORIZONTAL each mean). Not a freeform
+  // input: it has a real default (VERTICAL) rather than being required.
+  const [storyCraftingMode, setStoryCraftingMode] = useState<"VERTICAL" | "HORIZONTAL">("VERTICAL");
+  // Optional inputs the story-crafting-agent prompt reads if given — see
+  // app/db/seed.py. Blank means "not provided," not an empty string sent
+  // to the agent (see handleRun's inputContext below).
+  const [sprintGoal, setSprintGoal] = useState("");
+  const [teamCapacity, setTeamCapacity] = useState("");
+  const isStoryCrafting = node.nodeKey === "story_crafting";
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -81,7 +100,14 @@ export function NodeDetailsPanel({
         workflowNodeId: node.id,
         action,
         triggeredByUserId: currentUserId,
-        inputContext: freeformValues,
+        inputContext: isStoryCrafting
+          ? {
+              ...freeformValues,
+              story_crafting_mode: storyCraftingMode,
+              ...(sprintGoal.trim() ? { sprint_goal: sprintGoal.trim() } : {}),
+              ...(teamCapacity.trim() ? { team_capacity: teamCapacity.trim() } : {}),
+            }
+          : freeformValues,
       });
       if (run.status !== "COMPLETED" || saved === null) {
         setError(run.error_message ?? "The run did not complete.");
@@ -219,6 +245,31 @@ export function NodeDetailsPanel({
                 <option value="improve">Improve</option>
                 <option value="validate">Validate</option>
               </Select>
+              {isStoryCrafting && (
+                <div className="mb-2">
+                  <Select
+                    value={storyCraftingMode}
+                    onChange={(e) => setStoryCraftingMode(e.target.value as "VERTICAL" | "HORIZONTAL")}
+                    className="text-xs"
+                  >
+                    <option value="VERTICAL">Vertical Stories</option>
+                    <option value="HORIZONTAL">Horizontal Stories</option>
+                  </Select>
+                  <p className="mt-1 text-xs text-muted-foreground">{STORY_CRAFTING_MODE_HELPER_TEXT[storyCraftingMode]}</p>
+                  <Input
+                    value={sprintGoal}
+                    onChange={(e) => setSprintGoal(e.target.value)}
+                    placeholder="Sprint goal (optional)"
+                    className="mt-2 h-8 text-xs"
+                  />
+                  <Input
+                    value={teamCapacity}
+                    onChange={(e) => setTeamCapacity(e.target.value)}
+                    placeholder="Team capacity (optional)"
+                    className="mt-2 h-8 text-xs"
+                  />
+                </div>
+              )}
               {freeformInputKeys.map((key) => (
                 <Textarea
                   key={key}

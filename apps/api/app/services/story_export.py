@@ -50,6 +50,20 @@ class Story:
     acceptance_criteria: list[str] = field(default_factory=list)
     definition_of_done: list[str] = field(default_factory=list)
 
+    # Added for Scrum story lanes (VERTICAL/HORIZONTAL) — see
+    # app/db/seed.py's story_crafting prompt and Story's class docstring
+    # in app/models/story.py, which persists most of these onto the real
+    # Story row at sync time. All optional/blank-default so every existing
+    # caller building a Story with only the original fields is unaffected.
+    mode: str = ""  # "VERTICAL" | "HORIZONTAL", as stated by the agent per story
+    business_value: str = ""
+    suggested_owner_role: str = ""
+    technical_areas: list[str] = field(default_factory=list)
+    story_points_estimate: str = ""
+    jira_issue_type: str = ""
+    suggested_subtasks: list[str] = field(default_factory=list)
+    release_readiness_criteria: list[str] = field(default_factory=list)
+
 
 def _extract_fields(block: str) -> dict[str, str]:
     return {label.strip().lower(): value.strip() for label, value in _FIELD_RE.findall(block)}
@@ -62,6 +76,18 @@ def _as_checklist(raw: str) -> list[str]:
     # Not every draft will use "- [ ]" checkbox syntax — fall back to
     # plain lines so a reasonable-but-not-exact draft still exports cleanly.
     return [line.strip("- ").strip() for line in raw.splitlines() if line.strip()]
+
+
+def _as_list(raw: str) -> list[str]:
+    """Like _as_checklist, but also accepts a single comma-separated line
+    (e.g. "Frontend, Backend, Database") — used for fields the prompt
+    allows either a checklist or a short inline list for (Technical Areas
+    Involved), unlike Acceptance Criteria/Definition of Done, which are
+    always multi-line checklists."""
+    items = _as_checklist(raw)
+    if len(items) == 1 and "," in items[0]:
+        return [part.strip() for part in items[0].split(",") if part.strip()]
+    return items
 
 
 def parse_story_backlog(content_markdown: str) -> list[Story]:
@@ -86,6 +112,14 @@ def parse_story_backlog(content_markdown: str) -> list[Story]:
                 dependencies=fields.get("dependencies", ""),
                 acceptance_criteria=_as_checklist(fields.get("acceptance criteria", "")),
                 definition_of_done=_as_checklist(fields.get("definition of done", "")),
+                mode=fields.get("mode", ""),
+                business_value=fields.get("business value", ""),
+                suggested_owner_role=fields.get("suggested owner role", ""),
+                technical_areas=_as_list(fields.get("technical areas involved", "")),
+                story_points_estimate=fields.get("story points estimate", ""),
+                jira_issue_type=fields.get("jira issue type", ""),
+                suggested_subtasks=_as_checklist(fields.get("suggested subtasks", "")),
+                release_readiness_criteria=_as_checklist(fields.get("release readiness criteria", "")),
             )
         )
 

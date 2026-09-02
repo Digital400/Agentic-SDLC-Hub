@@ -51,6 +51,34 @@ export function splitMarkdownIntoSections(markdown: string): ArtifactSection[] {
   return sections;
 }
 
+/** True only if `markdown` has at least one genuine `##` heading —
+ * mirrors apps/api/app/services/markdown_sections.py's has_real_sections.
+ * splitMarkdownIntoSections's fallback "Content" section (above) is a
+ * synthesized label that never appears in the source text, not a real,
+ * individually-improvable section — see agent-actions-panel.tsx, which
+ * uses this to disable "Improve section" for a headingless document
+ * (asking the IMPROVE agent to revise "the Content section" there is
+ * really asking it to regenerate the whole document from one
+ * instruction, which has previously wiped out real content). */
+export function hasRealSections(markdown: string): boolean {
+  return /^##\s+\S/m.test(markdown);
+}
+
+// Mirrors apps/api/app/services/ai_generation.py's CLARIFICATION_MARKER —
+// an agent's output starts with this exact heading when it needs more
+// information before it can draft the real artifact (see
+// format_clarification_output). Kept as a literal here rather than
+// fetched from the backend since it's a fixed protocol constant, not
+// configuration.
+const CLARIFICATION_MARKER = "# Clarification Needed";
+
+/** True if `markdown` is an agent's clarification request rather than a
+ * real drafted document — see components/documents/clarification-panel.tsx
+ * for the UI that lets a user answer it directly. */
+export function isClarificationRequest(markdown: string): boolean {
+  return markdown.trimStart().startsWith(CLARIFICATION_MARKER);
+}
+
 export function joinSectionsIntoMarkdown(sections: ArtifactSection[]): string {
   return sections.map((s) => `## ${s.title}\n\n${s.contentMarkdown}`).join("\n\n");
 }

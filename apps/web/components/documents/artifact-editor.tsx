@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Download, Eye, ExternalLink, FileCode, FileJson, FileSpreadsheet, FileText, Github, Pencil, Save, SendHorizontal, GitBranch } from "lucide-react";
 
 import { AgentActionsPanel, type AgentRunOutcome } from "@/components/documents/agent-actions-panel";
+import { ClarificationPanel } from "@/components/documents/clarification-panel";
 import { CommentsPanel } from "@/components/documents/comments-panel";
 import { GithubPrPreviewPanel } from "@/components/documents/github-pr-preview-panel";
 import { JiraExportPreviewPanel } from "@/components/documents/jira-export-preview-panel";
@@ -16,7 +17,7 @@ import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { formatRelativeTime } from "@/lib/format";
 import { API_URL, api, ApiError } from "@/lib/api";
-import { joinSectionsIntoMarkdown, splitMarkdownIntoSections } from "@/lib/markdown-sections";
+import { hasRealSections, isClarificationRequest, joinSectionsIntoMarkdown, splitMarkdownIntoSections } from "@/lib/markdown-sections";
 import { toArtifactVersionSummary, toGithubPrPreview, toJiraExportPreview } from "@/lib/mappers";
 import type { ArtifactDocument, ArtifactSection, ArtifactStatus, GithubPrPreview, JiraExportPreview } from "@/lib/types";
 
@@ -48,6 +49,8 @@ export function ArtifactEditor({
   hasOpenReview?: boolean;
 }) {
   const [sections, setSections] = useState<ArtifactSection[]>(doc.sections);
+  const [docHasRealSections, setDocHasRealSections] = useState(doc.hasRealSections);
+  const [needsClarification, setNeedsClarification] = useState(doc.needsClarification);
   const [dirty, setDirty] = useState(false);
   const [status, setStatus] = useState<ArtifactStatus>(doc.status);
   const [versions, setVersions] = useState(doc.versions);
@@ -150,7 +153,10 @@ export function ArtifactEditor({
       setStatus(outcome.artifactStatus as ArtifactStatus);
       setCurrentVersionNumber(freshArtifact.current_version_number ?? currentVersionNumber);
       setVersions(freshVersions.map(toArtifactVersionSummary));
-      setSections(splitMarkdownIntoSections(currentVersion?.content_markdown ?? ""));
+      const freshMarkdown = currentVersion?.content_markdown ?? "";
+      setSections(splitMarkdownIntoSections(freshMarkdown));
+      setDocHasRealSections(hasRealSections(freshMarkdown));
+      setNeedsClarification(isClarificationRequest(freshMarkdown));
       setDirty(false);
       // A "validate" run can push status straight to READY_FOR_REVIEW —
       // that's a new version needing its own review round, not a
@@ -392,6 +398,15 @@ export function ArtifactEditor({
             version to keep editing.
           </p>
         ) : null}
+
+        {needsClarification && editable ? (
+          <ClarificationPanel
+            projectId={doc.projectId}
+            workflowNodeId={doc.workflowNodeId}
+            triggeredByUserId={createdById}
+            onApplied={handleAgentApplied}
+          />
+        ) : null}
       </div>
 
       {/* Three-panel layout — column below lg, row at lg+ (see the outer
@@ -440,6 +455,9 @@ export function ArtifactEditor({
             projectId={doc.projectId}
             workflowNodeId={doc.workflowNodeId}
             agentKey={doc.agentKey}
+            artifactId={doc.id}
+            artifactEditable={editable}
+            documentHasRealSections={docHasRealSections}
             freeformInputKeys={doc.freeformInputKeys}
             triggeredByUserId={createdById}
             onApplied={handleAgentApplied}

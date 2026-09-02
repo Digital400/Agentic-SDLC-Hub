@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import ArtifactStatus
+from app.schemas.agent_run import AgentRunRead
 from app.schemas.validators import NonBlankStr
 
 
@@ -116,6 +117,27 @@ class GithubPrPreviewRead(BaseModel):
     suggested_title: str
     description_markdown: str
     checklist: list[str]
+
+
+class ImproveSectionRequest(BaseModel):
+    """Body for POST /artifacts/{id}/improve-section — see
+    app/services/section_improve_agent.py. `section_title` must name a
+    real `##` heading in the artifact's current version."""
+
+    section_title: NonBlankStr
+    instruction: NonBlankStr = Field(..., description="What should change in this section.")
+    triggered_by_user_id: uuid.UUID = Field(..., description="Existing user id.")
+
+
+class ImproveSectionResponse(BaseModel):
+    agent_run: AgentRunRead
+    needs_clarification: bool
+    artifact_version_id: uuid.UUID | None
+    artifact_status: str
+    workflow_node_status: str
+    # None only when nothing was saved (a failed run, or a clarification
+    # request instead of a revision).
+    section_updated: str | None
 
 
 class ArtifactContentUpdate(BaseModel):

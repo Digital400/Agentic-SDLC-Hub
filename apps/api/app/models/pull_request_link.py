@@ -35,6 +35,9 @@ class PullRequestLink(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         ForeignKey("implementation_runs.id", ondelete="CASCADE"), nullable=False
     )
     repository_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    # Set only for a PR created inside a per-story delivery lane — see
+    # app/models/story.py.
+    story_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), nullable=True)
 
     branch_name: Mapped[str] = mapped_column(String(255), nullable=False)
     base_branch: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -59,4 +62,5 @@ class PullRequestLink(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     implementation_task: Mapped["ImplementationTask"] = relationship("ImplementationTask")
     implementation_run: Mapped["ImplementationRun"] = relationship("ImplementationRun")
     repository: Mapped["Repository"] = relationship("Repository")
+    story: Mapped["Story | None"] = relationship("Story")
     triggered_by: Mapped["User | None"] = relationship("User", foreign_keys=[triggered_by_user_id])

@@ -29,6 +29,12 @@ from app.models.enums import (
     LoopStepType,
     JiraSourceType,
     MaintenanceRunStatus,
+    StoryType,
+    StoryStatus,
+    StoryDeliveryLaneStatus,
+    StoryDeliveryNodeStatus,
+    SprintStatus,
+    SprintStoryStatus,
     PRReviewRecommendation,
     PRReviewRunStatus,
     ProjectRole,
@@ -46,6 +52,15 @@ from app.models.user import User
 from app.models.project import Project, ProjectMember
 from app.models.workflow import WorkflowEdge, WorkflowNode
 from app.models.artifact import Artifact, ArtifactVersion
+from app.models.sprint import Sprint
+from app.models.sprint_story import SprintStory
+from app.models.story import Story
+from app.models.story_assignee import StoryAssignee
+from app.models.story_delivery_node import StoryDeliveryNode
+from app.models.story_delivery_edge import StoryDeliveryEdge
+from app.models.story_delivery_lane import StoryDeliveryLane
+from app.models.story_artifact import StoryArtifact
+from app.models.story_activity_log import StoryActivityLog
 from app.models.review import Review, ReviewComment
 from app.models.agent import AgentDefinition, AgentPrompt, AgentRun, AgentRunLoopEvent
 from app.models.validator import ValidatorDefinition
@@ -92,6 +107,21 @@ __all__ = [
     "PRReviewRecommendation",
     "MaintenanceRun",
     "MaintenanceRunStatus",
+    "Story",
+    "StoryType",
+    "StoryStatus",
+    "StoryAssignee",
+    "StoryDeliveryLane",
+    "StoryDeliveryLaneStatus",
+    "StoryDeliveryNode",
+    "StoryDeliveryNodeStatus",
+    "StoryDeliveryEdge",
+    "StoryArtifact",
+    "StoryActivityLog",
+    "Sprint",
+    "SprintStatus",
+    "SprintStory",
+    "SprintStoryStatus",
     "JiraProjectLink",
     "JiraIssueLink",
     "JiraSourceType",

@@ -21,9 +21,17 @@ class WorkflowNode(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """
 
     __tablename__ = "workflow_nodes"
-    __table_args__ = (UniqueConstraint("project_id", "node_key"),)
+    __table_args__ = (UniqueConstraint("project_id", "node_key", "story_id"),)
 
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    # Set only for a node belonging to a per-story delivery lane (see
+    # app/services/story_lane_templates.py's generate_story_lane_graph) —
+    # null for every project-level node, unchanged from today. Lets the
+    # SAME node_key (e.g. "testing") exist once per story lane instead of
+    # once per project; app/services/graph_engine.py's
+    # resolve_required_inputs scopes its artifact-type lookups by this
+    # field so lanes never see each other's artifacts.
+    story_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), nullable=True)
 
     # Matches the template node's `id` (e.g. "hld"). Stable within a project.
     node_key: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -94,6 +102,7 @@ class WorkflowNode(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     position_y: Mapped[float] = mapped_column(Float, default=0, nullable=False)
 
     project: Mapped["Project"] = relationship("Project", back_populates="workflow_nodes")
+    story: Mapped["Story | None"] = relationship("Story")
     artifacts: Mapped[list["Artifact"]] = relationship(
         "Artifact", back_populates="workflow_node", cascade="all, delete-orphan"
     )
@@ -125,6 +134,9 @@ class WorkflowEdge(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "workflow_edges"
 
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    # Same story-scoping as WorkflowNode.story_id — set only within a
+    # per-story lane's own edges, null for every project-level edge.
+    story_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), nullable=True)
     source_node_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("workflow_nodes.id", ondelete="CASCADE"), nullable=False
     )
@@ -134,6 +146,7 @@ class WorkflowEdge(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     label: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     project: Mapped["Project"] = relationship("Project", back_populates="workflow_edges")
+    story: Mapped["Story | None"] = relationship("Story")
     source_node: Mapped["WorkflowNode"] = relationship(
         "WorkflowNode", back_populates="outgoing_edges", foreign_keys=[source_node_id]
     )

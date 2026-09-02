@@ -56,7 +56,7 @@ import type {
   ApiWorkflowEdge,
   ApiWorkflowNode,
 } from "@/lib/api";
-import { splitMarkdownIntoSections } from "@/lib/markdown-sections";
+import { hasRealSections, isClarificationRequest, splitMarkdownIntoSections } from "@/lib/markdown-sections";
 import type {
   AgentDefinitionSummary,
   AgentPromptVersion,
@@ -429,6 +429,8 @@ export function toArtifactDocument(
     status: artifact.status,
     currentVersionNumber: artifact.current_version_number ?? 0,
     sections: splitMarkdownIntoSections(currentVersionMarkdown),
+    hasRealSections: hasRealSections(currentVersionMarkdown),
+    needsClarification: isClarificationRequest(currentVersionMarkdown),
     versions: versions.map(toArtifactVersionSummary),
     comments,
   };

@@ -30,12 +30,17 @@ from app.models import (
     ImplementationRunStatus,
     ImplementationTask,
     ImplementationTaskStatus,
+    KnowledgeContentType,
     Project,
     PullRequestLink,
     Repository,
     RepositorySnapshot,
+    Story,
+    StoryArtifact,
+    StoryDeliveryNodeStatus,
     User,
     WorkflowNode,
+    WorkflowStatus,
 )
 from app.schemas.implementation_run import (
     CreatePullRequestRequest,
@@ -50,7 +55,10 @@ from app.services.graph_engine import GraphEngineService
 from app.services.implementation_agent import SUPPORTED_AREAS, run_implementation_agent
 from app.services.permissions import require_can_edit_stage
 from app.services.repo_context_builder import RepoContextBuilderService
+from app.services.retrieval import retrieve_relevant_chunks
+from app.services.story_export import Story as StoryDataclass
 from app.services.story_export import find_related_story
+from app.services.story_lld_agent import STORY_LLD_ARTIFACT_TYPE
 
 router = APIRouter(prefix="/implementation-runs", tags=["implementation-runs"])
 
@@ -65,6 +73,33 @@ def _get_run_or_404(db: Session, run_id: uuid.UUID) -> ImplementationRun:
 def _get_pull_request_link(db: Session, run_id: uuid.UUID) -> PullRequestLink | None:
     return db.query(PullRequestLink).filter(PullRequestLink.implementation_run_id == run_id).first()
 
+
+_STANDARDS_CONTENT_TYPES = [KnowledgeContentType.COMPANY_STANDARD, KnowledgeContentType.ARCHITECTURE_RULE]
+
+
+def _fetch_standards_chunks(db: Session, project: Project, task: ImplementationTask):
+    """Requirement 4 — "coding standards from RAG." A transient,
+    never-persisted WorkflowNode stands in for retrieve_relevant_chunks'
+    required `node` parameter (it only ever reads plain string attributes
+    off it — see app/services/story_lld_agent.py's module docstring for
+    the same reuse pattern) so this works identically whether `task` is
+    story-scoped or project-level, with no real WorkflowNode required.
+    Same try/except-swallow contract as pr_review_runs.py's own
+    _fetch_standards_chunks: RAG input is additive, never blocks a run."""
+    virtual_node = WorkflowNode(
+        project_id=project.id, node_key="implementation", name="Implementation",
+        description="Coding standards retrieval for an implementation run.",
+        agent_key="implementation-agent", required_inputs=[], output_artifact_type="code_change",
+        requires_human_approval=False, allowed_actions=["draft"], status=WorkflowStatus.READY,
+        order_index=0, position_x=0, position_y=0,
+    )
+    try:
+        return retrieve_relevant_chunks(
+            db, project=project, node=virtual_node, freeform_context={"query": f"{task.title} {task.description}"},
+            approved_inputs={}, content_types=_STANDARDS_CONTENT_TYPES, top_k=5,
+        )
+    except Exception:  # noqa: BLE001 — RAG input is additive, never blocks a run
+        return []
 
 
 
@@ -109,14 +144,99 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
             status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user"
         )
 
-    implementation_node = (
-        db.query(WorkflowNode)
-        .filter(WorkflowNode.project_id == project.id, WorkflowNode.node_key == "implementation")
-        .first()
-    )
-    if implementation_node is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Project {project.id}'s workflow has no implementation stage.")
-    require_can_edit_stage(triggered_by, implementation_node.node_key)
+    # Story-level implementation workflow, requirement 1 — a story-scoped
+    # task (task.story_id is set) belongs to that story's own delivery
+    # lane, not the project-level WorkflowNode graph a legacy
+    # (task.story_id is None) task uses. Branch once, here, rather than
+    # scattering `if task.story_id` checks through the rest of this
+    # function — project-level behavior below this block is byte-for-byte
+    # unchanged from before this feature.
+    story_id: uuid.UUID | None = None
+    lane_id: uuid.UUID | None = None
+    story_lld_artifact_id: uuid.UUID | None = None
+    story: StoryDataclass | None = None
+    jira_issue_key: str | None = None
+
+    if task.story_id is not None:
+        story_row = db.get(Story, task.story_id)
+        if story_row is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Task {task.id}'s story no longer exists.")
+        lane = story_row.delivery_lane
+        if lane is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Story {story_row.id} has no delivery lane.")
+
+        implementation_lane_node = next((n for n in lane.nodes if n.node_key == "IMPLEMENTATION"), None)
+        lld_review_node = next((n for n in lane.nodes if n.node_key == "LLD_REVIEW"), None)
+        if implementation_lane_node is None or lld_review_node is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Lane {lane.id} is missing its IMPLEMENTATION/LLD_REVIEW nodes.")
+
+        require_can_edit_stage(triggered_by, "implementation")
+
+        # Requirement 2 / rule — implementation cannot start before Story
+        # LLD is approved. LLD_REVIEW completing IS that approval (a Tech
+        # Lead-only transition — see app/api/routes/stories.py's
+        # update_lane_node_status).
+        if lld_review_node.status != StoryDeliveryNodeStatus.COMPLETED:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "Cannot start implementation — this story's Story LLD has not been approved yet."
+            )
+        if implementation_lane_node.status == StoryDeliveryNodeStatus.LOCKED:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"Node {implementation_lane_node.id} is LOCKED.")
+
+        story_lld_artifact = (
+            db.query(StoryArtifact)
+            .filter(StoryArtifact.story_id == story_row.id, StoryArtifact.artifact_type == STORY_LLD_ARTIFACT_TYPE)
+            .order_by(StoryArtifact.version_number.desc())
+            .first()
+        )
+        lld_summary = story_lld_artifact.content_markdown if story_lld_artifact is not None else ""
+        story_lld_artifact_id = story_lld_artifact.id if story_lld_artifact is not None else None
+        story_id = story_row.id
+        lane_id = lane.id
+        jira_issue_key = story_row.jira_issue_key
+        # The story dataclass run_implementation_agent expects — built
+        # straight from the real Story row rather than re-parsed out of a
+        # backlog document (find_related_story's own use case), since a
+        # story-scoped task always has one already.
+        story = StoryDataclass(
+            title=story_row.title, epic=story_row.epic, feature=story_row.feature, user_story=story_row.user_story,
+            priority=story_row.priority, dependencies=story_row.dependencies,
+            acceptance_criteria=story_row.acceptance_criteria, definition_of_done=story_row.definition_of_done,
+        )
+
+        if implementation_lane_node.status == StoryDeliveryNodeStatus.READY:
+            implementation_lane_node.status = StoryDeliveryNodeStatus.IN_PROGRESS
+            implementation_lane_node.started_at = datetime.now(timezone.utc)
+
+        graph_gate_reasons: list[str] = []
+    else:
+        implementation_node = (
+            db.query(WorkflowNode)
+            .filter(
+                WorkflowNode.project_id == project.id,
+                WorkflowNode.node_key == "implementation",
+                WorkflowNode.story_id.is_(None),
+            )
+            .first()
+        )
+        if implementation_node is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Project {project.id}'s workflow has no implementation stage.")
+        require_can_edit_stage(triggered_by, implementation_node.node_key)
+
+        # Requirement 1, gates 1 & 2 — LLD approved + Implementation Plan
+        # approved. `implementation`'s own required_inputs already lists
+        # both artifact types (see workflows/sdlc-workflow.json), so this
+        # one call enforces both, exactly like
+        # generate_implementation_plan's own gate.
+        graph_engine = GraphEngineService(db)
+        validation = graph_engine.validate_can_run(project=project, node=implementation_node, freeform_context={})
+        graph_gate_reasons = validation.reasons
+        lld_summary = validation.approved_artifact_summaries.get("lld_document", "")
+        story_backlog_content = validation.approved_artifact_content.get("story_backlog", "")
+        story = find_related_story(story_backlog_content, task.linked_story)
+
+    if graph_gate_reasons:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Cannot start — " + "; ".join(graph_gate_reasons) + ".")
 
     if task.area not in SUPPORTED_AREAS:
         raise HTTPException(
@@ -124,15 +244,6 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
             f"No {task.area.value} Implementation Agent is available yet — only "
             f"{', '.join(sorted(a.value for a in SUPPORTED_AREAS))} are implemented.",
         )
-
-    # Requirement 1, gates 1 & 2 — LLD approved + Implementation Plan
-    # approved. `implementation`'s own required_inputs already lists both
-    # artifact types (see workflows/sdlc-workflow.json), so this one call
-    # enforces both, exactly like generate_implementation_plan's own gate.
-    graph_engine = GraphEngineService(db)
-    validation = graph_engine.validate_can_run(project=project, node=implementation_node, freeform_context={})
-    if not validation.can_run:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Cannot start — " + "; ".join(validation.reasons) + ".")
 
     # Requirement 1, gate 3 — a GitHub repo snapshot exists. Not an
     # artifact type, so not part of required_inputs; resolved the same way
@@ -149,10 +260,6 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
     if snapshot is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot start — create a repository snapshot first.")
 
-    lld_summary = validation.approved_artifact_summaries.get("lld_document", "")
-    story_backlog_content = validation.approved_artifact_content.get("story_backlog", "")
-    story = find_related_story(story_backlog_content, task.linked_story)
-
     try:
         github_token = decrypt_repository_token(repository)
     except HTTPException:
@@ -163,7 +270,12 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
         implementation_task_id=task.id,
         repository_snapshot_id=snapshot.id,
         triggered_by_user_id=triggered_by.id,
+        story_id=story_id,
+        lane_id=lane_id,
+        story_lld_artifact_id=story_lld_artifact_id,
+        assigned_user_id=triggered_by.id,
         agent_type=task.assigned_agent_type,
+        assigned_agent_key=task.assigned_agent_type,
         status=ImplementationRunStatus.RUNNING,
         started_at=datetime.now(timezone.utc),
     )
@@ -174,12 +286,19 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
     record_audit_log(
         db, project_id=project.id, actor_user_id=triggered_by.id, action="implementation_run.started",
         entity_type="ImplementationRun", entity_id=run.id,
-        extra_data={"implementation_task_id": str(task.id), "area": task.area.value, "agent_type": task.assigned_agent_type},
+        extra_data={
+            "implementation_task_id": str(task.id), "area": task.area.value, "agent_type": task.assigned_agent_type,
+            "story_id": str(story_id) if story_id else None, "lane_id": str(lane_id) if lane_id else None,
+        },
     )
 
     try:
         repo_context = RepoContextBuilderService(db).build(task=task, snapshot=snapshot, github_token=github_token)
-        result = run_implementation_agent(task=task, repo_context=repo_context, story=story, lld_summary=lld_summary)
+        standards_chunks = _fetch_standards_chunks(db, project, task)
+        result = run_implementation_agent(
+            task=task, repo_context=repo_context, story=story, lld_summary=lld_summary,
+            standards_chunks=standards_chunks, jira_issue_key=jira_issue_key,
+        )
     except Exception as exc:  # noqa: BLE001 — anything unexpected fails this run cleanly, never a bare 500
         run.status = ImplementationRunStatus.FAILED
         run.error_message = str(exc)
@@ -201,6 +320,7 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
     run.explanation = result.explanation
     run.test_command = result.test_command
     run.risks = result.risks
+    run.pr_description = result.pr_description
     run.used_mock = result.used_mock
     run.token_usage = {
         "prompt_tokens": result.prompt_tokens, "completion_tokens": result.completion_tokens, "total_tokens": result.total_tokens,
@@ -302,7 +422,13 @@ def create_pull_request(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
 
     implementation_node = (
-        db.query(WorkflowNode).filter(WorkflowNode.project_id == project.id, WorkflowNode.node_key == "implementation").first()
+        db.query(WorkflowNode)
+        .filter(
+            WorkflowNode.project_id == project.id,
+            WorkflowNode.node_key == "implementation",
+            WorkflowNode.story_id == task.story_id,
+        )
+        .first()
     )
     if implementation_node is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Project {project.id}'s workflow has no implementation stage.")
@@ -383,6 +509,7 @@ def create_pull_request(
         implementation_task_id=task.id,
         implementation_run_id=run.id,
         repository_id=repository.id,
+        story_id=task.story_id,
         branch_name=branch_name,
         base_branch=base_branch,
         pr_number=pr.number,

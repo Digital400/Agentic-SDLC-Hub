@@ -31,6 +31,7 @@ from app.models.enums import ImplementationTaskArea
 from app.models.implementation_task import ImplementationTask
 from app.services.ai_generation import AIGenerationError, generate_raw_text, get_active_provider
 from app.services.repo_context_builder import RepoContextPreviewResult
+from app.services.retrieval import RetrievedChunk
 from app.services.story_export import Story
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,9 @@ class ImplementationAgentResult:
     explanation: str = ""
     test_command: str = ""
     risks: list[str] = field(default_factory=list)
+    # Requirement 5 — a real PR description, drafted alongside the diff
+    # rather than only synthesized later at PR-creation time.
+    pr_description: str = ""
     used_mock: bool = True
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -122,8 +126,28 @@ def _existing_snippet(path: str, repo_context: RepoContextPreviewResult) -> str:
 # --- Heuristic path: no real code synthesis, a clearly-labeled scaffold -------------
 
 
+def _build_pr_description(*, task: ImplementationTask, story: Story | None, jira_issue_key: str | None) -> str:
+    """A minimal, honest PR description — used as-is by the heuristic
+    path, and as the fallback shape the real-AI path's own prompt is
+    told to follow (see _SYSTEM_PROMPT)."""
+    lines = [f"## {task.title}", "", task.description or "(no description provided)"]
+    if story is not None:
+        lines += ["", f"**Story:** {story.title}"]
+    if jira_issue_key:
+        lines += ["", f"**Jira:** {jira_issue_key}"]
+    if task.acceptance_criteria:
+        lines += ["", "**Acceptance criteria:**"] + [f"- {c}" for c in task.acceptance_criteria]
+    return "\n".join(lines)
+
+
 def _build_heuristic_result(
-    *, task: ImplementationTask, repo_context: RepoContextPreviewResult, story: Story | None, lld_summary: str
+    *,
+    task: ImplementationTask,
+    repo_context: RepoContextPreviewResult,
+    story: Story | None,
+    lld_summary: str,
+    standards_chunks: list[RetrievedChunk] | None = None,
+    jira_issue_key: str | None = None,
 ) -> ImplementationAgentResult:
     paths = task.expected_paths or [f"(no expected path declared for '{task.title}')"]
     changes: list[ProposedFileChange] = []
@@ -153,6 +177,8 @@ def _build_heuristic_result(
         risks.append("No acceptance criteria were declared for this task — scope may be under-specified.")
     if not repo_context.relevant_files:
         risks.append("No relevant repository files were found for this task — the repo snapshot may be stale or empty.")
+    if not standards_chunks:
+        risks.append("No coding-standards knowledge was retrieved — proceeding on repository context alone.")
 
     explanation = (
         f"Heuristic scaffold for \"{task.title}\" ({task.area.value}). No real model is configured "
@@ -160,6 +186,8 @@ def _build_heuristic_result(
         "each acceptance criterion needs real implementation, not working code. "
         f"{'Related story: ' + story.title + '. ' if story else ''}"
         f"{'LLD context: ' + lld_summary[:200] + '. ' if lld_summary else ''}"
+        f"{'Jira: ' + jira_issue_key + '. ' if jira_issue_key else ''}"
+        f"{f'{len(standards_chunks)} coding-standards excerpt(s) available. ' if standards_chunks else ''}"
         "No repository, branch, or file was written by generating this — review the diff below before anything else happens to it."
     )
 
@@ -169,6 +197,7 @@ def _build_heuristic_result(
         explanation=explanation,
         test_command=test_command,
         risks=risks,
+        pr_description=_build_pr_description(task=task, story=story, jira_issue_key=jira_issue_key),
         used_mock=True,
     )
 
@@ -176,8 +205,9 @@ def _build_heuristic_result(
 # --- Real-AI path --------------------------------------------------------------------
 
 _SYSTEM_PROMPT = (
-    "You are an Implementation Agent for one specific area of a software system. Given an approved task, its "
-    "Low-Level Design context, its related user story, relevant existing repository files, coding standards, and "
+    "You are an Implementation Agent for one specific area of a software system, working on exactly ONE story — "
+    "never introduce changes for any other story or task. Given an approved task, its Low-Level Design context, "
+    "its related user story, relevant existing repository files, coding standards, a Jira issue key (if any), and "
     "test expectations, propose the code changes needed to complete the task.\n"
     "Respond with ONLY a single JSON object (no markdown code fences, no commentary) with exactly these keys:\n"
     '- "proposed_file_changes": array of objects {"path": string, "change_type": one of "create"/"modify"/"delete", '
@@ -187,15 +217,24 @@ _SYSTEM_PROMPT = (
     "every proposed file change — for human review; must be consistent with each file's \"content\" above.\n"
     '- "explanation": string — what the change does and why.\n'
     '- "test_command": string — the exact command a human should run to verify this change.\n'
-    '- "risks": array of strings.\n'
+    '- "risks": array of strings — include any blocker that would stop this from being mergeable as-is.\n'
+    '- "pr_description": string — a complete pull request description (what changed, why, and how to verify), '
+    "referencing the Jira issue key when one is given.\n"
     "RULES: Output a diff only. Do NOT claim the change has been applied, committed, or pushed anywhere — you have "
-    "no ability to do so and must not imply otherwise. Never reference creating or pushing to a branch. Use only the "
-    "repository content given to you; do not invent file contents you weren't shown."
+    "no ability to do so and must not imply otherwise. Never reference creating or pushing to a branch, and never "
+    "reference the repository's default/main branch as a target. Use only the repository content given to you; do "
+    "not invent file contents you weren't shown."
 )
 
 
 def _run_real_agent(
-    *, task: ImplementationTask, repo_context: RepoContextPreviewResult, story: Story | None, lld_summary: str
+    *,
+    task: ImplementationTask,
+    repo_context: RepoContextPreviewResult,
+    story: Story | None,
+    lld_summary: str,
+    standards_chunks: list[RetrievedChunk] | None = None,
+    jira_issue_key: str | None = None,
 ) -> ImplementationAgentResult:
     file_context_parts = []
     for f in repo_context.relevant_files:
@@ -211,12 +250,20 @@ def _run_real_agent(
         else "(no related story found)"
     )
 
+    standards_text = (
+        "\n\n".join(f"### {c.source_title}\n{c.content}" for c in standards_chunks)
+        if standards_chunks
+        else "(none retrieved)"
+    )
+
     user_content = (
         f"# Task\nTitle: {task.title}\nArea: {task.area.value}\nDescription: {task.description}\n"
         f"Expected files/folders: {', '.join(task.expected_paths) or '(none declared)'}\n"
         f"Acceptance criteria: {'; '.join(task.acceptance_criteria) or '(none declared)'}\n\n"
         f"# Approved LLD summary\n{lld_summary or '(not available)'}\n\n"
         f"# Related story\n{story_text}\n\n"
+        f"# Jira issue key\n{jira_issue_key or '(not synced to Jira yet)'}\n\n"
+        f"# Coding standards\n{standards_text}\n\n"
         f"# Repository context\nArchitecture summary: {repo_context.architecture_summary}\n"
         f"Relevant folders: {', '.join(repo_context.relevant_folders) or '(none)'}\n"
         + "\n".join(file_context_parts)
@@ -246,6 +293,7 @@ def _run_real_agent(
     return ImplementationAgentResult(
         proposed_file_changes=changes,
         diff_text=str(parsed.get("diff", "")),
+        pr_description=str(parsed.get("pr_description", "")) or _build_pr_description(task=task, story=story, jira_issue_key=jira_issue_key),
         explanation=str(parsed.get("explanation", "")),
         test_command=str(parsed.get("test_command", "")) or _DEFAULT_TEST_COMMAND_BY_AREA.get(task.area.value, "N/A"),
         risks=[str(r) for r in parsed.get("risks", [])],
@@ -257,17 +305,31 @@ def _run_real_agent(
 
 
 def run_implementation_agent(
-    *, task: ImplementationTask, repo_context: RepoContextPreviewResult, story: Story | None, lld_summary: str
+    *,
+    task: ImplementationTask,
+    repo_context: RepoContextPreviewResult,
+    story: Story | None,
+    lld_summary: str,
+    standards_chunks: list[RetrievedChunk] | None = None,
+    jira_issue_key: str | None = None,
 ) -> ImplementationAgentResult:
     """Real AI when configured; the deterministic heuristic otherwise, or if
     the real call errors or returns unparseable JSON (logged, not raised —
     same contract as validator_agent.run_validator and
-    implementation_planner.build_implementation_plan)."""
+    implementation_planner.build_implementation_plan).
+
+    `standards_chunks` (RAG, see app/services/retrieval.py) and
+    `jira_issue_key` are both additive context — story-level implementation
+    workflow requirement 4 — never required for a run to proceed."""
+    kwargs = dict(
+        task=task, repo_context=repo_context, story=story, lld_summary=lld_summary,
+        standards_chunks=standards_chunks, jira_issue_key=jira_issue_key,
+    )
     if get_active_provider() == "mock":
-        return _build_heuristic_result(task=task, repo_context=repo_context, story=story, lld_summary=lld_summary)
+        return _build_heuristic_result(**kwargs)
 
     try:
-        return _run_real_agent(task=task, repo_context=repo_context, story=story, lld_summary=lld_summary)
+        return _run_real_agent(**kwargs)
     except (AIGenerationError, json.JSONDecodeError, ValueError, TypeError, AttributeError, KeyError) as exc:
         logger.warning("Real-AI implementation agent failed (%s); falling back to heuristic scaffold.", exc)
-        return _build_heuristic_result(task=task, repo_context=repo_context, story=story, lld_summary=lld_summary)
+        return _build_heuristic_result(**kwargs)

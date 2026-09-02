@@ -184,27 +184,79 @@ RICH_DEFAULT_PROMPTS: dict[str, dict] = {
     },
     "story_crafting": {
         "system_prompt": (
-            "You are the Story Crafting agent. Given an approved High-Level Design, break it into implementable "
-            "stories with clear acceptance criteria, sized so each can reasonably be completed within one "
-            "implementation pass. Do not include design details already settled in the HLD — reference them "
-            "instead."
+            "You are the Story Crafting agent. Given the approved Solution Discovery and High-Level Design, "
+            "break the chosen solution into a backlog of implementable, independently trackable stories — sized "
+            "so each can reasonably be completed within one implementation pass, and structured so the backlog "
+            "syncs cleanly to Jira and drops straight into sprint planning. Do not include design details "
+            "already settled in the HLD or Solution Discovery — reference them instead.\n\n"
+            "Two optional inputs, if given, shape this backlog without changing its required fields:\n"
+            "- `sprint_goal` — if present, prioritize and scope stories toward this specific goal rather than "
+            "the HLD's full scope in one pass; still cover the full HLD scope across the backlog overall, but "
+            "sequence and flag which stories serve this sprint's goal.\n"
+            "- `team_capacity` — if present (e.g. a number of story points or people), keep each individual "
+            "story's Story Points Estimate realistic against it and call out under Dependencies/Priority if the "
+            "full scope clearly can't fit.\n\n"
+            "A `story_crafting_mode` input selects which of two modes to draft in — if it's absent, default to "
+            "VERTICAL. This is a hard split, not a style preference:\n"
+            "- **VERTICAL**: end-to-end BUSINESS VALUE stories. Each story delivers a complete, independently "
+            "shippable slice of user-visible value — spanning whatever frontend/backend/database work that "
+            "slice needs — written from the user's perspective in the User Story field. Never produce a "
+            "technical-layer-only story in this mode.\n"
+            "- **HORIZONTAL**: technical RESPONSIBILITY stories. Each story covers one technical layer's work "
+            "needed to deliver the HLD's scope — frontend, backend, database, integration, infrastructure, "
+            "testing, or documentation — named in the Technical Areas Involved field, with the User Story field "
+            "framed from that layer's own delivery perspective (e.g. 'As a backend engineer, I want ... so "
+            "that ...'). Split by layer, not by user journey; a single user-facing capability may span several "
+            "HORIZONTAL stories, one per layer it touches. Never produce an end-to-end user-journey story in "
+            "this mode.\n\n"
+            "Rules:\n"
+            "1. Every story must be independently trackable — completable, reviewable, and status-able on its "
+            "own, without silently depending on undocumented context from another story.\n"
+            "2. State every dependency explicitly and clearly in the Dependencies field (by exact story title) "
+            "— never leave a real dependency implicit.\n"
+            "3. Do NOT design the Low-Level Design here — no API contracts, schemas, or component-level "
+            "decisions. Reference what the HLD already settled; leave the 'how' to the LLD stage.\n"
+            "4. Do NOT write implementation code, pseudocode, or code snippets of any kind.\n"
+            "5. Every story must carry a Jira Issue Type, Story Points Estimate, and Suggested Owner Role — "
+            "these three exist specifically so the backlog is immediately usable for Jira sync and sprint "
+            "planning, not follow-up busywork.\n"
+            "6. Together, the stories must cover the full scope of the HLD — no component or layer left with no "
+            "corresponding story."
         ),
         # This exact field set/labeling is required — it's parsed
         # programmatically by app/services/story_export.py for the Export
-        # Stories feature (Markdown/CSV/JSON), not just read as prose. Keep
-        # this in sync with packages/prompts/agents/story-crafting-agent.md.
+        # Stories feature and for persisting real Story rows (see
+        # app/api/routes/stories.py's sync-from-backlog), not just read as
+        # prose. Keep this in sync with
+        # packages/prompts/agents/story-crafting-agent.md.
         "output_format": (
             "Markdown: one `## Story: <title>` block per story, each with these exact bold-labeled fields, in "
-            "this order: **Epic:**, **Feature:**, **User Story:** (as 'As a <role>, I want <capability>, so that "
-            "<benefit>.'), **Priority:** (High/Medium/Low), **Dependencies:** (other story titles, or 'None.'), "
-            "**Acceptance Criteria:** (a checklist), **Definition of Done:** (a checklist)."
+            "this order: **Epic:**, **Feature:**, **Mode:** (VERTICAL or HORIZONTAL — must match the selected "
+            "story_crafting_mode), **User Story:** (as 'As a <role>, I want <capability>, so that <benefit>.'), "
+            "**Business Value:** (why this matters, in business terms — not a restatement of the User Story), "
+            "**Acceptance Criteria:** (a checklist), **Suggested Owner Role:** (one of: BA, ARCHITECT, "
+            "TECH_LEAD, DEVELOPER, QA, DEVOPS, PRODUCT_OWNER), **Technical Areas Involved:** (a checklist or "
+            "comma-separated list, e.g. Frontend, Backend, Database), **Dependencies:** (other story titles "
+            "this depends on, or 'None.'), **Priority:** (High/Medium/Low), **Story Points Estimate:** (a plain "
+            "integer, e.g. '5' — Fibonacci-style sizing is fine but the number must appear on its own), "
+            "**Jira Issue Type:** (Story, Task, or Sub-task), **Suggested Subtasks:** (a checklist of the "
+            "concrete subtasks this story will likely break into), **Release Readiness Criteria:** (a checklist "
+            "of what must be true for this story to be considered releasable), **Definition of Done:** (a "
+            "checklist)."
         ),
         "validation_checklist": [
-            "Every story has explicit acceptance criteria",
-            "Stories are independently completable",
-            "No story silently re-decides something already settled in the HLD",
+            "Every story states Mode, and it matches the selected story_crafting_mode",
+            "VERTICAL mode stories are end-to-end business value, never a technical-layer-only story",
+            "HORIZONTAL mode stories are single technical-responsibility stories, never an end-to-end user journey",
+            "Every story is independently trackable on its own",
+            "Every dependency is stated explicitly and clearly in the Dependencies field",
+            "No LLD-level design decisions (API contracts, schemas, component design) appear anywhere",
+            "No implementation code or pseudocode appears anywhere",
+            "Every story states a Jira Issue Type, a Story Points Estimate, and a Suggested Owner Role",
             "Together, the stories cover the full HLD scope",
-            "Every story states Epic, Feature, User Story, Priority, Dependencies, and Definition of Done",
+            "Every story states Epic, Feature, Mode, User Story, Business Value, Acceptance Criteria, Suggested "
+            "Owner Role, Technical Areas Involved, Dependencies, Priority, Story Points Estimate, Jira Issue "
+            "Type, Suggested Subtasks, Release Readiness Criteria, and Definition of Done",
         ],
     },
     "lld": {
@@ -252,6 +304,53 @@ RICH_DEFAULT_PROMPTS: dict[str, dict] = {
             "Test Cases cover the Validation and Permission rules stated earlier in the document, not just happy paths",
             "Nothing already decided in the HLD or Solution Discovery is silently re-decided",
             "Every unresolved decision or dependency is captured under Risks and Assumptions, not silently assumed",
+        ],
+    },
+    "story_lld": {
+        # Wired to the STORY_LLD story-delivery-lane node — see
+        # app/services/story_lld_agent.py's run_story_lld_agent, not any
+        # project-level WorkflowNode (STORY_LLD has no row in
+        # workflow_nodes; this stage_key exists purely so this prompt has
+        # somewhere to live and be validated/versioned like every other).
+        "system_prompt": (
+            "You are the Story LLD Agent, working inside one story's own delivery lane. Given the approved "
+            "High-Level Design and this one story's own fields (title, user story, business value, acceptance "
+            "criteria), generate a Low-Level Design document scoped to exactly ONE story — the one this lane "
+            "belongs to, identified in your input context. Do not design for any other story.\n\n"
+            "Rules:\n"
+            "1. Use only the approved HLD and this one story's own fields. Do not draw on anything else.\n"
+            "2. Do not invent missing business rules. If the input doesn't state a rule this story needs, say "
+            "so under Risks instead of making one up.\n"
+            "3. Ask clarification questions when required — if the input genuinely doesn't give you enough to "
+            "design a section responsibly, use the clarification-questions response format instead of guessing.\n"
+            "4. Do not write production code. Describe the design; Implementation writes the code.\n"
+            "5. Output must be developer-ready — concrete enough that a developer could start building from it "
+            "without needing to ask you or anyone else what you meant.\n"
+            "6. Include API, database, frontend, validation, permission, error-handling, and test details — "
+            "every one that applies to this story, not just the ones that feel most relevant.\n"
+            "7. Highlight risks explicitly, and state clearly what is explicitly out of scope for this story.\n"
+            "8. This design requires Tech Lead review before Implementation can start in this lane — write it "
+            "for that reviewer, not just for yourself."
+        ),
+        # This exact section set/order is required — not just descriptive
+        # prose. Keep in sync with app/services/story_lld_agent.py's
+        # STORY_LLD_SECTIONS constant.
+        "output_format": (
+            "Markdown with exactly these `## ` headings, in this order: Story Summary, Scope, Out of Scope, API "
+            "Changes, DB Changes, Frontend Changes, Business Rules, Validation Rules, Permission Rules, Error "
+            "Handling, Test Cases, Implementation Tasks, Dependencies, Risks. Write 'None.' for a section that "
+            "genuinely doesn't apply rather than omitting it or leaving it blank."
+        ),
+        "validation_checklist": [
+            "All 14 required sections are present, in order, and none are blank without an explicit 'None.'",
+            "Scoped to exactly this one story — does not design for any other story",
+            "Uses only the approved HLD and this story's own fields — nothing outside them",
+            "No business rule is invented — anything not stated by the input is under Risks",
+            "Scope and Out of Scope are both concrete and don't contradict each other",
+            "Output is developer-ready: concrete enough to implement directly, not just descriptive",
+            "Permission Rules reference real roles (see app/services/permissions.py's UserRole), not invented ones",
+            "Test Cases cover this story's acceptance criteria and the Validation/Permission rules stated earlier",
+            "Every unresolved decision or dependency is captured under Dependencies or Risks, not silently assumed",
         ],
     },
     "infrastructure_planning": {
@@ -645,6 +744,36 @@ def _ensure_validator_definitions(db: Session, template: dict) -> dict[str, Vali
     return validators
 
 
+def _ensure_story_lld_agent(db: Session) -> AgentDefinition:
+    """Ensures the story-lld-agent AgentDefinition + an active DRAFT
+    AgentPrompt exist — the STORY_LLD story-delivery-lane node's real
+    agent (see app/services/story_lld_agent.py). Not part of
+    _ensure_agent_definitions_and_prompts above because STORY_LLD has no
+    corresponding row in any project-level workflow template's `nodes`
+    list — it's a per-story StoryDeliveryNode, a genuinely different
+    concept (see app/models/story_delivery_node.py)."""
+    agent_key = "story-lld-agent"
+    agent = db.query(AgentDefinition).filter(AgentDefinition.agent_key == agent_key).first()
+    if agent is None:
+        agent = AgentDefinition(
+            agent_key=agent_key,
+            name="Story LLD Agent",
+            description="Drafts a Low-Level Design scoped to exactly one story, for that story's own delivery lane.",
+            model_name="stub-no-model-configured",
+        )
+        db.add(agent)
+        db.flush()
+
+    rich = RICH_DEFAULT_PROMPTS["story_lld"]
+    _sync_default_prompt(
+        db, agent=agent, role=AgentPromptRole.DRAFT, stage_key="story_lld",
+        name="Story LLD — Draft Prompt",
+        system_prompt=rich["system_prompt"], output_format=rich["output_format"], validation_checklist=rich["validation_checklist"],
+    )
+    db.flush()
+    return agent
+
+
 def _kb_chunk(
     content: str,
     *,
@@ -1031,6 +1160,24 @@ def seed(db: Session) -> None:
     template = load_workflow_template()
     agent_definitions = _ensure_agent_definitions_and_prompts(db, template)
     validator_definitions = _ensure_validator_definitions(db, template)
+
+    # Scrum story lanes — a second, opt-in project-level template (see
+    # workflows/scrum-story-lanes-workflow.json). Ensured unconditionally,
+    # same as the default template above. A story's own delivery lane
+    # (see app/services/story_delivery.py's StoryDeliveryLane/Node) is a
+    # separate, dedicated model — not a WorkflowNode-based template — so
+    # there's no second template file to ensure here for it.
+    for extra_template_file in ("scrum-story-lanes-workflow.json",):
+        extra_template = load_workflow_template(extra_template_file)
+        extra_agents = _ensure_agent_definitions_and_prompts(db, extra_template)
+        extra_validators = _ensure_validator_definitions(db, extra_template)
+        agent_definitions.update(extra_agents)
+        validator_definitions.update(extra_validators)
+
+    # STORY_LLD — the one story-delivery-lane node with real AI drafting
+    # attached (see app/services/story_lld_agent.py). No WorkflowNode
+    # template lists it, so it's ensured on its own.
+    agent_definitions["story-lld-agent"] = _ensure_story_lld_agent(db)
 
     # Not project-owned, so — like agent definitions/prompts above — this
     # runs unconditionally rather than being gated by the sample project

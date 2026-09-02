@@ -40,6 +40,10 @@ STAGE_EDIT_ROLES: dict[str, set[UserRole]] = {
     "infrastructure": {UserRole.DEVOPS},  # inferred default
     "release": {UserRole.DEVOPS},  # inferred default
     "maintenance": {UserRole.DEVOPS, UserRole.DEVELOPER},  # inferred default
+    # --- Scrum story lanes (workflows/scrum-story-lanes-*.json) ---
+    "story_lld": {UserRole.ARCHITECT, UserRole.TECH_LEAD},  # inferred default — same owners as lld
+    "sprint_planning": {UserRole.PRODUCT_OWNER},  # inferred default
+    "release_planning": {UserRole.PRODUCT_OWNER, UserRole.DEVOPS},  # inferred default
 }
 
 # --- Who may approve (review-decide) each stage's artifact -------------------------
@@ -59,6 +63,9 @@ STAGE_APPROVE_ROLES: dict[str, set[UserRole]] = {
     "testing": {UserRole.QA},
     "infrastructure": {UserRole.DEVOPS},
     "release": {UserRole.DEVOPS},
+    # --- Scrum story lanes (workflows/scrum-story-lanes-*.json) ---
+    "story_lld": {UserRole.TECH_LEAD},
+    "release_planning": {UserRole.PRODUCT_OWNER},
 }
 
 # Project-level and prompt-level actions aren't tied to a workflow stage,

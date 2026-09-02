@@ -247,25 +247,35 @@ def archive_project(project_id: uuid.UUID, db: Session = Depends(get_db)) -> Pro
 
 
 @router.get("/{project_id}/workflow-nodes", response_model=list[WorkflowNodeRead])
-def list_project_workflow_nodes(project_id: uuid.UUID, db: Session = Depends(get_db)) -> list[WorkflowNode]:
+def list_project_workflow_nodes(
+    project_id: uuid.UUID, story_id: uuid.UUID | None = None, db: Session = Depends(get_db)
+) -> list[WorkflowNode]:
+    """`story_id` narrows this to one Scrum story lane's own nodes (see
+    app/models/workflow.py's `story_id` column) — the same
+    WorkflowCanvas/NodeDetailsPanel components render either the whole
+    project graph (omitted, the default — every existing project-level
+    node has `story_id IS NULL`) or one lane, unmodified. Omitting it
+    keeps today's behavior exactly as it was."""
     _get_project_or_404(db, project_id)
-    return (
-        db.query(WorkflowNode)
-        .filter(WorkflowNode.project_id == project_id)
-        .order_by(WorkflowNode.order_index)
-        .all()
-    )
+    query = db.query(WorkflowNode).filter(WorkflowNode.project_id == project_id)
+    query = query.filter(WorkflowNode.story_id == story_id) if story_id is not None else query.filter(WorkflowNode.story_id.is_(None))
+    return query.order_by(WorkflowNode.order_index).all()
 
 
 # Get project workflow edges ---------------------------------------------------
 
 
 @router.get("/{project_id}/workflow-edges", response_model=list[WorkflowEdgeRead])
-def list_project_workflow_edges(project_id: uuid.UUID, db: Session = Depends(get_db)) -> list[WorkflowEdge]:
+def list_project_workflow_edges(
+    project_id: uuid.UUID, story_id: uuid.UUID | None = None, db: Session = Depends(get_db)
+) -> list[WorkflowEdge]:
     """Needed alongside workflow-nodes to render the graph — an edge list
-    with no nodes (or vice versa) can't be drawn."""
+    with no nodes (or vice versa) can't be drawn. `story_id` scopes this
+    the same way list_project_workflow_nodes does."""
     _get_project_or_404(db, project_id)
-    return db.query(WorkflowEdge).filter(WorkflowEdge.project_id == project_id).all()
+    query = db.query(WorkflowEdge).filter(WorkflowEdge.project_id == project_id)
+    query = query.filter(WorkflowEdge.story_id == story_id) if story_id is not None else query.filter(WorkflowEdge.story_id.is_(None))
+    return query.all()
 
 
 # List artifacts by project ---------------------------------------------------

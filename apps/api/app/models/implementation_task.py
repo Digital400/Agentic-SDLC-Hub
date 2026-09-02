@@ -35,15 +35,31 @@ class ImplementationTask(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # "...for this stage" be queried directly without joining through the
     # artifact.
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
-    workflow_node_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("workflow_nodes.id", ondelete="CASCADE"), nullable=False
+    # Null for a task created inside a per-story delivery lane (see
+    # app/services/story_delivery.py) — there is no project-level
+    # WorkflowNode/Artifact/ArtifactVersion for a StoryDeliveryNode to
+    # link to (a different table entirely; see app/models/story_delivery_node.py
+    # and app/models/story_artifact.py). Always set for the existing
+    # project-level Implementation Planning flow, unchanged — every
+    # consumer that reads these three already null-checks
+    # (see app/services/repo_context_builder.py's `task.workflow_node`
+    # reads) or doesn't touch them for a story-scoped task at all.
+    workflow_node_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_nodes.id", ondelete="CASCADE"), nullable=True
     )
-    artifact_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("artifacts.id", ondelete="CASCADE"), nullable=False)
+    artifact_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("artifacts.id", ondelete="CASCADE"), nullable=True)
     # Which generation produced this row — the artifact's version history
     # is the record of prior plans; this ties a task set to one of them.
-    artifact_version_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("artifact_versions.id", ondelete="CASCADE"), nullable=False
+    artifact_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("artifact_versions.id", ondelete="CASCADE"), nullable=True
     )
+    # Set only for a task created inside a per-story delivery lane (see
+    # app/services/story_delivery.py) — null for the existing
+    # project-level Implementation Planning flow, unchanged. Denormalized
+    # alongside project_id for the same reason: querying "this story's
+    # tasks" directly without joining out to `linked_story` string
+    # matching (see that field's own docstring below).
+    story_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), nullable=True)
 
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
@@ -83,6 +99,7 @@ class ImplementationTask(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     order_index: Mapped[int] = mapped_column(Integer, nullable=False)
 
     project: Mapped["Project"] = relationship("Project")
-    workflow_node: Mapped["WorkflowNode"] = relationship("WorkflowNode")
-    artifact: Mapped["Artifact"] = relationship("Artifact")
-    artifact_version: Mapped["ArtifactVersion"] = relationship("ArtifactVersion")
+    workflow_node: Mapped["WorkflowNode | None"] = relationship("WorkflowNode")
+    artifact: Mapped["Artifact | None"] = relationship("Artifact")
+    artifact_version: Mapped["ArtifactVersion | None"] = relationship("ArtifactVersion")
+    story: Mapped["Story | None"] = relationship("Story")

@@ -105,7 +105,15 @@ def start_pr_review_run(payload: StartPRReviewRunRequest, db: Session = Depends(
     if triggered_by is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
 
-    pr_review_node = db.query(WorkflowNode).filter(WorkflowNode.project_id == project.id, WorkflowNode.node_key == "pr_review").first()
+    pr_review_node = (
+        db.query(WorkflowNode)
+        .filter(
+            WorkflowNode.project_id == project.id,
+            WorkflowNode.node_key == "pr_review",
+            WorkflowNode.story_id == task.story_id,
+        )
+        .first()
+    )
     if pr_review_node is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Project {project.id}'s workflow has no pr_review stage.")
     require_can_edit_stage(triggered_by, pr_review_node.node_key)
@@ -171,6 +179,7 @@ def start_pr_review_run(payload: StartPRReviewRunRequest, db: Session = Depends(
         implementation_task_id=task.id,
         implementation_run_id=implementation_run.id,
         pull_request_link_id=pr_link.id,
+        story_id=task.story_id,
         triggered_by_user_id=triggered_by.id,
         status=PRReviewRunStatus.RUNNING,
         started_at=datetime.now(timezone.utc),

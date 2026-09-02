@@ -361,6 +361,79 @@ class MaintenanceRunStatus(str, enum.Enum):
     FAILED = "FAILED"
 
 
+class StoryType(str, enum.Enum):
+    """Which Story Crafting mode produced this story — see
+    app/models/story.py and RICH_DEFAULT_PROMPTS["story_crafting"]'s
+    updated prompt. VERTICAL: end-to-end user-value stories (the existing
+    default shape). HORIZONTAL: technical-layer stories (frontend/backend/
+    database/integration/infrastructure/testing/documentation)."""
+
+    VERTICAL = "VERTICAL"
+    HORIZONTAL = "HORIZONTAL"
+
+
+class StoryStatus(str, enum.Enum):
+    """A persisted Story row's own lifecycle — separate from its delivery
+    lane's WorkflowStatus (which tracks the lane's graph progress once one
+    exists). See app/models/story.py."""
+
+    PENDING = "PENDING"  # persisted from an approved backlog, no lane yet
+    IN_SPRINT = "IN_SPRINT"  # assigned to a Sprint
+    LANE_ACTIVE = "LANE_ACTIVE"  # a delivery lane has been created
+    DONE = "DONE"  # the lane reached Release Ready
+
+
+class SprintStatus(str, enum.Enum):
+    """A Sprint's own lifecycle — see app/models/sprint.py. Only
+    PLANNED -> ACTIVE -> COMPLETED is a normal progression (via
+    POST /sprints/{id}/start and /complete); CANCELLED is reachable from
+    either PLANNED or ACTIVE via a manual override, not a normal flow
+    step (no dedicated "cancel" endpoint — same escape-hatch spirit as
+    GraphEngineService.manual_override, but no route exposes it yet)."""
+
+    PLANNED = "PLANNED"
+    ACTIVE = "ACTIVE"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
+class SprintStoryStatus(str, enum.Enum):
+    """One story's membership in one sprint — see
+    app/models/sprint_story.py. REMOVED is a soft-delete (DELETE
+    /sprints/{id}/stories/{story_id} sets this rather than deleting the
+    row), so a sprint's full membership history — including what was
+    pulled back out — is never lost."""
+
+    PLANNED = "PLANNED"
+    IN_PROGRESS = "IN_PROGRESS"
+    DONE = "DONE"
+    REMOVED = "REMOVED"
+
+
+class StoryDeliveryLaneStatus(str, enum.Enum):
+    """One story's own delivery lane (see app/models/story_delivery_lane.py)
+    — a dedicated, self-contained graph per story, deliberately NOT the
+    project-level WorkflowNode/WorkflowEdge graph engine (see
+    app/services/story_delivery.py's module docstring for why)."""
+
+    ACTIVE = "ACTIVE"
+    BLOCKED = "BLOCKED"
+    COMPLETED = "COMPLETED"
+
+
+class StoryDeliveryNodeStatus(str, enum.Enum):
+    """One node in a story delivery lane — see
+    app/models/story_delivery_node.py. LOCKED until its predecessor
+    completes; the first node in every lane starts READY."""
+
+    LOCKED = "LOCKED"
+    READY = "READY"
+    IN_PROGRESS = "IN_PROGRESS"
+    WAITING_FOR_REVIEW = "WAITING_FOR_REVIEW"
+    BLOCKED = "BLOCKED"
+    COMPLETED = "COMPLETED"
+
+
 class RepositoryFileEntryType(str, enum.Enum):
     """One entry in a RepositorySnapshot's file index — see
     app/models/repository.py's RepositoryFileIndex. Mirrors GitHub's own

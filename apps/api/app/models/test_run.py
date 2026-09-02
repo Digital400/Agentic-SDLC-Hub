@@ -54,6 +54,9 @@ class TestRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     pull_request_link_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("pull_request_links.id", ondelete="SET NULL"), nullable=True
     )
+    # Set only for a run inside a per-story delivery lane — see
+    # app/models/story.py.
+    story_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), nullable=True)
     # The test_report Artifact/ArtifactVersion this run produced — null
     # only while a run is still RUNNING or if it FAILED before reaching
     # that step.
@@ -97,6 +100,7 @@ class TestRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     implementation_task: Mapped["ImplementationTask"] = relationship("ImplementationTask")
     implementation_run: Mapped["ImplementationRun"] = relationship("ImplementationRun")
     pull_request_link: Mapped["PullRequestLink | None"] = relationship("PullRequestLink")
+    story: Mapped["Story | None"] = relationship("Story")
     artifact: Mapped["Artifact | None"] = relationship("Artifact")
     artifact_version: Mapped["ArtifactVersion | None"] = relationship("ArtifactVersion")
     triggered_by: Mapped["User | None"] = relationship("User", foreign_keys=[triggered_by_user_id])

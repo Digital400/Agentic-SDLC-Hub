@@ -47,6 +47,9 @@ class PRReviewRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     pull_request_link_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("pull_request_links.id", ondelete="CASCADE"), nullable=False
     )
+    # Set only for a run inside a per-story delivery lane — see
+    # app/models/story.py.
+    story_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), nullable=True)
     triggered_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
     status: Mapped[PRReviewRunStatus] = mapped_column(
@@ -91,4 +94,5 @@ class PRReviewRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     implementation_task: Mapped["ImplementationTask"] = relationship("ImplementationTask")
     implementation_run: Mapped["ImplementationRun"] = relationship("ImplementationRun")
     pull_request_link: Mapped["PullRequestLink"] = relationship("PullRequestLink")
+    story: Mapped["Story | None"] = relationship("Story")
     triggered_by: Mapped["User | None"] = relationship("User", foreign_keys=[triggered_by_user_id])

@@ -110,7 +110,15 @@ def start_test_run(payload: StartTestRunRequest, db: Session = Depends(get_db)) 
     if reviewer is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"reviewer_id {payload.reviewer_id} does not match an existing user")
 
-    testing_node = db.query(WorkflowNode).filter(WorkflowNode.project_id == project.id, WorkflowNode.node_key == "testing").first()
+    testing_node = (
+        db.query(WorkflowNode)
+        .filter(
+            WorkflowNode.project_id == project.id,
+            WorkflowNode.node_key == "testing",
+            WorkflowNode.story_id == task.story_id,
+        )
+        .first()
+    )
     if testing_node is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Project {project.id}'s workflow has no testing stage.")
     require_can_edit_stage(triggered_by, testing_node.node_key)
@@ -156,6 +164,7 @@ def start_test_run(payload: StartTestRunRequest, db: Session = Depends(get_db)) 
         implementation_task_id=task.id,
         implementation_run_id=implementation_run.id,
         pull_request_link_id=pr_link.id if pr_link else None,
+        story_id=task.story_id,
         triggered_by_user_id=triggered_by.id,
         agent_type=payload.agent_type,
         status=TestRunStatus.RUNNING,

@@ -53,6 +53,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 const get = <T>(path: string) => request<T>(path);
 const post = <T>(path: string, body?: unknown) => request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined });
 const patch = <T>(path: string, body: unknown) => request<T>(path, { method: "PATCH", body: JSON.stringify(body) });
+const del = <T>(path: string, body?: unknown) => request<T>(path, { method: "DELETE", body: body ? JSON.stringify(body) : undefined });
 const postForm = <T>(path: string, formData: FormData) => request<T>(path, { method: "POST", body: formData });
 
 // --- DTOs — mirror apps/api/app/schemas/*.py exactly (snake_case) ----------
@@ -369,6 +370,119 @@ export interface ApiArtifactVersion {
   created_at: string;
   // Denormalized by ArtifactVersionRead.from_orm_version.
   created_by_name: string;
+}
+
+// Scrum story lanes — see apps/api/app/schemas/story.py.
+export interface ApiStory {
+  id: string;
+  project_id: string;
+  source_artifact_version_id: string;
+  story_type: "VERTICAL" | "HORIZONTAL";
+  status: "PENDING" | "IN_SPRINT" | "LANE_ACTIVE" | "DONE";
+  epic: string;
+  feature: string;
+  title: string;
+  user_story: string;
+  priority: string;
+  dependencies: string;
+  acceptance_criteria: string[];
+  definition_of_done: string[];
+  suggested_owner_role: string | null;
+  story_points: number | null;
+  business_value: string;
+  technical_areas: string[];
+  jira_issue_type: string;
+  suggested_subtasks: string[];
+  release_readiness_criteria: string[];
+  owner_user_id: string | null;
+  sprint_id: string | null;
+  lane_created_at: string | null;
+  created_by_id: string;
+  created_at: string;
+  updated_at: string;
+  // Computed server-side — see app/api/routes/stories.py's _story_to_read.
+  lane_status: string;
+  jira_status: string;
+  jira_issue_key: string | null;
+  jira_issue_url: string | null;
+}
+
+// Story delivery lane — dedicated per-story graph, see
+// app/services/story_delivery.py. Not the project-level WorkflowNode/
+// WorkflowEdge graph engine.
+export interface ApiStoryDeliveryLane {
+  id: string;
+  project_id: string;
+  story_id: string;
+  current_node_id: string | null;
+  status: "ACTIVE" | "BLOCKED" | "COMPLETED";
+  created_by_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiStoryDeliveryNode {
+  id: string;
+  lane_id: string;
+  node_key: string;
+  name: string;
+  status: "LOCKED" | "READY" | "IN_PROGRESS" | "WAITING_FOR_REVIEW" | "BLOCKED" | "COMPLETED";
+  assigned_role: string | null;
+  assigned_user_id: string | null;
+  requires_approval: boolean;
+  blocked_reason: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  order_index: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiStoryArtifact {
+  id: string;
+  story_id: string;
+  lane_id: string | null;
+  node_id: string | null;
+  artifact_type: string;
+  title: string;
+  content_markdown: string;
+  version_number: number;
+  created_by_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiSprint {
+  id: string;
+  project_id: string;
+  name: string;
+  goal: string;
+  start_date: string | null;
+  end_date: string | null;
+  capacity_points: number | null;
+  status: "PLANNED" | "ACTIVE" | "COMPLETED" | "CANCELLED";
+  created_by_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiSprintStory {
+  id: string;
+  sprint_id: string;
+  story_id: string;
+  planned_points: number | null;
+  assigned_owner_id: string | null;
+  status: "PLANNED" | "IN_PROGRESS" | "DONE" | "REMOVED";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiSprintBoard {
+  sprint: ApiSprint;
+  items: { sprint_story: ApiSprintStory; story: ApiStory }[];
+  planned_points_total: number;
+  capacity_points: number | null;
+  over_capacity: boolean;
 }
 
 export interface ApiReviewComment {
@@ -1035,6 +1149,18 @@ export interface ApiAgentRun {
   token_budget_report: Record<string, unknown> | null;
 }
 
+// "Improve section" — see app/services/section_improve_agent.py.
+export interface ApiImproveSectionResponse {
+  agent_run: ApiAgentRun;
+  needs_clarification: boolean;
+  artifact_version_id: string | null;
+  artifact_status: string;
+  workflow_node_status: string;
+  // None only when nothing was saved (a failed run, or a clarification
+  // request instead of a revision).
+  section_updated: string | null;
+}
+
 // --- Users -------------------------------------------------------------------
 
 export const api = {
@@ -1057,8 +1183,10 @@ export const api = {
       }
     ) => patch<ApiProject>(`/projects/${id}`, body),
     archive: (id: string) => post<ApiProject>(`/projects/${id}/archive`),
-    workflowNodes: (id: string) => get<ApiWorkflowNode[]>(`/projects/${id}/workflow-nodes`),
-    workflowEdges: (id: string) => get<ApiWorkflowEdge[]>(`/projects/${id}/workflow-edges`),
+    workflowNodes: (id: string, storyId?: string) =>
+      get<ApiWorkflowNode[]>(`/projects/${id}/workflow-nodes${storyId ? `?story_id=${storyId}` : ""}`),
+    workflowEdges: (id: string, storyId?: string) =>
+      get<ApiWorkflowEdge[]>(`/projects/${id}/workflow-edges${storyId ? `?story_id=${storyId}` : ""}`),
     // Manual override — bypasses every graph engine rule, so a reason and
     // the acting (existing) user are always required and every call is
     // audited. See GraphEngineService.manual_override.
@@ -1115,6 +1243,11 @@ export const api = {
     updateContent: (id: string, body: { content_markdown: string; change_summary?: string; edited_by_id: string }) =>
       patch<ApiArtifactVersion>(`/artifacts/${id}`, body),
     submitForReview: (id: string) => post<ApiArtifact>(`/artifacts/${id}/submit-for-review`),
+    // "Improve section" — see app/services/section_improve_agent.py. Only
+    // works on a DRAFT artifact; every section besides `section_title` is
+    // guaranteed unchanged. Never creates/touches a Review.
+    improveSection: (id: string, body: { section_title: string; instruction: string; triggered_by_user_id: string }) =>
+      post<ApiImproveSectionResponse>(`/artifacts/${id}/improve-section`, body),
     // "GitHub integration" (rule scope) — a local preview of the PR
     // title/description/checklist a human pastes into a real GitHub PR;
     // no real GitHub connection exists — see app/services/github_export.py.
@@ -1324,5 +1457,89 @@ export const api = {
       post<{ agent_run: ApiAgentRun; artifact_id: string; artifact_version_id: string; artifact_status: string; workflow_node_status: string }>(
         `/agent-runs/${id}/save-to-artifact`
       ),
+  },
+
+  // Scrum story lanes — see apps/api/app/api/routes/stories.py and
+  // workflows/scrum-story-lanes-*.json.
+  stories: {
+    list: (projectId: string) => get<{ items: ApiStory[]; total: number }>(`/projects/${projectId}/stories`),
+    syncFromBacklog: (projectId: string, body: { story_type: "VERTICAL" | "HORIZONTAL"; triggered_by_user_id: string }) =>
+      post<{ created: ApiStory[]; already_existed: number }>(`/projects/${projectId}/stories/sync-from-backlog`, body),
+    update: (
+      storyId: string,
+      body: Partial<{
+        title: string;
+        description: string;
+        user_story: string;
+        priority: string;
+        dependencies: string;
+        acceptance_criteria: string[];
+        definition_of_done: string[];
+        suggested_owner_role: string;
+        story_points: number;
+        business_value: string;
+        technical_areas: string[];
+        jira_issue_type: string;
+        jira_issue_key: string;
+        suggested_subtasks: string[];
+        release_readiness_criteria: string[];
+      }> & { updated_by_id: string }
+    ) => patch<ApiStory>(`/stories/${storyId}`, body),
+    // Distinct from update() — also writes a StoryAssignee history row
+    // (see app/models/story_assignee.py).
+    assign: (storyId: string, ownerUserId: string, assignedById: string) =>
+      post<ApiStory>(`/stories/${storyId}/assign`, { owner_user_id: ownerUserId, assigned_by_id: assignedById }),
+    createLane: (storyId: string, triggeredByUserId: string) =>
+      post<ApiStory>(`/stories/${storyId}/lane`, { triggered_by_user_id: triggeredByUserId }),
+    // 404s when no lane has been created yet — callers should catch
+    // ApiError with status 404.
+    getLane: (storyId: string) => get<ApiStoryDeliveryLane>(`/stories/${storyId}/lane`),
+    // 404s when no Story LLD has been drafted yet — callers should catch
+    // ApiError with status 404 and treat it as "not drafted yet."
+    getLld: (storyId: string) => get<ApiStoryArtifact>(`/stories/${storyId}/lld`),
+  },
+
+  storyDelivery: {
+    listNodes: (laneId: string) => get<ApiStoryDeliveryNode[]>(`/delivery-lanes/${laneId}/nodes`),
+    updateNodeStatus: (
+      nodeId: string,
+      body: { status: string; actor_user_id: string; blocked_reason?: string; assigned_user_id?: string }
+    ) => patch<ApiStoryDeliveryNode>(`/delivery-lane-nodes/${nodeId}`, body),
+    draftStoryLld: (nodeId: string, triggeredByUserId: string) =>
+      post<{ needs_clarification: boolean; story_artifact: ApiStoryArtifact | null; node_status: string }>(
+        `/delivery-lane-nodes/${nodeId}/draft-story-lld`,
+        { triggered_by_user_id: triggeredByUserId }
+      ),
+  },
+
+  sprints: {
+    list: (projectId: string) => get<ApiSprint[]>(`/projects/${projectId}/sprints`),
+    create: (body: { project_id: string; name: string; goal?: string; start_date?: string; end_date?: string; capacity_points?: number; created_by_id: string }) =>
+      post<ApiSprint>("/sprints", body),
+    update: (
+      sprintId: string,
+      body: Partial<{ name: string; goal: string; start_date: string; end_date: string; capacity_points: number }> & { updated_by_id: string }
+    ) => patch<ApiSprint>(`/sprints/${sprintId}`, body),
+    addStory: (
+      sprintId: string,
+      body: { story_id: string; planned_points?: number; assigned_owner_id?: string; actor_user_id: string }
+    ) => post<ApiSprintStory>(`/sprints/${sprintId}/stories`, body),
+    updateStory: (
+      sprintId: string,
+      storyId: string,
+      body: { planned_points?: number; assigned_owner_id?: string; actor_user_id: string }
+    ) => patch<ApiSprintStory>(`/sprints/${sprintId}/stories/${storyId}`, body),
+    removeStory: (sprintId: string, storyId: string, actorUserId: string) =>
+      del<ApiSprintStory>(`/sprints/${sprintId}/stories/${storyId}`, { actor_user_id: actorUserId }),
+    start: (sprintId: string, actorUserId: string) => post<ApiSprint>(`/sprints/${sprintId}/start`, { actor_user_id: actorUserId }),
+    complete: (sprintId: string, actorUserId: string) => post<ApiSprint>(`/sprints/${sprintId}/complete`, { actor_user_id: actorUserId }),
+    board: (sprintId: string) => get<ApiSprintBoard>(`/sprints/${sprintId}/board`),
+    generatePlan: (sprintId: string, triggeredByUserId: string) =>
+      post<ApiArtifactVersion>(`/sprints/${sprintId}/generate-plan`, { triggered_by_user_id: triggeredByUserId }),
+    generateReleasePlan: (sprintId: string, triggeredByUserId: string, reviewerId: string) =>
+      post<ApiArtifactVersion>(`/sprints/${sprintId}/generate-release-plan`, {
+        triggered_by_user_id: triggeredByUserId,
+        reviewer_id: reviewerId,
+      }),
   },
 };

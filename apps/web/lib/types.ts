@@ -405,6 +405,15 @@ export interface ArtifactDocument {
   status: ArtifactStatus;
   currentVersionNumber: number;
   sections: ArtifactSection[];
+  /** False for a headingless document (splitMarkdownIntoSections's
+   * fallback single "Content" section, a synthetic label that never
+   * appears in the source text) — see markdown-sections.ts's
+   * hasRealSections. Gates "Improve section" in AgentActionsPanel. */
+  hasRealSections: boolean;
+  /** True when the current content is an agent's clarification request
+   * (starts with "# Clarification Needed") rather than a real drafted
+   * document — see markdown-sections.ts's isClarificationRequest. */
+  needsClarification: boolean;
   versions: ArtifactVersionSummary[];
   comments: ArtifactCommentItem[];
 }

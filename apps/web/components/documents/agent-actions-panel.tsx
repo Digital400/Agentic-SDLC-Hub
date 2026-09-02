@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Loader2, MessageCircleQuestion, PlayCircle, RefreshCw, Sparkles, ListChecks } from "lucide-react";
 
@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { ApiError } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { runAgentAndApply } from "@/lib/run-agent";
 
 type AgentAction = "draft" | "improve" | "validate";
@@ -24,16 +24,18 @@ export interface AgentRunOutcome {
   workflowNodeStatus: string;
 }
 
-// Real "Run Agent" flow (see lib/run-agent.ts) — the two placeholder
-// section-level actions below it stay disabled; only document-level
-// draft/improve/validate is wired up. See docs/mvp-plan.md for what's
-// still ahead (per-section agent edits, "Ask questions", "Summarize
-// changes").
+// Real "Run Agent" flow (see lib/run-agent.ts) — "Improve section" is also
+// real (see app/services/section_improve_agent.py); "Regenerate section",
+// "Ask questions", and "Summarize changes" stay disabled. See
+// docs/mvp-plan.md for what's still ahead there.
 export function AgentActionsPanel({
   activeSectionTitle,
   projectId,
   workflowNodeId,
   agentKey,
+  artifactId,
+  artifactEditable,
+  documentHasRealSections,
   freeformInputKeys,
   triggeredByUserId,
   onApplied,
@@ -42,6 +44,16 @@ export function AgentActionsPanel({
   projectId: string;
   workflowNodeId: string;
   agentKey: string;
+  artifactId: string;
+  /** Only a DRAFT artifact can be improved this way — see
+   * app/services/section_improve_agent.py's precondition. */
+  artifactEditable: boolean;
+  /** False for a headingless document — see markdown-sections.ts's
+   * hasRealSections and section_improve_agent.py's matching guard: there's
+   * no genuine section to scope an edit to, so "Improve section" is
+   * disabled entirely rather than risk regenerating (and losing) the
+   * whole document from one instruction. */
+  documentHasRealSections: boolean;
   freeformInputKeys: string[];
   triggeredByUserId: string | null;
   onApplied: (outcome: AgentRunOutcome) => void;
@@ -53,14 +65,54 @@ export function AgentActionsPanel({
     { kind: "failed"; message: string } | { kind: "completed"; runId: string; retrievedCount: number } | null
   >(null);
 
-  const sectionActions = [
-    { icon: Sparkles, label: "Improve section" },
-    { icon: RefreshCw, label: "Regenerate section" },
-  ];
+  const [improvingSection, setImprovingSection] = useState(false);
+  const [sectionInstruction, setSectionInstruction] = useState("");
+  const [sectionImproveBusy, setSectionImproveBusy] = useState(false);
+  const [sectionImproveResult, setSectionImproveResult] = useState<
+    { kind: "failed"; message: string } | { kind: "clarification"; message: string } | { kind: "applied" } | null
+  >(null);
+
   const documentActions = [
     { icon: MessageCircleQuestion, label: "Ask questions" },
     { icon: ListChecks, label: "Summarize changes" },
   ];
+
+  // Switching sections mid-instruction would silently apply to the wrong
+  // one — close the panel and clear any stale instruction/result instead.
+  useEffect(() => {
+    setImprovingSection(false);
+    setSectionInstruction("");
+    setSectionImproveResult(null);
+  }, [activeSectionTitle]);
+
+  async function handleImproveSection() {
+    if (triggeredByUserId === null) {
+      setSectionImproveResult({ kind: "failed", message: "No users exist yet to attribute this run to." });
+      return;
+    }
+    if (!activeSectionTitle || !sectionInstruction.trim()) return;
+    setSectionImproveBusy(true);
+    setSectionImproveResult(null);
+    try {
+      const response = await api.artifacts.improveSection(artifactId, {
+        section_title: activeSectionTitle,
+        instruction: sectionInstruction.trim(),
+        triggered_by_user_id: triggeredByUserId,
+      });
+      if (response.needs_clarification) {
+        setSectionImproveResult({ kind: "clarification", message: response.agent_run.output_text ?? "The agent needs more information before it can revise this section." });
+        return;
+      }
+      setSectionImproveResult({ kind: "applied" });
+      setSectionInstruction("");
+      setImprovingSection(false);
+      onApplied({ artifactStatus: response.artifact_status, workflowNodeStatus: response.workflow_node_status });
+    } catch (err) {
+      setSectionImproveResult({ kind: "failed", message: err instanceof ApiError ? err.message : "Failed to improve this section." });
+    } finally {
+      setSectionImproveBusy(false);
+    }
+  }
 
   async function handleRun() {
     if (triggeredByUserId === null) {
@@ -140,12 +192,51 @@ export function AgentActionsPanel({
           ) : null}
         </div>
 
-        {sectionActions.map((action) => (
-          <Button key={action.label} variant="outline" size="sm" className="justify-start" disabled>
-            <action.icon className="h-3.5 w-3.5" />
-            {action.label}
+        <div className="rounded-md border border-border p-2.5">
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full justify-start"
+            disabled={!activeSectionTitle || !artifactEditable || !documentHasRealSections}
+            onClick={() => setImprovingSection((v) => !v)}
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            Improve section
           </Button>
-        ))}
+          {!artifactEditable ? (
+            <p className="mt-1 text-xs text-muted-foreground">Only a DRAFT document can be improved this way.</p>
+          ) : !documentHasRealSections ? (
+            <p className="mt-1 text-xs text-muted-foreground">
+              This document has no named sections yet — use &ldquo;Run Agent&rdquo; (Draft) above instead.
+            </p>
+          ) : null}
+
+          {improvingSection && activeSectionTitle ? (
+            <div className="mt-2 flex flex-col gap-2">
+              <Textarea
+                placeholder={`What should change in "${activeSectionTitle}"?`}
+                value={sectionInstruction}
+                onChange={(e) => setSectionInstruction(e.target.value)}
+                rows={3}
+                className="text-xs"
+              />
+              <Button size="sm" onClick={handleImproveSection} disabled={sectionImproveBusy || !sectionInstruction.trim()}>
+                {sectionImproveBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                {sectionImproveBusy ? "Improving…" : "Apply"}
+              </Button>
+              {sectionImproveResult?.kind === "failed" ? (
+                <p className="text-xs text-destructive">{sectionImproveResult.message}</p>
+              ) : sectionImproveResult?.kind === "clarification" ? (
+                <p className="text-xs text-muted-foreground">{sectionImproveResult.message}</p>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+
+        <Button variant="outline" size="sm" className="justify-start" disabled>
+          <RefreshCw className="h-3.5 w-3.5" />
+          Regenerate section
+        </Button>
         {documentActions.map((action) => (
           <Button key={action.label} variant="outline" size="sm" className="justify-start" disabled>
             <action.icon className="h-3.5 w-3.5" />
@@ -153,7 +244,7 @@ export function AgentActionsPanel({
           </Button>
         ))}
         <p className="mt-1 text-xs text-muted-foreground">
-          Section-level and Q&amp;A agent actions aren&apos;t available yet — see docs/mvp-plan.md.
+          &ldquo;Regenerate section&rdquo; and Q&amp;A agent actions aren&apos;t available yet — see docs/mvp-plan.md.
         </p>
       </CardContent>
     </Card>

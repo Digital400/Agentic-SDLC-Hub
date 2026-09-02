@@ -1,12 +1,16 @@
 """Artifact endpoints.
 
 Covers: create an artifact, get one by id, create/list its versions,
-edit its current draft content in place, and submit it for review. "List
-artifacts by project" lives in app/api/routes/projects.py instead, next to
-that resource's other sub-lists (workflow-nodes) — see that file.
+edit its current draft content in place, submit it for review, and
+improve one named section via a real agent (see
+app/services/section_improve_agent.py). "List artifacts by project" lives
+in app/api/routes/projects.py instead, next to that resource's other
+sub-lists (workflow-nodes) — see that file.
 
-No AI/agent drafting is wired up here (see docs/mvp-plan.md) — every
-version is created by a human via `created_by_id`.
+Every version created directly through this file (POST .../versions,
+PATCH) is human-authored via `created_by_id`; POST .../improve-section is
+the one AI-drafted exception, and even then only ever touches the one
+section named — see that route's docstring.
 """
 
 import uuid
@@ -18,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models import Artifact, ArtifactStatus, ArtifactVersion, Project, User, WorkflowNode
+from app.schemas.agent_run import AgentRunRead
 from app.schemas.artifact import (
     ArtifactContentUpdate,
     ArtifactCreate,
@@ -25,6 +30,8 @@ from app.schemas.artifact import (
     ArtifactVersionCreate,
     ArtifactVersionRead,
     GithubPrPreviewRead,
+    ImproveSectionRequest,
+    ImproveSectionResponse,
 )
 from app.services.artifact_summary import apply_summaries_to_version
 from app.services.audit import record_audit_log
@@ -32,6 +39,7 @@ from app.services.document_export import DocumentExportError, render_html_docume
 from app.services.github_export import build_github_pr_preview
 from app.services.graph_engine import GraphEngineService
 from app.services.permissions import require_can_edit_stage
+from app.services.section_improve_agent import SectionImproveAgentError, run_section_improve_agent
 from app.services.story_export import STORY_BACKLOG_ARTIFACT_TYPE, parse_story_backlog, render_csv, render_json, render_markdown
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
@@ -236,6 +244,45 @@ def update_artifact_content(
     db.commit()
     db.refresh(version)
     return ArtifactVersionRead.from_orm_version(version)
+
+
+# 6a. Improve one section via a real agent ------------------------------------------
+
+
+@router.post("/{artifact_id}/improve-section", response_model=ImproveSectionResponse)
+def improve_artifact_section(
+    artifact_id: uuid.UUID, payload: ImproveSectionRequest, db: Session = Depends(get_db)
+) -> ImproveSectionResponse:
+    """Revise exactly `payload.section_title`, per `payload.instruction` —
+    see app/services/section_improve_agent.py. Only works on a DRAFT
+    artifact (the same boundary the PATCH route above enforces); every
+    other section is guaranteed byte-identical to before. Never creates
+    or touches a Review — "Send for review" (below) is still the one real
+    submission action.
+    """
+    artifact = _get_artifact_or_404(db, artifact_id)
+    triggered_by = _get_user_or_400(db, payload.triggered_by_user_id, "triggered_by_user_id")
+    require_can_edit_stage(triggered_by, artifact.workflow_node.node_key)
+
+    try:
+        result = run_section_improve_agent(
+            db, artifact=artifact, section_title=payload.section_title, instruction=payload.instruction, triggered_by=triggered_by,
+        )
+    except SectionImproveAgentError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    db.commit()
+    db.refresh(result.agent_run)
+    db.refresh(artifact)
+
+    return ImproveSectionResponse(
+        agent_run=AgentRunRead.from_orm_run(result.agent_run),
+        needs_clarification=result.needs_clarification,
+        artifact_version_id=result.artifact_version.id if result.artifact_version else None,
+        artifact_status=artifact.status.value,
+        workflow_node_status=artifact.workflow_node.status.value,
+        section_updated=result.section_updated,
+    )
 
 
 # 7. Mark artifact as ready for review ----------------------------------------------

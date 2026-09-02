@@ -1,25 +1,36 @@
 """Real AI generation for agent runs, via the Anthropic API, Gemini API,
-NVIDIA's hosted "Build" API, or Ollama.
+OpenRouter, NVIDIA's hosted "Build" API, or Ollama.
 
 Falls back to app/services/mock_agent.py's deterministic placeholder when
-none of ANTHROPIC_API_KEY, GEMINI_API_KEY, NVIDIA_API_KEY, or Ollama is
-configured (see apps/api/.env.example), so the system stays fully
-testable and demoable without any paid key. Priority order:
+none of ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY,
+NVIDIA_API_KEY, or Ollama is configured (see apps/api/.env.example), so
+the system stays fully testable and demoable without any paid key.
+Priority order:
   1. Anthropic (if ANTHROPIC_API_KEY is set)
   2. Gemini (if GEMINI_API_KEY is set)
-  3. NVIDIA's hosted "Build" API (if NVIDIA_API_KEY is set)
-  4. Ollama (if running locally, no API key needed)
-  5. Mock (deterministic fallback)
+  3. OpenRouter (if OPENROUTER_API_KEY is set and reachable)
+  4. NVIDIA's hosted "Build" API (if NVIDIA_API_KEY is set and reachable)
+  5. Ollama (if running locally, no API key needed)
+  6. Mock (deterministic fallback)
 
-Gemini and NVIDIA are both offered as free-tier-friendly alternatives for
-anyone who wants real generated output without Anthropic billing (Google
-AI Studio and build.nvidia.com both issue free-tier API keys). NVIDIA sits
-ahead of Ollama in priority specifically because it's a fast hosted call
-rather than local CPU inference — see `_generate_with_ollama`'s own
-module-docstring-adjacent note that CPU-only local inference can
-legitimately take minutes per call. Ollama is completely free and runs
-locally — install Ollama from https://ollama.ai and pull a model (e.g.,
-'ollama pull llama3.1:8b') to use it.
+Gemini, OpenRouter, and NVIDIA are all offered as free-tier-friendly
+alternatives for anyone who wants real generated output without Anthropic
+billing (Google AI Studio, openrouter.ai, and build.nvidia.com all issue
+free-tier API keys). OpenRouter and NVIDIA sit ahead of Ollama in priority
+specifically because they're fast hosted calls rather than local CPU
+inference — see `_generate_with_ollama`'s own module-docstring-adjacent
+note that CPU-only local inference can legitimately take minutes per
+call. Ollama is completely free and runs locally — install Ollama from
+https://ollama.ai and pull a model (e.g., 'ollama pull llama3.1:8b') to
+use it.
+
+OpenRouter and NVIDIA are both only selected if a fast reachability check
+confirms the endpoint actually responds (see `_openai_compatible_endpoint_
+is_reachable`) — a hosted endpoint that accepts a connection and then
+simply never responds (observed in practice against NVIDIA's endpoint) is
+treated the same as the key being unset, falling through to the next
+provider, rather than every request committing to the full generation
+timeout below.
 
 The model is instructed to respond in a fixed two-part format — a one-line
 JSON header (needs_clarification + questions) followed by "---" followed by
@@ -80,17 +91,29 @@ _MODEL_PRICING_PER_MTOK: dict[str, tuple[float, float]] = {
 _OLLAMA_CONNECTIVITY_TIMEOUT_SECONDS = 5.0
 _OLLAMA_GENERATION_TIMEOUT_SECONDS = 180.0
 
-# NVIDIA's hosted API — a real network call to a remote service, same
-# generous-but-bounded reasoning as the Anthropic/Gemini SDK calls below
-# (which have their own client-level defaults); httpx needs an explicit one.
-# Deliberately NOT unbounded: this call happens synchronously inside a web
-# request (an agent run or Approve), so an indefinite timeout would mean a
-# genuinely stuck endpoint hangs every future request forever instead of
-# failing over to the heuristic fallback in bounded time. 300s is generous
-# for a large/cold-starting hosted model without approaching "forever."
+# OpenRouter/NVIDIA's hosted APIs — real network calls to a remote
+# service, same generous-but-bounded reasoning as the Anthropic/Gemini SDK
+# calls below (which have their own client-level defaults); httpx needs an
+# explicit one. Deliberately NOT unbounded: this call happens
+# synchronously inside a web request (an agent run or Approve), so an
+# indefinite timeout would mean a genuinely stuck endpoint hangs every
+# future request forever instead of failing over to the heuristic
+# fallback in bounded time. 300s is generous for a large/cold-starting
+# hosted model without approaching "forever."
+_OPENROUTER_REQUEST_TIMEOUT_SECONDS = 300.0
 _NVIDIA_REQUEST_TIMEOUT_SECONDS = 300.0
+# A fast, bounded reachability check — same reasoning as
+# _OLLAMA_CONNECTIVITY_TIMEOUT_SECONDS below: get_active_provider() runs on
+# the hot path of every single agent-run/Approve request, so it must fail
+# fast, not eat the full generation timeout. This is not hypothetical:
+# NVIDIA's hosted endpoint has been observed accepting a connection and the
+# full request body, then simply never returning a response at all (not an
+# error — a genuine hang) — without this check, every request with
+# NVIDIA_API_KEY (or OPENROUTER_API_KEY) set would commit to the full 300s
+# above before ever falling through to the next provider.
+_OPENAI_COMPATIBLE_CONNECTIVITY_TIMEOUT_SECONDS = 5.0
 
-AIProvider = Literal["anthropic", "gemini", "nvidia", "ollama", "mock"]
+AIProvider = Literal["anthropic", "gemini", "openrouter", "nvidia", "ollama", "mock"]
 
 
 class AIGenerationError(Exception):
@@ -116,25 +139,56 @@ class AgentGenerationResult:
     token_budget_report: dict = field(default_factory=dict)
 
 
+def _openai_compatible_endpoint_is_reachable(base_url: str, api_key: str) -> bool:
+    """A fast GET against an OpenAI-compatible provider's models-listing
+    endpoint — used for both OpenRouter and NVIDIA, same role as the
+    Ollama `client.list()` check below: confirms the service actually
+    responds within a bounded time, not that the key is valid or that a
+    real generation call will succeed. Any real HTTP response (even an
+    error one, e.g. a bad key) counts as "reachable" — that's a fast,
+    honest failure the real generate call will surface on its own; what
+    this specifically screens out is a connection that never returns
+    anything at all within _OPENAI_COMPATIBLE_CONNECTIVITY_TIMEOUT_SECONDS."""
+    try:
+        response = httpx.get(
+            f"{base_url.rstrip('/')}/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=_OPENAI_COMPATIBLE_CONNECTIVITY_TIMEOUT_SECONDS,
+        )
+        return response.status_code < 500
+    except httpx.HTTPError:
+        return False
+
+
 def get_active_provider() -> AIProvider:
     """Anthropic takes priority when both keys are set — see module
     docstring. `AgentRun.token_usage`/`used_mock` don't currently record
     which real provider generated an output, only real-vs-mock; the actual
     provider is visible in the run's audit log entry instead.
-    
+
+    OpenRouter/NVIDIA are only selected if
+    `_openai_compatible_endpoint_is_reachable` confirms the endpoint
+    responds within a few seconds — a stuck/hanging endpoint (observed in
+    practice against NVIDIA's, not hypothetical) falls through to the next
+    provider instead of every request committing to the full multi-minute
+    generation timeout.
+
     Provider priority:
     1. Anthropic (if ANTHROPIC_API_KEY is set)
     2. Gemini (if GEMINI_API_KEY is set)
-    3. NVIDIA's hosted "Build" API (if NVIDIA_API_KEY is set)
-    4. Ollama (if running locally, no API key needed)
-    5. Mock (deterministic fallback)
+    3. OpenRouter (if OPENROUTER_API_KEY is set and reachable)
+    4. NVIDIA's hosted "Build" API (if NVIDIA_API_KEY is set and reachable)
+    5. Ollama (if running locally, no API key needed)
+    6. Mock (deterministic fallback)
     """
     settings = get_settings()
     if settings.ANTHROPIC_API_KEY:
         return "anthropic"
     if settings.GEMINI_API_KEY:
         return "gemini"
-    if settings.NVIDIA_API_KEY:
+    if settings.OPENROUTER_API_KEY and _openai_compatible_endpoint_is_reachable(settings.OPENROUTER_BASE_URL, settings.OPENROUTER_API_KEY):
+        return "openrouter"
+    if settings.NVIDIA_API_KEY and _openai_compatible_endpoint_is_reachable(settings.NVIDIA_BASE_URL, settings.NVIDIA_API_KEY):
         return "nvidia"
     # Check if Ollama is available by attempting to connect
     try:
@@ -428,6 +482,63 @@ def _generate_with_anthropic(system_prompt: str, user_content: str, output_token
     )
 
 
+def _generate_with_openrouter(system_prompt: str, user_content: str, output_token_budget: int) -> AgentGenerationResult:
+    """Generate via OpenRouter (https://openrouter.ai) — a single
+    OpenAI-compatible /v1/chat/completions endpoint fronting many
+    underlying providers/models (default: a ":free"-suffixed model, see
+    Settings.OPENROUTER_MODEL). Plain httpx, not the `openai` SDK — same
+    reasoning as _generate_with_nvidia below (this codebase has no OpenAI
+    SDK dependency, and the endpoint shape is identical)."""
+    settings = get_settings()
+
+    try:
+        response = httpx.post(
+            f"{settings.OPENROUTER_BASE_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {settings.OPENROUTER_API_KEY}", "Accept": "application/json"},
+            json={
+                "model": settings.OPENROUTER_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                "max_tokens": output_token_budget,
+                "stream": False,
+            },
+            timeout=_OPENROUTER_REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        # Covers both a network failure and a non-2xx response (via
+        # raise_for_status) — never includes the Authorization header or
+        # API key, only httpx's own exception message.
+        raise AIGenerationError(f"OpenRouter generation failed: {exc}") from exc
+
+    data = response.json()
+    raw_text = data["choices"][0]["message"]["content"] or ""
+    needs_clarification, questions, body = _parse_response(raw_text)
+    content_markdown = format_clarification_output(questions) if needs_clarification else body
+
+    usage = data.get("usage") or {}
+    prompt_tokens = usage.get("prompt_tokens", 0) or 0
+    completion_tokens = usage.get("completion_tokens", 0) or 0
+
+    return AgentGenerationResult(
+        content_markdown=content_markdown,
+        needs_clarification=needs_clarification,
+        clarification_questions=questions,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=usage.get("total_tokens", prompt_tokens + completion_tokens) or (prompt_tokens + completion_tokens),
+        # The default OPENROUTER_MODEL is a ":free"-suffixed model — same
+        # "don't assume a paid rate that may not apply" framing as
+        # NVIDIA/Gemini's own cost=0.0 below. A caller who points
+        # OPENROUTER_MODEL at a paid model will see cost under-reported;
+        # OpenRouter's own dashboard is the accurate source for real spend.
+        cost=0.0,
+        used_mock=False,
+    )
+
+
 def _generate_with_nvidia(system_prompt: str, user_content: str, output_token_budget: int) -> AgentGenerationResult:
     """Generate via NVIDIA's hosted "Build" API
     (https://build.nvidia.com) — a single OpenAI-compatible
@@ -682,6 +793,8 @@ def generate(
 
     if provider == "gemini":
         result = _generate_with_gemini(system_prompt, user_content, output_token_budget)
+    elif provider == "openrouter":
+        result = _generate_with_openrouter(system_prompt, user_content, output_token_budget)
     elif provider == "nvidia":
         result = _generate_with_nvidia(system_prompt, user_content, output_token_budget)
     elif provider == "ollama":
@@ -706,6 +819,8 @@ def generate_raw_text(*, system_prompt: str, user_content: str, output_token_bud
     provider = get_active_provider()
     if provider == "gemini":
         result = _generate_with_gemini(system_prompt, user_content, output_token_budget)
+    elif provider == "openrouter":
+        result = _generate_with_openrouter(system_prompt, user_content, output_token_budget)
     elif provider == "nvidia":
         result = _generate_with_nvidia(system_prompt, user_content, output_token_budget)
     elif provider == "ollama":

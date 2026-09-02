@@ -29,13 +29,17 @@ class Settings(BaseSettings):
     # key is configured, so the system stays fully testable without a paid
     # key. Set ANTHROPIC_API_KEY in apps/api/.env to turn on real Claude
     # calls; if that's unset but GEMINI_API_KEY is, Gemini is used instead
-    # (Google AI Studio issues Gemini API keys with a free tier); if both of
-    # those are unset but NVIDIA_API_KEY is, NVIDIA's hosted "Build" API
-    # (build.nvidia.com — an OpenAI-compatible /v1/chat/completions
-    # endpoint, no local GPU/compute needed) is used; Ollama (local, no key
-    # at all) is the last resort before mock. Priority: Anthropic > Gemini >
-    # NVIDIA > Ollama > mock — NVIDIA is placed ahead of Ollama because it's
-    # a fast hosted call, not slow local CPU inference.
+    # (Google AI Studio issues Gemini API keys with a free tier); if all of
+    # those are unset but OPENROUTER_API_KEY is, OpenRouter (openrouter.ai —
+    # a single OpenAI-compatible endpoint fronting many providers, including
+    # several ":free"-suffixed models with no cost) is used; then NVIDIA's
+    # hosted "Build" API (build.nvidia.com, same OpenAI-compatible shape);
+    # Ollama (local, no key at all) is the last resort before mock.
+    # Priority: Anthropic > Gemini > OpenRouter > NVIDIA > Ollama > mock —
+    # both OpenRouter and NVIDIA are placed ahead of Ollama because they're
+    # fast hosted calls, not slow local CPU inference; OpenRouter is placed
+    # ahead of NVIDIA per this codebase's own observed experience (NVIDIA's
+    # hosted endpoint has repeatedly been found to hang rather than error).
     ANTHROPIC_API_KEY: str | None = None
     AI_MODEL: str = "claude-opus-5"
     GEMINI_API_KEY: str | None = None
@@ -44,6 +48,18 @@ class Settings(BaseSettings):
     # on it — Google's own error message names gemini-3.6-flash as the
     # replacement, confirmed against a real key.
     GEMINI_MODEL: str = "gemini-3.6-flash"
+    # OpenRouter (https://openrouter.ai) — a single OpenAI-compatible
+    # /v1/chat/completions endpoint that routes to many underlying
+    # providers/models, several suffixed ":free" with no cost. Get a key
+    # from openrouter.ai/keys. OPENROUTER_MODEL defaults to a free-tier
+    # model; point it at any model slug from openrouter.ai/models. Which
+    # models are free changes over time — check openrouter.ai/models?
+    # max_price=0 — and prefer a plain instruct model over a "reasoning"
+    # one (a reasoning model can spend the whole output-token budget on
+    # hidden reasoning tokens before emitting any real content).
+    OPENROUTER_API_KEY: str | None = None
+    OPENROUTER_MODEL: str = "minimax/minimax-m3:free"
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     # NVIDIA's hosted "Build" API (https://build.nvidia.com) — issues free
     # API keys for prototyping against a catalog of hosted models via a
     # single OpenAI-compatible endpoint. moonshotai/kimi-k3 is the default

@@ -26,6 +26,12 @@ class Artifact(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     workflow_node_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("workflow_nodes.id", ondelete="CASCADE"), nullable=False
     )
+    # Denormalized from workflow_node.story_id — set only for an artifact
+    # produced inside a per-story delivery lane. See
+    # app/services/graph_engine.py's resolve_required_inputs, which
+    # filters by this so lanes never resolve each other's artifacts as a
+    # shared "approved input."
+    story_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), nullable=True)
     artifact_type: Mapped[str] = mapped_column(String(100), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[ArtifactStatus] = mapped_column(
@@ -47,6 +53,7 @@ class Artifact(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     project: Mapped["Project"] = relationship("Project", back_populates="artifacts")
     workflow_node: Mapped["WorkflowNode"] = relationship("WorkflowNode", back_populates="artifacts")
+    story: Mapped["Story | None"] = relationship("Story")
     created_by: Mapped["User"] = relationship("User", foreign_keys=[created_by_id])
     versions: Mapped[list["ArtifactVersion"]] = relationship(
         "ArtifactVersion",

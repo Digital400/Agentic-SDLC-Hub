@@ -100,22 +100,39 @@ class GraphEngineService:
         - **Freeform inputs**: anything else (e.g. "stakeholder_request"
           for the very first stage, which has no upstream artifact). Must
           be supplied via `freeform_context`, or it's reported missing.
+
+        SCOPING (Scrum story lanes): a project-level node (`story_id is
+        None`) only ever sees other project-level nodes/artifacts —
+        unchanged, a no-op for the existing MVP workflow. A per-story lane
+        node additionally sees the project-level scope (so a lane's
+        `story_lld` can still resolve the shared, project-level
+        `story_backlog`/`hld_document` as required inputs) PLUS its own
+        lane's nodes/artifacts — but never another lane's, so two lanes'
+        same-named nodes (e.g. both called "testing") never resolve each
+        other's artifacts as a shared "approved input" — see
+        app/models/workflow.py's `story_id` column and
+        app/services/story_lane_templates.py.
         """
-        known_artifact_types = {n.output_artifact_type for n in project.workflow_nodes}
+        scope_nodes = [
+            n for n in project.workflow_nodes if n.story_id is None or n.story_id == node.story_id
+        ]
+        known_artifact_types = {n.output_artifact_type for n in scope_nodes}
         result = RequiredInputsResult()
 
         for required in node.required_inputs:
             if required in known_artifact_types:
-                artifact = (
-                    self.db.query(Artifact)
-                    .filter(
-                        Artifact.project_id == project.id,
-                        Artifact.artifact_type == required,
-                        Artifact.status == ArtifactStatus.APPROVED,
-                    )
-                    .order_by(Artifact.updated_at.desc())
-                    .first()
+                query = self.db.query(Artifact).filter(
+                    Artifact.project_id == project.id,
+                    Artifact.artifact_type == required,
+                    Artifact.status == ArtifactStatus.APPROVED,
                 )
+                if node.story_id is not None:
+                    query = query.filter(
+                        (Artifact.story_id == node.story_id) | (Artifact.story_id.is_(None))
+                    )
+                else:
+                    query = query.filter(Artifact.story_id.is_(None))
+                artifact = query.order_by(Artifact.updated_at.desc()).first()
                 if artifact is None or artifact.current_version is None:
                     result.missing_reasons.append(f"required input '{required}' has no approved artifact yet")
                 else:

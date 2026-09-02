@@ -54,7 +54,8 @@
       "requiresHumanApproval": true,
       "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
       "nextNodes": ["hld"],
-      "position": { "x": 440, "y": 0 }
+      "position": { "x": 440, "y": 0 },
+      "fullContentArtifactTypes": ["problem_statement"]
     },
     {
       "id": "hld",
@@ -78,12 +79,13 @@
       "name": "Story Crafting",
       "description": "Break the approved high-level design into implementable stories/tasks with acceptance criteria.",
       "agentKey": "story-crafting-agent",
-      "requiredInputs": ["hld_document"],
+      "requiredInputs": ["solution_options_doc", "hld_document"],
       "outputArtifactType": "story_backlog",
       "requiresHumanApproval": true,
       "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
       "nextNodes": ["lld"],
       "position": { "x": 880, "y": 0 },
+      "fullContentArtifactTypes": ["solution_options_doc", "hld_document"],
       "ragTopK": 6,
       "maxRagTokens": 2500
     },
@@ -101,7 +103,7 @@
       "position": { "x": 1100, "y": 0 },
       "contextTokenBudget": 12000,
       "outputTokenBudget": 3072,
-      "fullContentArtifactTypes": ["hld_document"]
+      "fullContentArtifactTypes": ["solution_options_doc", "hld_document", "story_backlog"]
     },
     {
       "id": "infrastructure_planning",
@@ -133,7 +135,7 @@
       "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
       "nextNodes": ["implementation"],
       "position": { "x": 1210, "y": 0 },
-      "fullContentArtifactTypes": ["lld_document"]
+      "fullContentArtifactTypes": ["lld_document", "story_backlog"]
     },
     {
       "id": "implementation",
@@ -149,7 +151,7 @@
       "position": { "x": 1320, "y": 0 },
       "contextTokenBudget": 16000,
       "outputTokenBudget": 4096,
-      "fullContentArtifactTypes": ["lld_document"],
+      "fullContentArtifactTypes": ["lld_document", "story_backlog", "implementation_plan"],
       "ragTopK": 8,
       "maxRagTokens": 4000
     },

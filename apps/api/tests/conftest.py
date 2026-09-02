@@ -50,6 +50,15 @@ from app.models import (
     RepositorySnapshot,
     Review,
     ReviewComment,
+    Sprint,
+    Story,
+    StoryActivityLog,
+    StoryArtifact,
+    StoryAssignee,
+    StoryDeliveryEdge,
+    StoryDeliveryLane,
+    StoryDeliveryNode,
+    SprintStory,
     User,
     UserRole,
     ValidatorDefinition,
@@ -66,6 +75,15 @@ TEST_TABLES = [
     WorkflowEdge.__table__,
     Artifact.__table__,
     ArtifactVersion.__table__,
+    Story.__table__,
+    StoryAssignee.__table__,
+    StoryDeliveryLane.__table__,
+    StoryDeliveryNode.__table__,
+    StoryDeliveryEdge.__table__,
+    StoryArtifact.__table__,
+    StoryActivityLog.__table__,
+    Sprint.__table__,
+    SprintStory.__table__,
     Review.__table__,
     ReviewComment.__table__,
     AuditLog.__table__,
@@ -147,11 +165,17 @@ def make_node(
     output_artifact_type: str | None = None,
     requires_human_approval: bool = True,
     required_evidence_section: str | None = None,
+    story_id: "uuid.UUID | None" = None,
 ) -> WorkflowNode:
     """Helper (not a fixture, since tests need several nodes with different
-    keys) for building one workflow node with sensible defaults."""
+    keys) for building one workflow node with sensible defaults.
+
+    `story_id` scopes this node to one Scrum story lane (see
+    app/models/workflow.py's `story_id` column) — omitted, it stays a
+    project-level node exactly as before."""
     node = WorkflowNode(
         project_id=project.id,
+        story_id=story_id,
         node_key=node_key,
         name=node_key.replace("_", " ").title(),
         description=f"{node_key} stage",
@@ -169,6 +193,30 @@ def make_node(
     return node
 
 
+def make_story(
+    db: Session,
+    project: Project,
+    actor: User,
+    source_artifact_version_id: "uuid.UUID",
+    *,
+    title: str = "Sample Story",
+    story_type: "StoryType" = None,
+) -> "Story":
+    from app.models import Story, StoryType as _StoryType
+
+    story = Story(
+        project_id=project.id,
+        source_artifact_version_id=source_artifact_version_id,
+        story_type=story_type or _StoryType.VERTICAL,
+        title=title,
+        user_story=f"As a user, I want {title.lower()}.",
+        created_by_id=actor.id,
+    )
+    db.add(story)
+    db.flush()
+    return story
+
+
 def make_edge(
     db: Session, project: Project, source: WorkflowNode, target: WorkflowNode, *, label: str | None = None
 ) -> WorkflowEdge:
@@ -181,14 +229,20 @@ def make_edge(
 
 
 def make_approved_artifact(
-    db: Session, project: Project, node: WorkflowNode, actor: User, *, content: str = "Approved content"
+    db: Session, project: Project, node: WorkflowNode, actor: User, *, content: str = "Approved content",
+    story_id: "uuid.UUID | None" = None,
 ) -> Artifact:
     """An APPROVED artifact whose type matches `node.output_artifact_type`
     — the shape `resolve_required_inputs` looks for when a downstream
-    node lists this node's output as a required input."""
+    node lists this node's output as a required input.
+
+    `story_id` defaults to `node.story_id` (so a lane node's own artifact
+    is scoped to the same lane by default) — pass it explicitly only to
+    build a mismatched-scope artifact on purpose."""
     artifact = Artifact(
         project_id=project.id,
         workflow_node_id=node.id,
+        story_id=node.story_id if story_id is None else story_id,
         artifact_type=node.output_artifact_type,
         title=f"{node.name} artifact",
         status=ArtifactStatus.APPROVED,
@@ -228,16 +282,19 @@ def make_implementation_task(
     assigned_agent_type: str = "backend-coding-agent",
     status: ImplementationTaskStatus = ImplementationTaskStatus.PENDING,
     order_index: int = 0,
+    story_id: "uuid.UUID | None" = None,
 ) -> ImplementationTask:
     """One ImplementationTask row, tied to `artifact`'s current version —
     mirrors what app/api/routes/projects.py's generate_implementation_plan
     actually persists, for tests that need a task without going through
-    that whole endpoint."""
+    that whole endpoint. `story_id` defaults to `node.story_id`, same
+    convention as make_approved_artifact above."""
     task = ImplementationTask(
         project_id=project.id,
         workflow_node_id=node.id,
         artifact_id=artifact.id,
         artifact_version_id=artifact.current_version_id,
+        story_id=node.story_id if story_id is None else story_id,
         title=title,
         description=description,
         linked_story=linked_story,
