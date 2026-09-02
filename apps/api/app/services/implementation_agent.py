@@ -148,6 +148,8 @@ def _build_heuristic_result(
     lld_summary: str,
     standards_chunks: list[RetrievedChunk] | None = None,
     jira_issue_key: str | None = None,
+    implementation_plan_summary: str = "",
+    test_scenarios_summary: str = "",
 ) -> ImplementationAgentResult:
     paths = task.expected_paths or [f"(no expected path declared for '{task.title}')"]
     changes: list[ProposedFileChange] = []
@@ -188,6 +190,8 @@ def _build_heuristic_result(
         f"{'LLD context: ' + lld_summary[:200] + '. ' if lld_summary else ''}"
         f"{'Jira: ' + jira_issue_key + '. ' if jira_issue_key else ''}"
         f"{f'{len(standards_chunks)} coding-standards excerpt(s) available. ' if standards_chunks else ''}"
+        f"{'An Implementation Plan is available. ' if implementation_plan_summary.strip() else ''}"
+        f"{'Test Scenarios are available. ' if test_scenarios_summary.strip() else ''}"
         "No repository, branch, or file was written by generating this — review the diff below before anything else happens to it."
     )
 
@@ -235,6 +239,8 @@ def _run_real_agent(
     lld_summary: str,
     standards_chunks: list[RetrievedChunk] | None = None,
     jira_issue_key: str | None = None,
+    implementation_plan_summary: str = "",
+    test_scenarios_summary: str = "",
 ) -> ImplementationAgentResult:
     file_context_parts = []
     for f in repo_context.relevant_files:
@@ -261,6 +267,11 @@ def _run_real_agent(
         f"Expected files/folders: {', '.join(task.expected_paths) or '(none declared)'}\n"
         f"Acceptance criteria: {'; '.join(task.acceptance_criteria) or '(none declared)'}\n\n"
         f"# Approved LLD summary\n{lld_summary or '(not available)'}\n\n"
+        # Story Code Implementation Agent — Implementation Plan and Test
+        # Scenarios are additive context (both may not exist yet for an
+        # older/project-level task), same as everything else here.
+        f"# Implementation Plan\n{implementation_plan_summary or '(not available)'}\n\n"
+        f"# Test Scenarios\n{test_scenarios_summary or '(not available)'}\n\n"
         f"# Related story\n{story_text}\n\n"
         f"# Jira issue key\n{jira_issue_key or '(not synced to Jira yet)'}\n\n"
         f"# Coding standards\n{standards_text}\n\n"
@@ -312,6 +323,8 @@ def run_implementation_agent(
     lld_summary: str,
     standards_chunks: list[RetrievedChunk] | None = None,
     jira_issue_key: str | None = None,
+    implementation_plan_summary: str = "",
+    test_scenarios_summary: str = "",
 ) -> ImplementationAgentResult:
     """Real AI when configured; the deterministic heuristic otherwise, or if
     the real call errors or returns unparseable JSON (logged, not raised —
@@ -320,10 +333,13 @@ def run_implementation_agent(
 
     `standards_chunks` (RAG, see app/services/retrieval.py) and
     `jira_issue_key` are both additive context — story-level implementation
-    workflow requirement 4 — never required for a run to proceed."""
+    workflow requirement 4 — never required for a run to proceed.
+    `implementation_plan_summary`/`test_scenarios_summary` (Story Code
+    Implementation Agent) are likewise additive."""
     kwargs = dict(
         task=task, repo_context=repo_context, story=story, lld_summary=lld_summary,
         standards_chunks=standards_chunks, jira_issue_key=jira_issue_key,
+        implementation_plan_summary=implementation_plan_summary, test_scenarios_summary=test_scenarios_summary,
     )
     if get_active_provider() == "mock":
         return _build_heuristic_result(**kwargs)

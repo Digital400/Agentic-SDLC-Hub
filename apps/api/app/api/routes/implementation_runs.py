@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.routes.github_integration import decrypt_repository_token
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.models import (
     ImplementationRun,
@@ -58,7 +59,9 @@ from app.services.repo_context_builder import RepoContextBuilderService
 from app.services.retrieval import retrieve_relevant_chunks
 from app.services.story_export import Story as StoryDataclass
 from app.services.story_export import find_related_story
+from app.services.story_implementation_plan_agent import STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE
 from app.services.story_lld_agent import STORY_LLD_ARTIFACT_TYPE
+from app.services.story_test_scenarios_agent import get_latest_story_test_scenarios
 
 router = APIRouter(prefix="/implementation-runs", tags=["implementation-runs"])
 
@@ -156,6 +159,10 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
     story_lld_artifact_id: uuid.UUID | None = None
     story: StoryDataclass | None = None
     jira_issue_key: str | None = None
+    # Story Code Implementation Agent — additive agent input, story-scoped
+    # runs only (see below); a project-level run leaves both "".
+    implementation_plan_summary: str = ""
+    test_scenarios_summary: str = ""
 
     if task.story_id is not None:
         story_row = db.get(Story, task.story_id)
@@ -191,6 +198,22 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
         )
         lld_summary = story_lld_artifact.content_markdown if story_lld_artifact is not None else ""
         story_lld_artifact_id = story_lld_artifact.id if story_lld_artifact is not None else None
+
+        # Story Code Implementation Agent — Implementation Plan/Test
+        # Scenarios as additive agent input (precondition 2's "Implementation
+        # Plan exists" is already guaranteed structurally by
+        # implementation_lane_node's own LOCKED check above — IMPLEMENTATION
+        # can't be reachable at all until IMPLEMENTATION_PLAN is accepted).
+        plan_artifact = (
+            db.query(StoryArtifact)
+            .filter(StoryArtifact.story_id == story_row.id, StoryArtifact.artifact_type == STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE)
+            .order_by(StoryArtifact.version_number.desc())
+            .first()
+        )
+        implementation_plan_summary = plan_artifact.content_markdown if plan_artifact is not None else ""
+        test_scenarios_artifact = get_latest_story_test_scenarios(db, story_row.id)
+        test_scenarios_summary = test_scenarios_artifact.content_markdown if test_scenarios_artifact is not None else ""
+
         story_id = story_row.id
         lane_id = lane.id
         jira_issue_key = story_row.jira_issue_key
@@ -260,6 +283,18 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
     if snapshot is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot start — create a repository snapshot first.")
 
+    # Story Code Implementation Agent, precondition 4 — "Code runner
+    # workspace can be created." A cheap, non-destructive check: the
+    # configured workspace root must itself be creatable/writable. This
+    # does NOT create this run's own per-run workspace yet — that only
+    # happens once a human has accepted the drafted patch (see
+    # app/services/code_runner.py's CodeRunnerService.create_workspace,
+    # called from the separate apply-via-code-runner action below).
+    try:
+        get_settings().CODE_RUNNER_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Cannot start — the code runner workspace root isn't writable: {exc}") from exc
+
     try:
         github_token = decrypt_repository_token(repository)
     except HTTPException:
@@ -298,6 +333,7 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
         result = run_implementation_agent(
             task=task, repo_context=repo_context, story=story, lld_summary=lld_summary,
             standards_chunks=standards_chunks, jira_issue_key=jira_issue_key,
+            implementation_plan_summary=implementation_plan_summary, test_scenarios_summary=test_scenarios_summary,
         )
     except Exception as exc:  # noqa: BLE001 — anything unexpected fails this run cleanly, never a bare 500
         run.status = ImplementationRunStatus.FAILED

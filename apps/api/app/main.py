@@ -7,6 +7,7 @@ from app.api.routes import (
     agent_definitions,
     agent_runs,
     artifacts,
+    code_runs,
     confluence_integration,
     github_integration,
     health,
@@ -67,6 +68,7 @@ app.include_router(github_integration.router)
 app.include_router(jira_integration.router)
 app.include_router(confluence_integration.router)
 app.include_router(implementation_runs.router)
+app.include_router(code_runs.router)
 app.include_router(test_runs.router)
 app.include_router(pr_review_runs.router)
 app.include_router(maintenance_runs.router)
