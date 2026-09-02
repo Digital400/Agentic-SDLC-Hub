@@ -148,13 +148,20 @@ def create_issue(
     description: str,
     parent_key: str | None = None,
     labels: list[str] | None = None,
+    priority: str | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> JiraIssue:
     """POST /rest/api/3/issue — creates exactly the one issue described.
     `parent_key` sets Jira's `parent` field, used for a Sub-task's parent
-    Story/Task or a Story's parent Epic. Never called by this codebase
-    with anything but a single, explicitly human-selected item — see
-    app/api/routes/jira_integration.py's /jira/push."""
+    Story/Task or a Story's parent Epic. `priority` is Jira's real,
+    standard field (one of Jira's 5-point scale — see
+    app/services/jira_export.py's normalize_jira_priority) — unlike Story
+    Points/Sprint (see app/services/story_jira_sync.py's module docstring
+    for why those are description text instead, never a guessed custom
+    field). Never called by this codebase with anything but a single,
+    explicitly human-selected item — see
+    app/api/routes/jira_integration.py's /jira/push and
+    /jira/stories/{id}/sync."""
     fields: dict = {
         "project": {"key": project_key},
         "summary": summary,
@@ -165,6 +172,8 @@ def create_issue(
         fields["parent"] = {"key": parent_key}
     if labels:
         fields["labels"] = labels
+    if priority:
+        fields["priority"] = {"name": priority}
 
     data = _request(
         "POST", f"/rest/api/{_API_VERSION}/issue", base_url=base_url, email=email, api_token=api_token,

@@ -147,3 +147,69 @@ class JiraSyncStatusRequest(BaseModel):
 
 class JiraSyncStatusResponse(BaseModel):
     links: list[JiraIssueLinkRead]
+
+
+# --- Jira sync per story (see app/services/story_jira_sync.py) -----------------------
+
+
+class StoryJiraSubtaskPreviewRead(BaseModel):
+    implementation_task_id: uuid.UUID
+    title: str
+    description: str
+    validation_errors: list[str]
+    already_linked: JiraIssueLinkRead | None
+
+    @property
+    def is_valid(self) -> bool:
+        return len(self.validation_errors) == 0
+
+
+class StoryJiraPreviewRead(BaseModel):
+    story_id: uuid.UUID
+    summary: str
+    description: str
+    priority: str | None
+    story_points: int | None
+    sprint_name: str | None
+    subtasks: list[StoryJiraSubtaskPreviewRead]
+    validation_errors: list[str]
+    already_linked: JiraIssueLinkRead | None
+
+    @property
+    def is_valid(self) -> bool:
+        return len(self.validation_errors) == 0
+
+
+class SyncStoryToJiraRequest(BaseModel):
+    triggered_by_user_id: uuid.UUID
+
+
+class SubtaskJiraSyncResultRead(BaseModel):
+    implementation_task_id: uuid.UUID
+    status: str  # "created" | "skipped_duplicate" | "skipped_invalid" | "failed"
+    jira_issue_key: str | None = None
+    jira_issue_url: str | None = None
+    errors: list[str] = Field(default_factory=list)
+
+
+class StoryJiraSyncResultRead(BaseModel):
+    story_id: uuid.UUID
+    status: str  # "created" | "skipped_duplicate" | "skipped_invalid" | "failed"
+    jira_issue_key: str | None = None
+    jira_issue_url: str | None = None
+    errors: list[str] = Field(default_factory=list)
+    subtasks: list[SubtaskJiraSyncResultRead] = Field(default_factory=list)
+
+
+class BulkSyncStoriesToJiraRequest(BaseModel):
+    """Rule: bulk sync still needs preview and confirmation — this
+    endpoint never selects stories on its own; `story_ids` must be the
+    exact, human-confirmed set (typically every id a bulk-preview call
+    just returned and the user then approved)."""
+
+    story_ids: list[uuid.UUID] = Field(..., min_length=1)
+    triggered_by_user_id: uuid.UUID
+
+
+class BulkStoryJiraSyncResponse(BaseModel):
+    results: list[StoryJiraSyncResultRead]
