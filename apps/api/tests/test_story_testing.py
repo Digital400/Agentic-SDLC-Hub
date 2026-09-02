@@ -123,6 +123,17 @@ def _story_ready_for_testing(db, project, actor):
     # IMPLEMENTATION_PLAN sits between LLD_REVIEW and IMPLEMENTATION (see
     # app/services/story_delivery.py) — its completion is what unlocks
     # IMPLEMENTATION and triggers _ensure_story_implementation_task.
+    # Accepting it requires a real plan to exist first (Story
+    # Implementation Plan Agent, rule 4) — fabricated directly, same
+    # convention as QA_APPROVAL's own evidence-artifact stub below.
+    db.add(
+        StoryArtifact(
+            story_id=story.id, lane_id=lane.id, node_id=nodes["IMPLEMENTATION_PLAN"].id,
+            artifact_type="story_implementation_plan", title="Implementation Plan", content_markdown="## Implementation Summary\nPlan.\n",
+            version_number=1, created_by_id=tech_lead.id,
+        )
+    )
+    db.flush()
     update_lane_node_status(nodes["IMPLEMENTATION_PLAN"].id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=tech_lead.id), db)
 
     task = db.query(ImplementationTask).filter(ImplementationTask.story_id == story.id).first()
@@ -165,6 +176,15 @@ def test_testing_blocked_until_implementation_is_accepted(db, project, actor):
     # Advance the lane's own sequence up through HUMAN_CODE_REVIEW without
     # ever creating/accepting a real ImplementationRun — this module's own
     # gate is independent of those generic node-status transitions.
+    # Accepting IMPLEMENTATION_PLAN requires a real plan to exist first.
+    db.add(
+        StoryArtifact(
+            story_id=story.id, lane_id=lane.id, node_id=nodes["IMPLEMENTATION_PLAN"].id,
+            artifact_type="story_implementation_plan", title="Implementation Plan", content_markdown="## Implementation Summary\nPlan.\n",
+            version_number=1, created_by_id=actor.id,
+        )
+    )
+    db.flush()
     for key in ("IMPLEMENTATION_PLAN", "IMPLEMENTATION", "TEST_SCENARIOS", "PULL_REQUEST", "PR_REVIEW_AGENT", "HUMAN_CODE_REVIEW"):
         update_lane_node_status(nodes[key].id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=actor.id), db)
 

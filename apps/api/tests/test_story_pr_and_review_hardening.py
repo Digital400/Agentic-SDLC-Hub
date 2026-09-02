@@ -38,6 +38,7 @@ from app.models import (
     RepositoryFileIndex,
     RepositorySnapshot,
     Story,
+    StoryArtifact,
     StoryDeliveryLane,
     StoryType,
     User,
@@ -152,6 +153,15 @@ def _story_with_accepted_run(db, project, actor, *, title: str = "Add reset endp
     # IMPLEMENTATION_PLAN sits between LLD_REVIEW and IMPLEMENTATION (see
     # app/services/story_delivery.py) — its completion is what unlocks
     # IMPLEMENTATION and triggers _ensure_story_implementation_task.
+    # Accepting it requires a real plan to exist first.
+    db.add(
+        StoryArtifact(
+            story_id=story.id, lane_id=lane.id, node_id=nodes["IMPLEMENTATION_PLAN"].id,
+            artifact_type="story_implementation_plan", title="Implementation Plan", content_markdown="## Implementation Summary\nPlan.\n",
+            version_number=1, created_by_id=tech_lead.id,
+        )
+    )
+    db.flush()
     update_lane_node_status(nodes["IMPLEMENTATION_PLAN"].id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=tech_lead.id), db)
 
     story_row = db.get(Story, story.id)

@@ -44,6 +44,8 @@ from app.schemas.implementation_task import ImplementationTaskRead
 from app.schemas.story import (
     AssignStoryOwnerRequest,
     CreateStoryLaneRequest,
+    DraftStoryImplementationPlanRequest,
+    DraftStoryImplementationPlanResponse,
     DraftStoryLldRequest,
     DraftStoryLldResponse,
     StoryArtifactRead,
@@ -63,6 +65,11 @@ from app.services.markdown_sections import find_section
 from app.services.permissions import require_can_edit_stage
 from app.services.story_delivery import StoryDeliveryError, advance_lane, create_story_delivery_lane
 from app.services.story_export import parse_story_backlog
+from app.services.story_implementation_plan_agent import (
+    STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE,
+    StoryImplementationPlanError,
+    run_story_implementation_plan_agent,
+)
 from app.services.story_lld_agent import STORY_LLD_ARTIFACT_TYPE, StoryLldError, run_story_lld_agent
 from app.services.testing_agent import STORY_TEST_REPORT_ARTIFACT_TYPE
 
@@ -568,6 +575,33 @@ def update_lane_node_status(
         if evidence_error:
             raise HTTPException(status.HTTP_409_CONFLICT, evidence_error)
 
+    # Story Implementation Plan Agent, rule 4 — "Implementation cannot
+    # start before this plan is approved or accepted by assigned user."
+    # Unlike LLD_REVIEW/QA_APPROVAL, this stage's review is its own node
+    # (not a separate one right after it) — completing IMPLEMENTATION_PLAN
+    # IS acceptance. Gated to whoever the node is assigned to (if set) or
+    # a Tech Lead/Admin (the role this node is advisory-assigned to — see
+    # _NODE_ASSIGNED_ROLE["IMPLEMENTATION_PLAN"] in
+    # app/services/story_delivery.py); a real plan must exist to accept
+    # (an empty/undrafted stage can't be "approved"). "Request Changes" is
+    # not a separate action — it's this same endpoint with status=BLOCKED
+    # and a blocked_reason, exactly like every other node's rejection path.
+    if node.node_key == "IMPLEMENTATION_PLAN" and new_status == StoryDeliveryNodeStatus.COMPLETED:
+        is_assignee = node.assigned_user_id is not None and node.assigned_user_id == actor.id
+        if not is_assignee and actor.role not in (UserRole.TECH_LEAD, UserRole.ADMIN):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"Role {actor.role.value} may not accept this Implementation Plan — only its assigned user or a Tech Lead may.",
+            )
+        plan_artifact = (
+            db.query(StoryArtifact)
+            .filter(StoryArtifact.story_id == node.lane.story_id, StoryArtifact.artifact_type == STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE)
+            .order_by(StoryArtifact.version_number.desc())
+            .first()
+        )
+        if plan_artifact is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Cannot accept — no Implementation Plan has been drafted for this story yet.")
+
     # HARDENING FIX — "Human approval is required before final Done."
     # RELEASE_READY is this lane's terminal node; completing it is what
     # marks the story DONE (see advance_lane below). Until now nothing
@@ -603,6 +637,14 @@ def update_lane_node_status(
         db, story=story, action="story_lane_node.status_changed", actor=actor, lane_id=lane.id, node_id=node.id,
         details={"node_key": node.node_key, "from": previous_status.value, "to": new_status.value},
     )
+    if node.node_key == "IMPLEMENTATION_PLAN":
+        if new_status == StoryDeliveryNodeStatus.COMPLETED:
+            _log_story_activity(db, story=story, action="story_implementation_plan.accepted", actor=actor, lane_id=lane.id, node_id=node.id)
+        elif new_status == StoryDeliveryNodeStatus.BLOCKED:
+            _log_story_activity(
+                db, story=story, action="story_implementation_plan.changes_requested", actor=actor, lane_id=lane.id, node_id=node.id,
+                details={"reason": payload.blocked_reason},
+            )
 
     if new_status == StoryDeliveryNodeStatus.COMPLETED:
         unlocked = advance_lane(db, lane=lane, completed_node=node)
@@ -676,6 +718,62 @@ def get_story_lld(story_id: uuid.UUID, db: Session = Depends(get_db)) -> StoryAr
     )
     if artifact is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} has no Story LLD drafted yet.")
+    return artifact
+
+
+@router.post("/delivery-lane-nodes/{node_id}/draft-implementation-plan", response_model=DraftStoryImplementationPlanResponse)
+def draft_story_implementation_plan(
+    node_id: uuid.UUID, payload: DraftStoryImplementationPlanRequest, db: Session = Depends(get_db)
+) -> DraftStoryImplementationPlanResponse:
+    """Drafts the IMPLEMENTATION_PLAN node's real output. See
+    app/services/story_implementation_plan_agent.py for the preconditions
+    and the 12-section output shape. Drafting never completes the node —
+    see update_lane_node_status's IMPLEMENTATION_PLAN branch for the
+    separate Accept/Request Changes action."""
+    node = db.get(StoryDeliveryNode, node_id)
+    if node is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Delivery lane node {node_id} not found")
+    if node.node_key != "IMPLEMENTATION_PLAN":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Node {node_id} is '{node.node_key}', not IMPLEMENTATION_PLAN.")
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+    require_can_edit_stage(triggered_by, "story_implementation_plan")
+
+    try:
+        result = run_story_implementation_plan_agent(db, node=node, triggered_by=triggered_by)
+    except StoryImplementationPlanError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    lane = node.lane
+    story = db.get(Story, lane.story_id)
+    _log_story_activity(
+        db, story=story, action="story_implementation_plan.drafted", actor=triggered_by, lane_id=lane.id, node_id=node.id,
+        details={"needs_clarification": result.needs_clarification, "used_mock": result.agent_run_used_mock},
+    )
+
+    db.commit()
+    db.refresh(node)
+    return DraftStoryImplementationPlanResponse(
+        needs_clarification=result.needs_clarification,
+        story_artifact=StoryArtifactRead.model_validate(result.story_artifact) if result.story_artifact else None,
+        node_status=node.status.value,
+    )
+
+
+@router.get("/stories/{story_id}/implementation-plan", response_model=StoryArtifactRead)
+def get_story_implementation_plan(story_id: uuid.UUID, db: Session = Depends(get_db)) -> StoryArtifact:
+    """The latest STORY_IMPLEMENTATION_PLAN StoryArtifact for this story,
+    if one has been drafted yet."""
+    story = _get_story_or_404(db, story_id)
+    artifact = (
+        db.query(StoryArtifact)
+        .filter(StoryArtifact.story_id == story.id, StoryArtifact.artifact_type == STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE)
+        .order_by(StoryArtifact.version_number.desc())
+        .first()
+    )
+    if artifact is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} has no Implementation Plan drafted yet.")
     return artifact
 
 

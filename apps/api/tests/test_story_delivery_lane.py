@@ -227,6 +227,18 @@ def test_completing_the_final_node_completes_the_lane_and_marks_the_story_done(d
                 )
             )
             db.flush()
+        elif current.node_key == "IMPLEMENTATION_PLAN":
+            # Story Implementation Plan Agent, rule 4 — accepting the plan
+            # requires a real one to exist first. Fabricated directly.
+            from app.models import StoryArtifact
+            db.add(
+                StoryArtifact(
+                    story_id=story.id, lane_id=lane.id, node_id=current.id, artifact_type="story_implementation_plan",
+                    title="Implementation Plan", content_markdown="## Implementation Summary\nPlan.\n", version_number=1,
+                    created_by_id=actor.id,
+                )
+            )
+            db.flush()
         update_lane_node_status(current.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=actor.id), db)
 
     lane_after = get_story_delivery_lane(story.id, db)
@@ -259,6 +271,17 @@ def _drive_to_release_ready(db, project, actor):
                 StoryArtifact(
                     story_id=story.id, lane_id=lane.id, node_id=current.id, artifact_type="story_test_report",
                     title="Test Report", content_markdown="## Test Evidence\nPass: 1 · Fail: 0\n", version_number=1,
+                    created_by_id=actor.id,
+                )
+            )
+            db.flush()
+        elif current.node_key == "IMPLEMENTATION_PLAN":
+            from app.models import StoryArtifact
+
+            db.add(
+                StoryArtifact(
+                    story_id=story.id, lane_id=lane.id, node_id=current.id, artifact_type="story_implementation_plan",
+                    title="Implementation Plan", content_markdown="## Implementation Summary\nPlan.\n", version_number=1,
                     created_by_id=actor.id,
                 )
             )

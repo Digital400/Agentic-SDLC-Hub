@@ -23,7 +23,16 @@ import {
   ApiUser,
 } from "@/lib/api";
 
-type Tab = "lane" | "lld" | "implementation" | "pr-review" | "testing";
+type Tab = "lane" | "lld" | "implementation-plan" | "implementation" | "pr-review" | "testing";
+
+const TAB_LABELS: Record<Tab, string> = {
+  lane: "Lane",
+  lld: "LLD",
+  "implementation-plan": "Implementation Plan",
+  implementation: "Implementation",
+  "pr-review": "PR Review",
+  testing: "Testing",
+};
 
 const TEST_AGENT_TYPES: ApiTestAgentType[] = ["UNIT", "API", "UI", "REGRESSION", "SECURITY"];
 
@@ -50,6 +59,7 @@ export function StoryLaneWorkspace({
   initialLane,
   initialNodes,
   initialLld,
+  initialImplementationPlan,
   initialImplementationTask,
   initialImplementationRuns,
   initialTestRuns,
@@ -63,6 +73,7 @@ export function StoryLaneWorkspace({
   initialLane: ApiStoryDeliveryLane;
   initialNodes: ApiStoryDeliveryNode[];
   initialLld: ApiStoryArtifact | null;
+  initialImplementationPlan: ApiStoryArtifact | null;
   initialImplementationTask: ApiImplementationTask | null;
   initialImplementationRuns: ApiImplementationRun[];
   initialTestRuns: ApiTestRun[];
@@ -75,6 +86,7 @@ export function StoryLaneWorkspace({
   const [lane, setLane] = useState(initialLane);
   const [nodes, setNodes] = useState(initialNodes);
   const [lld, setLld] = useState(initialLld);
+  const [implementationPlan, setImplementationPlan] = useState(initialImplementationPlan);
   const [implementationTask, setImplementationTask] = useState(initialImplementationTask);
   const [implementationRuns, setImplementationRuns] = useState(initialImplementationRuns);
   const [testRuns, setTestRuns] = useState(initialTestRuns);
@@ -89,6 +101,7 @@ export function StoryLaneWorkspace({
 
   const storyLldNode = nodes.find((n) => n.node_key === "STORY_LLD") ?? null;
   const lldReviewNode = nodes.find((n) => n.node_key === "LLD_REVIEW") ?? null;
+  const implementationPlanNode = nodes.find((n) => n.node_key === "IMPLEMENTATION_PLAN") ?? null;
   const implementationLaneNode = nodes.find((n) => n.node_key === "IMPLEMENTATION") ?? null;
   const prReviewLaneNode = nodes.find((n) => n.node_key === "PR_REVIEW_AGENT") ?? null;
   const humanCodeReviewNode = nodes.find((n) => n.node_key === "HUMAN_CODE_REVIEW") ?? null;
@@ -110,6 +123,12 @@ export function StoryLaneWorkspace({
     } catch (err) {
       if (!(err instanceof ApiError && err.status === 404)) throw err;
       setLld(null);
+    }
+    try {
+      setImplementationPlan(await api.stories.getImplementationPlan(story.id));
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 404)) throw err;
+      setImplementationPlan(null);
     }
     try {
       const task = await api.stories.getImplementationTask(story.id);
@@ -252,10 +271,58 @@ export function StoryLaneWorkspace({
     }
   }
 
+  async function handleDraftImplementationPlan() {
+    if (currentUserId === null || implementationPlanNode === null) return;
+    setBusyNodeId(implementationPlanNode.id);
+    setError(null);
+    try {
+      const result = await api.storyDelivery.draftImplementationPlan(implementationPlanNode.id, currentUserId);
+      if (result.needs_clarification) {
+        setError("The agent needs more information before it can draft this story's Implementation Plan — see the generated notes.");
+      }
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to draft the Implementation Plan.");
+    } finally {
+      setBusyNodeId(null);
+    }
+  }
+
+  async function handleAcceptImplementationPlan() {
+    if (currentUserId === null || implementationPlanNode === null) return;
+    setBusyNodeId(implementationPlanNode.id);
+    setError(null);
+    try {
+      await api.storyDelivery.updateNodeStatus(implementationPlanNode.id, { status: "COMPLETED", actor_user_id: currentUserId });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to accept this Implementation Plan — only its assigned user or a Tech Lead may.");
+    } finally {
+      setBusyNodeId(null);
+    }
+  }
+
+  async function handleRequestChangesOnImplementationPlan() {
+    if (currentUserId === null || implementationPlanNode === null) return;
+    const reason = window.prompt("What changes are needed?") ?? "";
+    setBusyNodeId(implementationPlanNode.id);
+    setError(null);
+    try {
+      await api.storyDelivery.updateNodeStatus(implementationPlanNode.id, {
+        status: "BLOCKED", actor_user_id: currentUserId, blocked_reason: reason || "Changes requested.",
+      });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to request changes on this Implementation Plan.");
+    } finally {
+      setBusyNodeId(null);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex gap-1 border-b border-border">
-        {(["lane", "lld", "implementation", "pr-review", "testing"] as Tab[]).map((t) => (
+        {(["lane", "lld", "implementation-plan", "implementation", "pr-review", "testing"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -264,15 +331,7 @@ export function StoryLaneWorkspace({
               tab === t ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"
             )}
           >
-            {t === "lane"
-              ? "Lane"
-              : t === "lld"
-                ? "LLD"
-                : t === "implementation"
-                  ? "Implementation"
-                  : t === "pr-review"
-                    ? "PR Review"
-                    : "Testing"}
+            {TAB_LABELS[t]}
           </button>
         ))}
       </div>
@@ -374,6 +433,67 @@ export function StoryLaneWorkspace({
               <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
                 <FileText className="h-6 w-6" />
                 No Story LLD has been drafted yet.
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {tab === "implementation-plan" && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">Implementation Plan</CardTitle>
+              <CardDescription>
+                Scoped to exactly this story. Requires Story LLD approval. Does not generate code — see the
+                Implementation tab for that.
+                {implementationPlanNode && <> Node: {implementationPlanNode.status}.</>}
+              </CardDescription>
+            </div>
+            {implementationPlanNode && implementationPlanNode.status !== "LOCKED" && (
+              <Button
+                size="sm" variant="outline" onClick={handleDraftImplementationPlan}
+                disabled={busyNodeId === implementationPlanNode.id || currentUserId === null}
+              >
+                {busyNodeId === implementationPlanNode.id ? (
+                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                )}
+                {implementationPlan ? "Regenerate" : "Draft Implementation Plan"}
+              </Button>
+            )}
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            {implementationPlanNode?.status === "LOCKED" ? (
+              <p className="text-sm text-muted-foreground">Implementation Plan is locked — Story LLD must be approved first.</p>
+            ) : implementationPlan ? (
+              <>
+                <div className="max-h-[70vh] overflow-y-auto rounded-md border border-border bg-muted/30 p-4">
+                  <pre className="whitespace-pre-wrap font-sans text-sm">{implementationPlan.content_markdown}</pre>
+                </div>
+                {implementationPlanNode && implementationPlanNode.status !== "COMPLETED" && (
+                  <div className="flex gap-2">
+                    <Button size="sm" onClick={handleAcceptImplementationPlan} disabled={busyNodeId === implementationPlanNode.id}>
+                      <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Accept
+                    </Button>
+                    <Button
+                      size="sm" variant="outline" onClick={handleRequestChangesOnImplementationPlan}
+                      disabled={busyNodeId === implementationPlanNode.id}
+                    >
+                      <XCircle className="mr-1 h-3.5 w-3.5" /> Request Changes
+                    </Button>
+                  </div>
+                )}
+                {implementationPlanNode?.status === "COMPLETED" && <Badge variant="success">Accepted</Badge>}
+                {implementationPlanNode?.status === "BLOCKED" && implementationPlanNode.blocked_reason && (
+                  <p className="text-sm text-destructive">Changes requested: {implementationPlanNode.blocked_reason}</p>
+                )}
+              </>
+            ) : (
+              <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
+                <FileText className="h-6 w-6" />
+                No Implementation Plan has been drafted yet.
               </div>
             )}
           </CardContent>

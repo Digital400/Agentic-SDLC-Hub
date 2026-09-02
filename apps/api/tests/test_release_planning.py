@@ -74,6 +74,15 @@ def _drive_lane_to_release_ready(db, project, story, actor):
                 )
             )
             db.flush()
+        elif current.node_key == "IMPLEMENTATION_PLAN":
+            db.add(
+                StoryArtifact(
+                    story_id=story.id, lane_id=lane.id, node_id=current.id, artifact_type="story_implementation_plan",
+                    title="Implementation Plan", content_markdown="## Implementation Summary\nPlan.\n", version_number=1,
+                    created_by_id=actor.id,
+                )
+            )
+            db.flush()
         update_lane_node_status(current.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=actor.id), db)
 
 

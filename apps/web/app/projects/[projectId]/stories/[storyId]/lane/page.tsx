@@ -28,9 +28,13 @@ export default async function StoryLanePage({ params }: { params: { projectId: s
     throw err;
   }
 
-  const [nodes, lld, implementationTask] = await Promise.all([
+  const [nodes, lld, implementationPlan, implementationTask] = await Promise.all([
     api.storyDelivery.listNodes(lane.id),
     api.stories.getLld(story.id).catch((err) => {
+      if (err instanceof ApiError && err.status === 404) return null;
+      throw err;
+    }),
+    api.stories.getImplementationPlan(story.id).catch((err) => {
       if (err instanceof ApiError && err.status === 404) return null;
       throw err;
     }),
@@ -67,6 +71,7 @@ export default async function StoryLanePage({ params }: { params: { projectId: s
         initialLane={lane}
         initialNodes={nodes}
         initialLld={lld}
+        initialImplementationPlan={implementationPlan}
         initialImplementationTask={implementationTask}
         initialImplementationRuns={implementationRuns}
         initialTestRuns={testRuns}

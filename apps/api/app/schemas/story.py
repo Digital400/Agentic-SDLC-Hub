@@ -197,6 +197,16 @@ class DraftStoryLldResponse(BaseModel):
     node_status: str
 
 
+class DraftStoryImplementationPlanRequest(BaseModel):
+    triggered_by_user_id: uuid.UUID
+
+
+class DraftStoryImplementationPlanResponse(BaseModel):
+    needs_clarification: bool
+    story_artifact: StoryArtifactRead | None
+    node_status: str
+
+
 class SprintCreate(BaseModel):
     """Stories are NOT added here — see POST /sprints/{id}/stories. A
     sprint always starts empty; membership is its own explicit action."""

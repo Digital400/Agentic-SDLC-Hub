@@ -174,6 +174,17 @@ def test_implementation_plan_unlocks_only_after_lld_review_completes(db, project
     implementation = db.get(StoryDeliveryNode, nodes["IMPLEMENTATION"].id)
     assert implementation.status == StoryDeliveryNodeStatus.LOCKED
 
+    # Accepting IMPLEMENTATION_PLAN (Story Implementation Plan Agent, rule
+    # 4) requires a real plan to exist first — fabricated directly here.
+    from app.models import StoryArtifact
+    db.add(
+        StoryArtifact(
+            story_id=story.id, lane_id=lane.id, node_id=implementation_plan.id, artifact_type="story_implementation_plan",
+            title="Implementation Plan", content_markdown="## Implementation Summary\nPlan.\n", version_number=1,
+            created_by_id=tech_lead.id,
+        )
+    )
+    db.flush()
     update_lane_node_status(implementation_plan.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=tech_lead.id), db)
     implementation = db.get(StoryDeliveryNode, nodes["IMPLEMENTATION"].id)
     assert implementation.status == StoryDeliveryNodeStatus.READY

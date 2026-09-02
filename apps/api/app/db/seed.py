@@ -357,6 +357,59 @@ RICH_DEFAULT_PROMPTS: dict[str, dict] = {
             "Every unresolved decision or dependency is captured under Dependencies or Risks, not silently assumed",
         ],
     },
+    "story_implementation_plan": {
+        # Wired to the IMPLEMENTATION_PLAN story-delivery-lane node — see
+        # app/services/story_implementation_plan_agent.py's
+        # run_story_implementation_plan_agent, not any project-level
+        # WorkflowNode (same "no workflow_nodes row, this stage_key exists
+        # purely so the prompt has somewhere to live" reasoning as
+        # story_lld above).
+        "system_prompt": (
+            "You are the Story Implementation Plan Agent, working inside one story's own delivery lane. Given "
+            "the approved Story LLD and this one story's own fields, generate an implementation plan scoped to "
+            "exactly ONE story — the one this lane belongs to, identified in your input context. Do not include "
+            "any other story.\n\n"
+            "Rules:\n"
+            "1. Use only the approved Story LLD and this one story's own fields. Do not draw on anything else.\n"
+            "2. Do NOT generate code. Describe files, tasks, and steps in plain language — Code Implementation "
+            "is a separate, later lane stage that writes the actual code.\n"
+            "3. Ask clarification questions when required — if the input genuinely doesn't give you enough to "
+            "plan a section responsibly, use the clarification-questions response format instead of guessing.\n"
+            "4. Be concrete: name real files/folders where they're knowable from the LLD, real task boundaries "
+            "(backend vs. frontend vs. database/migration vs. configuration), not vague restatements of the LLD.\n"
+            "5. The suggested git branch name and PR title must be usable as-is, following common conventions "
+            "(short, kebab-case branch name; PR title that states what the story does).\n"
+            "6. State an estimated risk level (Low/Medium/High) and justify it briefly — don't just label it.\n"
+            "7. The step-by-step coding plan is the actual build order a developer should follow, not a "
+            "restatement of the task lists above it.\n"
+            "8. Rollback notes must describe how to safely undo this specific story's change if it goes wrong "
+            "after release — not generic advice.\n"
+            "9. This plan requires review before Implementation can start in this lane — either approval or "
+            "explicit acceptance by whoever it's assigned to; write it for that reviewer, not just for yourself."
+        ),
+        # This exact section set/order is required — not just descriptive
+        # prose. Keep in sync with
+        # app/services/story_implementation_plan_agent.py's
+        # STORY_IMPLEMENTATION_PLAN_SECTIONS constant.
+        "output_format": (
+            "Markdown with exactly these `## ` headings, in this order: Implementation Summary, Files/Folders "
+            "Likely Affected, Backend Tasks, Frontend Tasks, Database/Migration Tasks, Configuration Changes, "
+            "Test Tasks, Git Branch Name Suggestion, PR Title Suggestion, Estimated Risk Level, Step-by-Step "
+            "Coding Plan, Rollback Notes. Write 'None.' for a section that genuinely doesn't apply rather than "
+            "omitting it or leaving it blank."
+        ),
+        "validation_checklist": [
+            "All 12 required sections are present, in order, and none are blank without an explicit 'None.'",
+            "Scoped to exactly this one story — does not include any other story",
+            "Uses only the approved Story LLD and this story's own fields — nothing outside them",
+            "Contains no real code — descriptions and task lists only",
+            "Files/Folders Likely Affected and the task lists are concrete, not vague restatements of the LLD",
+            "Git Branch Name Suggestion and PR Title Suggestion are usable as-is",
+            "Estimated Risk Level states Low/Medium/High and briefly justifies it",
+            "Step-by-Step Coding Plan is an actual build order, not a repeat of the task lists above it",
+            "Rollback Notes are specific to this story's change, not generic advice",
+        ],
+    },
     "infrastructure_planning": {
         "system_prompt": (
             "You are the Infrastructure Planning agent, working on behalf of DevOps. Given the approved "
@@ -772,6 +825,34 @@ def _ensure_story_lld_agent(db: Session) -> AgentDefinition:
     _sync_default_prompt(
         db, agent=agent, role=AgentPromptRole.DRAFT, stage_key="story_lld",
         name="Story LLD — Draft Prompt",
+        system_prompt=rich["system_prompt"], output_format=rich["output_format"], validation_checklist=rich["validation_checklist"],
+    )
+    db.flush()
+    return agent
+
+
+def _ensure_story_implementation_plan_agent(db: Session) -> AgentDefinition:
+    """Ensures the story-implementation-plan-agent AgentDefinition + an
+    active DRAFT AgentPrompt exist — the IMPLEMENTATION_PLAN
+    story-delivery-lane node's real agent (see
+    app/services/story_implementation_plan_agent.py). Same reasoning as
+    _ensure_story_lld_agent above for why this is seeded on its own."""
+    agent_key = "story-implementation-plan-agent"
+    agent = db.query(AgentDefinition).filter(AgentDefinition.agent_key == agent_key).first()
+    if agent is None:
+        agent = AgentDefinition(
+            agent_key=agent_key,
+            name="Story Implementation Plan Agent",
+            description="Drafts an implementation plan scoped to exactly one story, for that story's own delivery lane.",
+            model_name="stub-no-model-configured",
+        )
+        db.add(agent)
+        db.flush()
+
+    rich = RICH_DEFAULT_PROMPTS["story_implementation_plan"]
+    _sync_default_prompt(
+        db, agent=agent, role=AgentPromptRole.DRAFT, stage_key="story_implementation_plan",
+        name="Story Implementation Plan — Draft Prompt",
         system_prompt=rich["system_prompt"], output_format=rich["output_format"], validation_checklist=rich["validation_checklist"],
     )
     db.flush()
@@ -1220,6 +1301,7 @@ def seed(db: Session) -> None:
     # template lists it, so it's ensured on its own.
     agent_definitions["story-lld-agent"] = _ensure_story_lld_agent(db)
     validator_definitions["story_lld"] = _ensure_story_lld_validator_definition(db)
+    agent_definitions["story-implementation-plan-agent"] = _ensure_story_implementation_plan_agent(db)
 
     # Not project-owned, so — like agent definitions/prompts above — this
     # runs unconditionally rather than being gated by the sample project

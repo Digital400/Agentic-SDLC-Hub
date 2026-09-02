@@ -1617,6 +1617,8 @@ export const api = {
     // 404s when no Story LLD has been drafted yet — callers should catch
     // ApiError with status 404 and treat it as "not drafted yet."
     getLld: (storyId: string) => get<ApiStoryArtifact>(`/stories/${storyId}/lld`),
+    // 404s when no Implementation Plan has been drafted yet.
+    getImplementationPlan: (storyId: string) => get<ApiStoryArtifact>(`/stories/${storyId}/implementation-plan`),
     // 404s until Story LLD/LLD_REVIEW is approved — see
     // app/api/routes/stories.py's _ensure_story_implementation_task.
     getImplementationTask: (storyId: string) => get<ApiImplementationTask>(`/stories/${storyId}/implementation-task`),
@@ -1634,6 +1636,11 @@ export const api = {
     draftStoryLld: (nodeId: string, triggeredByUserId: string) =>
       post<{ needs_clarification: boolean; story_artifact: ApiStoryArtifact | null; node_status: string }>(
         `/delivery-lane-nodes/${nodeId}/draft-story-lld`,
+        { triggered_by_user_id: triggeredByUserId }
+      ),
+    draftImplementationPlan: (nodeId: string, triggeredByUserId: string) =>
+      post<{ needs_clarification: boolean; story_artifact: ApiStoryArtifact | null; node_status: string }>(
+        `/delivery-lane-nodes/${nodeId}/draft-implementation-plan`,
         { triggered_by_user_id: triggeredByUserId }
       ),
   },
