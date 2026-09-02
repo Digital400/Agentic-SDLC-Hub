@@ -87,7 +87,8 @@
       "position": { "x": 880, "y": 0 },
       "fullContentArtifactTypes": ["solution_options_doc", "hld_document"],
       "ragTopK": 6,
-      "maxRagTokens": 2500
+      "maxRagTokens": 2500,
+      "outputTokenBudget": 8192
     },
     {
       "id": "lld",

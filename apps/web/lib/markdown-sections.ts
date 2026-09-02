@@ -21,12 +21,12 @@ export function splitMarkdownIntoSections(markdown: string): ArtifactSection[] {
   const sections: ArtifactSection[] = [];
   let currentTitle = "Content";
   let currentLines: string[] = [];
-  let sawHeading = false;
+  let currentIsSynthetic = true;
 
   function flush() {
     const content = currentLines.join("\n").trim();
-    if (content.length > 0 || sawHeading) {
-      sections.push({ id: nextSectionId(), title: currentTitle, contentMarkdown: content });
+    if (content.length > 0 || !currentIsSynthetic) {
+      sections.push({ id: nextSectionId(), title: currentTitle, contentMarkdown: content, isSynthetic: currentIsSynthetic });
     }
   }
 
@@ -36,7 +36,7 @@ export function splitMarkdownIntoSections(markdown: string): ArtifactSection[] {
       flush();
       currentTitle = headingMatch[1].trim();
       currentLines = [];
-      sawHeading = true;
+      currentIsSynthetic = false;
     } else {
       currentLines.push(line);
     }
@@ -46,7 +46,7 @@ export function splitMarkdownIntoSections(markdown: string): ArtifactSection[] {
   // No "##" headings at all (e.g. a title-only "#" document, or plain
   // text) — treat the whole thing as one section rather than losing content.
   if (sections.length === 0) {
-    return [{ id: nextSectionId(), title: "Content", contentMarkdown: markdown.trim() }];
+    return [{ id: nextSectionId(), title: "Content", contentMarkdown: markdown.trim(), isSynthetic: true }];
   }
   return sections;
 }
@@ -80,5 +80,13 @@ export function isClarificationRequest(markdown: string): boolean {
 }
 
 export function joinSectionsIntoMarkdown(sections: ArtifactSection[]): string {
-  return sections.map((s) => `## ${s.title}\n\n${s.contentMarkdown}`).join("\n\n");
+  // A synthetic "Content" section's title never existed in the source —
+  // writing it back as a literal "## Content" heading would permanently
+  // inject a heading the original document never had (this exact bug
+  // once turned a story backlog's intro paragraph into a "## Content"
+  // section on its very first save). Write its text as-is instead.
+  return sections
+    .map((s) => (s.isSynthetic ? s.contentMarkdown : `## ${s.title}\n\n${s.contentMarkdown}`))
+    .filter((part) => part.trim().length > 0)
+    .join("\n\n");
 }

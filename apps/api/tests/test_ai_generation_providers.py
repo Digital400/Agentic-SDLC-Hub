@@ -222,3 +222,50 @@ def test_generate_with_nvidia_raises_ai_generation_error_on_http_failure_and_nev
     with pytest.raises(AIGenerationError) as exc_info:
         _generate_with_nvidia("system", "user", 512)
     assert "nvapi-realsecret" not in str(exc_info.value)
+
+
+# --- truncation detection/disclosure ------------------------------------------------------
+# Regression coverage for the failure mode that silently cut a 15-story
+# backlog off after 4 stories with zero visible explanation: the output
+# token budget was hit, but nothing in the persisted document said so.
+
+
+def test_generate_with_openrouter_flags_truncation_on_finish_reason_length(monkeypatch):
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "{}\n---\nPartial content that got cut off"}, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+    result = _generate_with_openrouter("system", "user", 512)
+    assert result.truncated is True
+
+
+def test_generate_with_nvidia_does_not_flag_truncation_on_a_normal_stop(monkeypatch):
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(NVIDIA_API_KEY="nvapi-fake"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "{}\n---\nA complete answer"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+    result = _generate_with_nvidia("system", "user", 512)
+    assert result.truncated is False
+
+
+def test_append_truncation_warning_names_the_budget_and_the_fix():
+    warned = ai_generation._append_truncation_warning("Some cut-off draft", 2048)
+    assert "Some cut-off draft" in warned
+    assert "2048" in warned
+    assert "outputTokenBudget" in warned

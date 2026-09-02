@@ -373,6 +373,11 @@ export interface ArtifactSection {
   id: string;
   title: string;
   contentMarkdown: string;
+  /** True only for the synthesized leading "Content" section — a title
+   * that never actually appeared in the source document (see
+   * lib/markdown-sections.ts's splitMarkdownIntoSections). Undefined/
+   * falsy for every real `##`-heading section. */
+  isSynthetic?: boolean;
 }
 
 export interface ArtifactVersionSummary {

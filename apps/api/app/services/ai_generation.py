@@ -132,6 +132,13 @@ class AgentGenerationResult:
     total_tokens: int = 0
     cost: float = 0.0
     used_mock: bool = False
+    # True when the provider stopped because it hit output_token_budget,
+    # not because it finished — the model's own signal that this draft is
+    # cut off mid-document, not a real answer that happens to be short.
+    # `generate()` turns this into a visible warning appended to
+    # content_markdown (see its own comment) rather than silently
+    # persisting a truncated document with no explanation anywhere.
+    truncated: bool = False
     # Token Budget Service output (see app/services/token_budget.py) — the
     # pre-call estimate and the full per-block report, for AgentRun's
     # estimated-vs-actual token fields and its token_budget_report.
@@ -479,6 +486,7 @@ def _generate_with_anthropic(system_prompt: str, user_content: str, output_token
         total_tokens=prompt_tokens + completion_tokens,
         cost=_estimate_cost(settings.AI_MODEL, prompt_tokens, completion_tokens),
         used_mock=False,
+        truncated=response.stop_reason == "max_tokens",
     )
 
 
@@ -514,7 +522,8 @@ def _generate_with_openrouter(system_prompt: str, user_content: str, output_toke
         raise AIGenerationError(f"OpenRouter generation failed: {exc}") from exc
 
     data = response.json()
-    raw_text = data["choices"][0]["message"]["content"] or ""
+    choice = data["choices"][0]
+    raw_text = choice["message"]["content"] or ""
     needs_clarification, questions, body = _parse_response(raw_text)
     content_markdown = format_clarification_output(questions) if needs_clarification else body
 
@@ -536,6 +545,7 @@ def _generate_with_openrouter(system_prompt: str, user_content: str, output_toke
         # OpenRouter's own dashboard is the accurate source for real spend.
         cost=0.0,
         used_mock=False,
+        truncated=choice.get("finish_reason") == "length",
     )
 
 
@@ -573,7 +583,8 @@ def _generate_with_nvidia(system_prompt: str, user_content: str, output_token_bu
         raise AIGenerationError(f"NVIDIA generation failed: {exc}") from exc
 
     data = response.json()
-    raw_text = data["choices"][0]["message"]["content"] or ""
+    choice = data["choices"][0]
+    raw_text = choice["message"]["content"] or ""
     needs_clarification, questions, body = _parse_response(raw_text)
     content_markdown = format_clarification_output(questions) if needs_clarification else body
 
@@ -593,6 +604,7 @@ def _generate_with_nvidia(system_prompt: str, user_content: str, output_token_bu
         # paid rate that may not apply to the caller's account/quota.
         cost=0.0,
         used_mock=False,
+        truncated=choice.get("finish_reason") == "length",
     )
 
 
@@ -620,6 +632,12 @@ def _generate_with_gemini(system_prompt: str, user_content: str, output_token_bu
     prompt_tokens = (usage.prompt_token_count if usage else None) or 0
     completion_tokens = (usage.candidates_token_count if usage else None) or 0
 
+    # `finish_reason` is a FinishReason enum ("MAX_TOKENS", "STOP", ...) —
+    # compared as a string so a differently-typed value from a future SDK
+    # version degrades to "not truncated" rather than raising.
+    candidates = response.candidates or []
+    finish_reason = str(getattr(candidates[0], "finish_reason", "")) if candidates else ""
+
     return AgentGenerationResult(
         content_markdown=content_markdown,
         needs_clarification=needs_clarification,
@@ -632,6 +650,7 @@ def _generate_with_gemini(system_prompt: str, user_content: str, output_token_bu
         # a paid rate that may not apply to the caller's account.
         cost=0.0,
         used_mock=False,
+        truncated="MAX_TOKENS" in finish_reason.upper(),
     )
 
 
@@ -688,6 +707,7 @@ def _generate_with_ollama(system_prompt: str, user_content: str, output_token_bu
         # Ollama is completely free (runs locally), so cost is 0.0
         cost=0.0,
         used_mock=False,
+        truncated=response.get("done_reason") == "length",
     )
 
 
@@ -804,7 +824,25 @@ def generate(
 
     result.estimated_context_tokens = budget_result.estimated_tokens
     result.token_budget_report = budget_result.to_report_dict()
+
+    # A document truncated mid-sentence by the output token budget must
+    # never look like a complete draft with nothing more to say — this is
+    # exactly the failure mode that left a 15-story backlog silently
+    # cut off after 4 stories with no visible explanation anywhere.
+    if result.truncated and not result.needs_clarification:
+        result.content_markdown = _append_truncation_warning(result.content_markdown, output_token_budget)
+
     return result
+
+
+def _append_truncation_warning(content_markdown: str, output_token_budget: int) -> str:
+    return (
+        content_markdown.rstrip()
+        + "\n\n---\n\n> ⚠️ **Output truncated.** This draft hit its output token budget "
+        f"({output_token_budget} tokens) before the agent finished — content after this point is "
+        "missing, not just short. Increase this stage's `outputTokenBudget` in the workflow template "
+        "(see app/services/workflow_templates.py) or narrow the requested scope, then regenerate."
+    )
 
 
 def generate_raw_text(*, system_prompt: str, user_content: str, output_token_budget: int = 1024) -> str:
