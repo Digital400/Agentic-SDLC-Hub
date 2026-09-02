@@ -191,6 +191,19 @@ def test_completing_the_final_node_completes_the_lane_and_marks_the_story_done(d
     for _ in range(len(DEFAULT_STORY_DELIVERY_NODES)):
         nodes = list_lane_nodes(lane.id, db)
         current = next(n for n in nodes if n.status == StoryDeliveryNodeStatus.READY)
+        if current.node_key == "QA_APPROVAL":
+            # Story-level testing workflow's evidence gate — fabricate a
+            # minimal story_test_report with a real Test Evidence section
+            # (see app/api/routes/stories.py's _require_test_evidence).
+            from app.models import StoryArtifact
+            db.add(
+                StoryArtifact(
+                    story_id=story.id, lane_id=lane.id, node_id=current.id, artifact_type="story_test_report",
+                    title="Test Report", content_markdown="## Test Evidence\nPass: 1 · Fail: 0\n", version_number=1,
+                    created_by_id=actor.id,
+                )
+            )
+            db.flush()
         update_lane_node_status(current.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=actor.id), db)
 
     lane_after = get_story_delivery_lane(story.id, db)

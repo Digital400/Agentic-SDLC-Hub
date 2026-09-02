@@ -12,9 +12,10 @@ class ImplementationTaskRead(BaseModel):
 
     id: uuid.UUID
     project_id: uuid.UUID
-    workflow_node_id: uuid.UUID
-    artifact_id: uuid.UUID
-    artifact_version_id: uuid.UUID
+    story_id: uuid.UUID | None
+    workflow_node_id: uuid.UUID | None
+    artifact_id: uuid.UUID | None
+    artifact_version_id: uuid.UUID | None
     title: str
     description: str
     linked_story: str | None

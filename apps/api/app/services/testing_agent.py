@@ -33,8 +33,15 @@ from app.models.enums import TestAgentType
 from app.models.implementation_task import ImplementationTask
 from app.services.ai_generation import AIGenerationError, generate_raw_text, get_active_provider
 from app.services.retrieval import RetrievedChunk
+from app.services.story_export import Story
 
 logger = logging.getLogger(__name__)
+
+# Requirement 7 — the new artifact type a story-scoped test run produces
+# (see app/models/story_artifact.py). Distinct from the project-level
+# `test_report` Artifact type (workflows/sdlc-workflow.json's `testing`
+# node) — same reasoning as story_lld_agent.STORY_LLD_ARTIFACT_TYPE.
+STORY_TEST_REPORT_ARTIFACT_TYPE = "story_test_report"
 
 _VALID_RESULTS = {"PASS", "FAIL"}
 
@@ -75,6 +82,10 @@ class TestingAgentResult:
     tests_executed: list[TestExecuted] = field(default_factory=list)
     bugs_found: list[str] = field(default_factory=list)
     suggested_fixes: list[str] = field(default_factory=list)  # rule: "can suggest fixes"
+    # Requirement 5 — evidence attachments (a CI run URL, a screenshot
+    # description, etc.), additive to the Test Evidence section's own
+    # disclosure text.
+    evidence_attachments: list[str] = field(default_factory=list)
     used_mock: bool = True
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -99,7 +110,12 @@ def is_test_path(path: str) -> bool:
 
 
 def _build_heuristic_result(
-    *, task: ImplementationTask, agent_type: TestAgentType, diff_text: str, existing_test_paths: list[str]
+    *,
+    task: ImplementationTask,
+    agent_type: TestAgentType,
+    diff_text: str,
+    existing_test_paths: list[str],
+    story: Story | None = None,
 ) -> TestingAgentResult:
     criteria = task.acceptance_criteria or [f"{task.title} behaves as described."]
     test_plan_lines = [f"- Verify: {c}" for c in criteria]
@@ -163,6 +179,7 @@ def _run_real_agent(
     lld_summary: str,
     existing_test_paths: list[str],
     pattern_chunks: list[RetrievedChunk],
+    story: Story | None = None,
 ) -> TestingAgentResult:
     # Plain substring replace, not str.format — the template's JSON-shape
     # examples contain literal `{`/`}` that .format() would misparse as
@@ -170,9 +187,16 @@ def _run_real_agent(
     system_prompt = _SYSTEM_PROMPT_TEMPLATE.replace("{framing}", _AGENT_TYPE_FRAMING[agent_type])
 
     patterns_text = "\n".join(f"## Pattern: {c.source_title}\n{c.content}" for c in pattern_chunks) or "(none found)"
+    story_text = (
+        f"Title: {story.title}\nUser story: {story.user_story}\n"
+        f"Acceptance criteria: {'; '.join(story.acceptance_criteria)}"
+        if story
+        else "(no related story found)"
+    )
     user_content = (
         f"# Task\nTitle: {task.title}\nDescription: {task.description}\n"
         f"Acceptance criteria: {'; '.join(task.acceptance_criteria) or '(none declared)'}\n\n"
+        f"# Related story\n{story_text}\n\n"
         f"# Approved LLD summary\n{lld_summary or '(not available)'}\n\n"
         f"# PR diff\n{diff_text or '(no diff available)'}\n\n"
         f"# Existing test files in the repository\n{', '.join(existing_test_paths) or '(none found)'}\n\n"
@@ -217,21 +241,24 @@ def run_testing_agent(
     lld_summary: str,
     existing_test_paths: list[str],
     pattern_chunks: list[RetrievedChunk],
+    story: Story | None = None,
 ) -> TestingAgentResult:
     """Real AI when configured; the deterministic heuristic otherwise, or if
     the real call errors or returns unparseable JSON (logged, not raised —
-    same contract as every other agent in this codebase)."""
+    same contract as every other agent in this codebase). `story`
+    (requirement 4) is additive context — a story-scoped run's task
+    already carries the same acceptance criteria either way."""
+    kwargs = dict(
+        task=task, agent_type=agent_type, diff_text=diff_text, existing_test_paths=existing_test_paths, story=story,
+    )
     if get_active_provider() == "mock":
-        return _build_heuristic_result(task=task, agent_type=agent_type, diff_text=diff_text, existing_test_paths=existing_test_paths)
+        return _build_heuristic_result(**kwargs)
 
     try:
-        return _run_real_agent(
-            task=task, agent_type=agent_type, diff_text=diff_text, lld_summary=lld_summary,
-            existing_test_paths=existing_test_paths, pattern_chunks=pattern_chunks,
-        )
+        return _run_real_agent(lld_summary=lld_summary, pattern_chunks=pattern_chunks, **kwargs)
     except (AIGenerationError, json.JSONDecodeError, ValueError, TypeError, AttributeError, KeyError) as exc:
         logger.warning("Real-AI testing agent failed (%s); falling back to heuristic scaffold.", exc)
-        return _build_heuristic_result(task=task, agent_type=agent_type, diff_text=diff_text, existing_test_paths=existing_test_paths)
+        return _build_heuristic_result(**kwargs)
 
 
 # --- Rendered artifact content -----------------------------------------------------------
@@ -273,6 +300,9 @@ def render_test_report_markdown(result: TestingAgentResult, *, task: Implementat
             parts.append(f"- [{t.result}] {t.name} — {t.notes}")
     else:
         parts.append("No test execution assessment was produced.")
+    if result.evidence_attachments:
+        parts.append("\nAttachments:")
+        parts += [f"- {a}" for a in result.evidence_attachments]
 
     parts.append("\n## Defects Found\n")
     parts.append("\n".join(f"- {b}" for b in result.bugs_found) if result.bugs_found else "None.")

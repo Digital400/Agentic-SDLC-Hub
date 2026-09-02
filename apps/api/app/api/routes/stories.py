@@ -40,6 +40,7 @@ from app.models import (
     UserRole,
     WorkflowNode,
 )
+from app.schemas.implementation_task import ImplementationTaskRead
 from app.schemas.story import (
     AssignStoryOwnerRequest,
     CreateStoryLaneRequest,
@@ -58,10 +59,12 @@ from app.schemas.story import (
 )
 from app.services.audit import record_audit_log
 from app.services.implementation_planner import AREA_TO_AGENT_TYPE, _infer_area
+from app.services.markdown_sections import find_section
 from app.services.permissions import require_can_edit_stage
 from app.services.story_delivery import StoryDeliveryError, advance_lane, create_story_delivery_lane
 from app.services.story_export import parse_story_backlog
 from app.services.story_lld_agent import STORY_LLD_ARTIFACT_TYPE, StoryLldError, run_story_lld_agent
+from app.services.testing_agent import STORY_TEST_REPORT_ARTIFACT_TYPE
 
 router = APIRouter(tags=["stories"])
 
@@ -489,6 +492,24 @@ def list_lane_nodes(lane_id: uuid.UUID, db: Session = Depends(get_db)) -> list[S
     )
 
 
+_QA_APPROVAL_REQUIRED_EVIDENCE_SECTION = "Test Evidence"
+
+
+def _require_test_evidence(test_report: StoryArtifact | None) -> str | None:
+    """Requirement 6 — structural check only (the heading exists and has
+    real content), same limitation app/services/graph_engine.py's
+    validate_evidence_requirement discloses for the project-level
+    equivalent: it does not verify the substance of what's written there."""
+    if test_report is None:
+        return "Cannot grant QA Approval — no test report has been generated for this story yet."
+    section = find_section(test_report.content_markdown, _QA_APPROVAL_REQUIRED_EVIDENCE_SECTION)
+    if section is None:
+        return f"Cannot grant QA Approval — the test report has no '{_QA_APPROVAL_REQUIRED_EVIDENCE_SECTION}' section."
+    if not section["content"].strip():
+        return f"Cannot grant QA Approval — the '{_QA_APPROVAL_REQUIRED_EVIDENCE_SECTION}' section is present but empty."
+    return None
+
+
 @router.patch("/delivery-lane-nodes/{node_id}", response_model=StoryDeliveryNodeRead)
 def update_lane_node_status(
     node_id: uuid.UUID, payload: UpdateLaneNodeStatusRequest, db: Session = Depends(get_db)
@@ -525,6 +546,27 @@ def update_lane_node_status(
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, f"Role {actor.role.value} may not approve Story LLD (LLD_REVIEW) — Tech Lead only."
         )
+
+    # Story-level testing workflow, requirement 6 — "QA Approval requires
+    # test evidence." QA_APPROVAL is the dedicated review-gate node right
+    # after TESTING (mirrors LLD_REVIEW's own role gate above); completing
+    # it requires both a QA (or Admin) actor AND a non-empty "Test
+    # Evidence" section in the latest story_test_report StoryArtifact —
+    # the same structural check GraphEngineService.validate_evidence_requirement
+    # already does for the project-level testing stage, applied here to a
+    # StoryArtifact instead of an ArtifactVersion.
+    if node.node_key == "QA_APPROVAL" and new_status == StoryDeliveryNodeStatus.COMPLETED:
+        if actor.role not in (UserRole.QA, UserRole.ADMIN):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"Role {actor.role.value} may not grant QA Approval — QA only.")
+        test_report = (
+            db.query(StoryArtifact)
+            .filter(StoryArtifact.story_id == node.lane.story_id, StoryArtifact.artifact_type == STORY_TEST_REPORT_ARTIFACT_TYPE)
+            .order_by(StoryArtifact.version_number.desc())
+            .first()
+        )
+        evidence_error = _require_test_evidence(test_report)
+        if evidence_error:
+            raise HTTPException(status.HTTP_409_CONFLICT, evidence_error)
 
     if payload.assigned_user_id is not None:
         assigned_user = db.get(User, payload.assigned_user_id)
@@ -620,6 +662,35 @@ def get_story_lld(story_id: uuid.UUID, db: Session = Depends(get_db)) -> StoryAr
     )
     if artifact is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} has no Story LLD drafted yet.")
+    return artifact
+
+
+@router.get("/stories/{story_id}/implementation-task", response_model=ImplementationTaskRead)
+def get_story_implementation_task(story_id: uuid.UUID, db: Session = Depends(get_db)) -> ImplementationTask:
+    """Story-level implementation workflow, requirement 1 — this story's
+    one ImplementationTask (see _ensure_story_implementation_task, which
+    creates it the moment Story LLD/LLD_REVIEW is approved)."""
+    story = _get_story_or_404(db, story_id)
+    task = db.query(ImplementationTask).filter(ImplementationTask.story_id == story.id).first()
+    if task is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} has no implementation task yet.")
+    return task
+
+
+@router.get("/stories/{story_id}/test-report", response_model=StoryArtifactRead)
+def get_story_test_report(story_id: uuid.UUID, db: Session = Depends(get_db)) -> StoryArtifact:
+    """Story-level testing workflow, requirement 7 — the latest
+    story_test_report StoryArtifact for this story, if one has been
+    generated yet (see app/services/testing_agent.STORY_TEST_REPORT_ARTIFACT_TYPE)."""
+    story = _get_story_or_404(db, story_id)
+    artifact = (
+        db.query(StoryArtifact)
+        .filter(StoryArtifact.story_id == story.id, StoryArtifact.artifact_type == STORY_TEST_REPORT_ARTIFACT_TYPE)
+        .order_by(StoryArtifact.version_number.desc())
+        .first()
+    )
+    if artifact is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} has no test report yet.")
     return artifact
 
 
