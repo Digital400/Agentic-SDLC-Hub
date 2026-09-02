@@ -63,6 +63,7 @@ class JiraProject:
 class JiraIssue:
     key: str
     url: str
+    id: str = ""
 
 
 def _auth(email: str, api_token: str) -> httpx.BasicAuth:
@@ -180,7 +181,7 @@ def create_issue(
         json_body={"fields": fields}, transport=transport,
     ).json()
     issue_key = data["key"]
-    return JiraIssue(key=issue_key, url=f"{base_url.rstrip('/')}/browse/{issue_key}")
+    return JiraIssue(key=issue_key, id=str(data.get("id", "")), url=f"{base_url.rstrip('/')}/browse/{issue_key}")
 
 
 def get_issue_status(

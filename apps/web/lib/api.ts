@@ -413,6 +413,11 @@ export interface ApiStory {
   created_by_id: string;
   created_at: string;
   updated_at: string;
+  // Real, stored fields — see app/models/story.py. jira_sync_status is
+  // this app's own create-state machine, distinct from jira_status
+  // below (Jira's own live workflow status).
+  jira_sync_status: "NOT_SYNCED" | "SYNC_PENDING" | "SYNCED" | "SYNC_FAILED";
+  jira_issue_id: string | null;
   // Computed server-side — see app/api/routes/stories.py's _story_to_read.
   lane_status: string;
   jira_status: string;
@@ -633,7 +638,12 @@ export interface ApiJiraFieldMapping {
   linked_issues_placeholder: string[];
 }
 
-export interface ApiStoryJiraPreview {
+// NOTE: distinct from ApiStoryJiraPreview below (the real per-story sync
+// preview, app/services/story_jira_sync.py) — this one is the older,
+// local, no-connection whole-backlog preview (app/services/jira_export.py).
+// Named differently to avoid a TypeScript declaration-merging collision
+// that silently unioned the two shapes together before this fix.
+export interface ApiJiraExportStoryPreview {
   story_title: string;
   jira_issue_type: string;
   mapping: ApiJiraFieldMapping;
@@ -649,7 +659,7 @@ export interface ApiJiraExportPreview {
   valid_story_count: number;
   has_errors: boolean;
   overall_errors: string[];
-  stories: ApiStoryJiraPreview[];
+  stories: ApiJiraExportStoryPreview[];
   push_to_jira_enabled: boolean;
 }
 
@@ -766,9 +776,14 @@ export interface ApiStoryJiraPreview {
   priority: string | null;
   story_points: number | null;
   sprint_name: string | null;
+  labels: string[];
   subtasks: ApiStoryJiraSubtaskPreview[];
   validation_errors: string[];
   already_linked: ApiJiraIssueLink | null;
+}
+
+export interface ApiBulkStoryJiraPreviewResponse {
+  previews: ApiStoryJiraPreview[];
 }
 
 export interface ApiSubtaskJiraSyncResult {
@@ -1464,6 +1479,8 @@ export const api = {
     // components/stories/stories-view.tsx). Bulk sync only ever touches
     // the exact `story_ids` passed in — never an implicit "sync all".
     storyPreview: (storyId: string) => get<ApiStoryJiraPreview>(`/jira/stories/${storyId}/preview`),
+    bulkPreviewStories: (storyIds: string[]) =>
+      post<ApiBulkStoryJiraPreviewResponse>("/jira/stories/bulk-preview", { story_ids: storyIds }),
     syncStory: (storyId: string, body: { triggered_by_user_id: string }) =>
       post<ApiStoryJiraSyncResult>(`/jira/stories/${storyId}/sync`, body),
     bulkSyncStories: (body: { story_ids: string[]; triggered_by_user_id: string }) =>

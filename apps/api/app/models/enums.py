@@ -428,6 +428,25 @@ class ReleaseStatus(str, enum.Enum):
     CANCELLED = "CANCELLED"
 
 
+class StoryJiraSyncStatus(str, enum.Enum):
+    """A Story's own Jira sync state machine — see app/models/story.py's
+    `jira_sync_status`. Distinct from a JiraIssueLink's `jira_status`
+    (Jira's own live workflow status, e.g. "In Progress", pulled back by
+    GET /jira/projects/{id}/sync-status): this tracks whether *this app*
+    has successfully created the issue, not what state it's since moved
+    to on the Jira board.
+
+    NOT_SYNCED -> SYNC_PENDING -> SYNCED | SYNC_FAILED. A SYNC_FAILED
+    story can be retried (back to SYNC_PENDING) — sync failure never
+    deletes or otherwise damages the internal Story row (see
+    app/services/story_jira_sync.py)."""
+
+    NOT_SYNCED = "NOT_SYNCED"
+    SYNC_PENDING = "SYNC_PENDING"
+    SYNCED = "SYNCED"
+    SYNC_FAILED = "SYNC_FAILED"
+
+
 class StoryDeliveryLaneStatus(str, enum.Enum):
     """One story's own delivery lane (see app/models/story_delivery_lane.py)
     — a dedicated, self-contained graph per story, deliberately NOT the

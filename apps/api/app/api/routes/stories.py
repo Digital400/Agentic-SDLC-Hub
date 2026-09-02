@@ -155,7 +155,7 @@ def _story_to_read(db: Session, story: Story) -> StoryRead:
             "lane_status": _lane_status_label(story),
             "jira_status": jira_status,
             "jira_issue_key": (jira_link.jira_issue_key if jira_link is not None else story.jira_issue_key),
-            "jira_issue_url": jira_link.jira_issue_url if jira_link is not None else None,
+            "jira_issue_url": jira_link.jira_issue_url if jira_link is not None else story.jira_issue_url,
         }
     )
 

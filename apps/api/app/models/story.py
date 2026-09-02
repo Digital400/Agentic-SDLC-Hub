@@ -7,7 +7,7 @@ from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Integer, String, Text, 
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from app.models.enums import StoryStatus, StoryType
+from app.models.enums import StoryJiraSyncStatus, StoryStatus, StoryType
 
 
 class Story(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -101,6 +101,21 @@ class Story(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # from jira_issue_type above (the *kind* of issue to create — Story/
     # Task/Sub-task — stated by the agent before any push ever happens).
     jira_issue_key: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Requirement 6 — Jira's own numeric/opaque issue id and the browsable
+    # issue URL, stored alongside the key so a UI never has to re-derive
+    # or look them up from JiraIssueLink to render "Open Jira". Set
+    # together with jira_issue_key by sync_story_to_jira
+    # (app/services/story_jira_sync.py) — never independently.
+    jira_issue_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    jira_issue_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Requirement 1 — this story's own Jira sync state machine, distinct
+    # from a JiraIssueLink's live jira_status (Jira's own workflow
+    # column). See app/models/enums.py's StoryJiraSyncStatus.
+    jira_sync_status: Mapped[StoryJiraSyncStatus] = mapped_column(
+        Enum(StoryJiraSyncStatus, native_enum=False, length=20, validate_strings=True),
+        default=StoryJiraSyncStatus.NOT_SYNCED,
+        nullable=False,
+    )
 
     # Denormalized "current owner" for quick reads — the field of record
     # for who owns this story right now. app/models/story_assignee.py

@@ -171,6 +171,7 @@ class StoryJiraPreviewRead(BaseModel):
     priority: str | None
     story_points: int | None
     sprint_name: str | None
+    labels: list[str] = Field(default_factory=list)
     subtasks: list[StoryJiraSubtaskPreviewRead]
     validation_errors: list[str]
     already_linked: JiraIssueLinkRead | None
@@ -178,6 +179,19 @@ class StoryJiraPreviewRead(BaseModel):
     @property
     def is_valid(self) -> bool:
         return len(self.validation_errors) == 0
+
+
+class BulkPreviewStoriesToJiraRequest(BaseModel):
+    """Requirement 4 — preview several stories' Jira payloads in one
+    call, e.g. to render every checkbox-selected story's summary/
+    description/validation state before offering the bulk-sync
+    confirmation. Never syncs anything by itself."""
+
+    story_ids: list[uuid.UUID] = Field(..., min_length=1)
+
+
+class BulkStoryJiraPreviewResponse(BaseModel):
+    previews: list[StoryJiraPreviewRead]
 
 
 class SyncStoryToJiraRequest(BaseModel):

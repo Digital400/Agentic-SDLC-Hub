@@ -20,6 +20,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.routes.jira_integration import (
+    bulk_preview_stories_jira,
     bulk_sync_stories_jira,
     connect_jira,
     create_jira_project_link,
@@ -29,23 +30,27 @@ from app.api.routes.jira_integration import (
 )
 import app.api.routes.jira_integration as jira_routes
 from app.models import (
+    Artifact,
+    ArtifactStatus,
     AuditLog,
     JiraIssueLink,
     JiraSourceType,
     Sprint,
     SprintStatus,
     Story,
+    StoryJiraSyncStatus,
     StoryStatus,
     User,
     UserRole,
 )
 from app.schemas.jira_integration import (
+    BulkPreviewStoriesToJiraRequest,
     BulkSyncStoriesToJiraRequest,
     ConnectJiraRequest,
     CreateJiraProjectLinkRequest,
     SyncStoryToJiraRequest,
 )
-from app.services.jira_integration import JiraIssue, JiraProject, JiraUser
+from app.services.jira_integration import JiraIntegrationError, JiraIssue, JiraProject, JiraUser
 from tests.conftest import make_approved_artifact, make_implementation_task, make_node, make_story
 
 REAL_TOKEN = "ATATT3xFfGF0ThisIsARealSecretJiraApiToken1234567890"
@@ -72,8 +77,8 @@ def _mock_jira(monkeypatch):
     def _create_issue(base_url, email, token, *, project_key, issue_type, summary, description, parent_key=None, labels=None, priority=None, **kw):
         num = len(created) + 1
         key = f"{project_key}-{num}"
-        created.append({"issue_type": issue_type, "summary": summary, "description": description, "parent_key": parent_key, "priority": priority})
-        return JiraIssue(key=key, url=f"{base_url}/browse/{key}")
+        created.append({"issue_type": issue_type, "summary": summary, "description": description, "parent_key": parent_key, "priority": priority, "labels": labels})
+        return JiraIssue(key=key, id=f"1000{num}", url=f"{base_url}/browse/{key}")
 
     monkeypatch.setattr(jira_routes.jira_api, "create_issue", _create_issue)
     monkeypatch.setattr(jira_routes.jira_api, "get_issue_status", lambda *a, **kw: "In Progress")
@@ -283,3 +288,138 @@ def test_sync_status_does_not_touch_story_for_non_terminal_status(db, project, a
 
     db.refresh(story)
     assert story.status != StoryStatus.DONE
+
+
+# --- Sync status field (new requirement) ---------------------------------------------------
+
+
+def test_sync_sets_sync_status_synced_and_stores_id_and_url(db, project, actor, monkeypatch):
+    _connect_and_link(db, actor, project, monkeypatch)
+    story = _make_full_story(db, project, actor)
+    dev = _developer(db)
+    assert story.jira_sync_status == StoryJiraSyncStatus.NOT_SYNCED
+
+    sync_story_jira(story.id, SyncStoryToJiraRequest(triggered_by_user_id=dev.id), db)
+
+    db.refresh(story)
+    assert story.jira_sync_status == StoryJiraSyncStatus.SYNCED
+    assert story.jira_issue_id == "10001"
+    assert story.jira_issue_url == f"https://example.atlassian.net/browse/{story.jira_issue_key}"
+
+
+def test_sync_failure_sets_sync_failed_and_never_deletes_the_story(db, project, actor, monkeypatch):
+    """Rule 3 — sync failure must not delete the internal story."""
+    _connect_and_link(db, actor, project, monkeypatch)
+    story = _make_full_story(db, project, actor)
+    dev = _developer(db)
+
+    def _boom(*a, **kw):
+        raise JiraIntegrationError("Jira API returned 500: boom", status_code=500)
+
+    monkeypatch.setattr(jira_routes.jira_api, "create_issue", _boom)
+
+    result = sync_story_jira(story.id, SyncStoryToJiraRequest(triggered_by_user_id=dev.id), db)
+
+    assert result.status == "failed"
+    db.refresh(story)
+    assert story.jira_sync_status == StoryJiraSyncStatus.SYNC_FAILED
+    assert story.jira_issue_key is None
+    # The story row itself still exists, untouched otherwise.
+    assert db.get(Story, story.id) is not None
+    assert db.get(Story, story.id).title == story.title
+
+
+def test_invalid_story_sync_also_sets_sync_failed(db, project, actor, monkeypatch):
+    _connect_and_link(db, actor, project, monkeypatch)
+    story = _make_full_story(db, project, actor, priority="Not A Real Priority")
+    dev = _developer(db)
+
+    sync_story_jira(story.id, SyncStoryToJiraRequest(triggered_by_user_id=dev.id), db)
+
+    db.refresh(story)
+    assert story.jira_sync_status == StoryJiraSyncStatus.SYNC_FAILED
+    assert db.get(Story, story.id) is not None
+
+
+# --- Approval gate (rule 2) ----------------------------------------------------------------
+
+
+def test_story_from_an_unapproved_backlog_cannot_sync(db, project, actor, monkeypatch):
+    _connect_and_link(db, actor, project, monkeypatch)
+    node = make_node(db, project, node_key="story_crafting", order_index=0, output_artifact_type="story_backlog")
+    artifact = make_approved_artifact(db, project, node, actor)
+    story = make_story(db, project, actor, artifact.current_version_id, title="Draft Story")
+    # Revert the origin artifact back to DRAFT after the story was synced from it.
+    artifact_row = db.get(Artifact, artifact.id)
+    artifact_row.status = ArtifactStatus.DRAFT
+    db.flush()
+    dev = _developer(db)
+
+    preview = get_story_jira_preview(story.id, db)
+    assert not preview.is_valid
+    assert any("APPROVED" in e for e in preview.validation_errors)
+
+    result = sync_story_jira(story.id, SyncStoryToJiraRequest(triggered_by_user_id=dev.id), db)
+    assert result.status == "skipped_invalid"
+    assert db.get(Story, story.id).jira_issue_key is None
+
+
+def test_a_directly_created_story_has_no_approval_gate(db, project, actor, monkeypatch):
+    """A story with no origin backlog (created directly) has no
+    draft/approval concept of its own — treated as approved by
+    construction, same reasoning as app/api/routes/sprints.py's own
+    _require_story_is_approved."""
+    _connect_and_link(db, actor, project, monkeypatch)
+    from app.models import StoryType
+
+    story = Story(
+        project_id=project.id, source_artifact_version_id=None, story_type=StoryType.VERTICAL, title="Direct Story",
+        user_story="As a user...", priority="High", created_by_id=actor.id,
+    )
+    db.add(story)
+    db.flush()
+
+    preview = get_story_jira_preview(story.id, db)
+    assert preview.is_valid
+
+
+# --- Labels + internal reference (Jira mapping) --------------------------------------------
+
+
+def test_labels_mapped_from_technical_areas(db, project, actor, monkeypatch):
+    _, created = _connect_and_link(db, actor, project, monkeypatch)
+    story = _make_full_story(db, project, actor)
+    story.technical_areas = ["Backend API", "Database"]
+    db.flush()
+    dev = _developer(db)
+
+    preview = get_story_jira_preview(story.id, db)
+    assert preview.labels == ["backend-api", "database"]
+
+    sync_story_jira(story.id, SyncStoryToJiraRequest(triggered_by_user_id=dev.id), db)
+    assert created[0]["labels"] == ["backend-api", "database"]
+
+
+def test_internal_story_id_is_in_the_description(db, project, actor, monkeypatch):
+    _connect_and_link(db, actor, project, monkeypatch)
+    story = _make_full_story(db, project, actor)
+
+    preview = get_story_jira_preview(story.id, db)
+    assert f"Internal Story ID: {story.id}" in preview.description
+
+
+# --- Bulk preview (requirement 4) -----------------------------------------------------------
+
+
+def test_bulk_preview_reports_every_named_story(db, project, actor, monkeypatch):
+    _connect_and_link(db, actor, project, monkeypatch)
+    story_a = _make_full_story(db, project, actor, title="Story A")
+    story_b = _make_full_story(db, project, actor, title="Story B", priority="Not Real")
+
+    response = bulk_preview_stories_jira(BulkPreviewStoriesToJiraRequest(story_ids=[story_a.id, story_b.id]), db)
+
+    by_id = {p.story_id: p for p in response.previews}
+    assert by_id[story_a.id].is_valid
+    assert not by_id[story_b.id].is_valid
+    # Bulk preview never calls Jira or writes anything.
+    assert db.get(Story, story_a.id).jira_sync_status == StoryJiraSyncStatus.NOT_SYNCED

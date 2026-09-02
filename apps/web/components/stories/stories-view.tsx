@@ -4,6 +4,7 @@ import { Fragment, useState } from "react";
 import Link from "next/link";
 import {
   CalendarPlus,
+  CheckSquare,
   ClipboardList,
   Eye,
   ExternalLink,
@@ -29,8 +30,21 @@ const MODE_HELPER_TEXT: Record<"VERTICAL" | "HORIZONTAL", string> = {
   HORIZONTAL: "Creates technical layer stories such as frontend, backend, database, integration, infra, testing, or documentation.",
 };
 
-function jiraBadgeVariant(status: string): "success" | "gray" {
-  return status === "Not Synced" ? "gray" : "success";
+// This app's own Jira create-state machine (Story.jira_sync_status) —
+// distinct from story.jira_status below, which is Jira's own live
+// workflow status once synced.
+const SYNC_STATUS_LABEL: Record<ApiStory["jira_sync_status"], string> = {
+  NOT_SYNCED: "Not Synced",
+  SYNC_PENDING: "Syncing…",
+  SYNCED: "Synced",
+  SYNC_FAILED: "Sync Failed",
+};
+
+function syncStatusBadgeVariant(status: ApiStory["jira_sync_status"]): "success" | "gray" | "warning" | "destructive" {
+  if (status === "SYNCED") return "success";
+  if (status === "SYNC_PENDING") return "warning";
+  if (status === "SYNC_FAILED") return "destructive";
+  return "gray";
 }
 
 function laneBadgeVariant(status: string): "gray" | "info" | "success" {
@@ -102,6 +116,12 @@ export function StoriesView({
   const [previewingId, setPreviewingId] = useState<string | null>(null);
   const [preview, setPreview] = useState<ApiStoryJiraPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  // Requirement 4/5/rule — bulk preview + bulk sync, always in that
+  // order: bulkPreviews is populated before any bulk-sync call is ever
+  // reachable.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkPreviews, setBulkPreviews] = useState<ApiStoryJiraPreview[] | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   function updateStory(updated: ApiStory) {
     setStories((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
@@ -201,6 +221,47 @@ export function StoriesView({
     }
   }
 
+  function toggleSelected(storyId: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(storyId)) next.delete(storyId);
+      else next.add(storyId);
+      return next;
+    });
+  }
+
+  async function handleOpenBulkPreview() {
+    if (selectedIds.size === 0) return;
+    setBulkBusy(true);
+    setBulkPreviews(null);
+    setError(null);
+    try {
+      const response = await api.jira.bulkPreviewStories(Array.from(selectedIds));
+      setBulkPreviews(response.previews);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to load the bulk Jira preview.");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function handleConfirmBulkSync() {
+    if (currentUserId === null || bulkPreviews === null) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      await api.jira.bulkSyncStories({ story_ids: Array.from(selectedIds), triggered_by_user_id: currentUserId });
+      const refreshed = await api.stories.list(projectId);
+      setStories(refreshed.items);
+      setBulkPreviews(null);
+      setSelectedIds(new Set());
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to bulk sync the selected stories to Jira.");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   async function handleAddToExistingSprint(storyId: string, sprintId: string) {
     if (!sprintId || currentUserId === null) return;
     setBusyStoryId(storyId);
@@ -278,6 +339,54 @@ export function StoriesView({
 
       {error && <p className="text-sm text-destructive">{error}</p>}
 
+      {stories.length > 0 && jiraConnected && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-3 py-3">
+            <div className="flex items-center gap-2 text-sm">
+              <CheckSquare className="h-4 w-4 text-muted-foreground" />
+              {selectedIds.size === 0 ? "Select stories to bulk sync to Jira." : `${selectedIds.size} selected.`}
+            </div>
+            <Button
+              size="sm" variant="outline" onClick={handleOpenBulkPreview}
+              disabled={selectedIds.size === 0 || bulkBusy || currentUserId === null}
+            >
+              {bulkBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Eye className="mr-1 h-3.5 w-3.5" />}
+              Preview Bulk Sync ({selectedIds.size})
+            </Button>
+          </CardHeader>
+          {bulkPreviews && (
+            <CardContent className="flex flex-col gap-3 border-t pt-3">
+              <ul className="flex flex-col gap-1 text-xs">
+                {bulkPreviews.map((p) => {
+                  const s = stories.find((st) => st.id === p.story_id);
+                  const isValid = p.validation_errors.length === 0;
+                  return (
+                    <li key={p.story_id} className="flex items-center gap-2">
+                      {isValid ? (
+                        <Badge variant={p.already_linked ? "gray" : "success"}>{p.already_linked ? "Already synced" : "Ready"}</Badge>
+                      ) : (
+                        <Badge variant="destructive">Invalid</Badge>
+                      )}
+                      <span className="font-medium">{s?.title ?? p.summary}</span>
+                      {!isValid && <span className="text-destructive">— {p.validation_errors.join(" ")}</span>}
+                    </li>
+                  );
+                })}
+              </ul>
+              <div className="flex justify-end gap-2">
+                <Button size="sm" variant="outline" onClick={() => setBulkPreviews(null)}>
+                  Cancel
+                </Button>
+                <Button size="sm" onClick={handleConfirmBulkSync} disabled={bulkBusy || currentUserId === null}>
+                  {bulkBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="mr-1 h-3.5 w-3.5" />}
+                  Confirm &amp; Sync Selected to Jira
+                </Button>
+              </div>
+            </CardContent>
+          )}
+        </Card>
+      )}
+
       {stories.length === 0 ? (
         <EmptyState icon={ClipboardList} title="No stories yet" description="Sync from the approved backlog to get started." />
       ) : (
@@ -286,6 +395,7 @@ export function StoriesView({
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-8" />
                   <TableHead>Story</TableHead>
                   <TableHead>Mode</TableHead>
                   <TableHead>Priority</TableHead>
@@ -305,6 +415,14 @@ export function StoriesView({
                   return (
                     <Fragment key={story.id}>
                       <TableRow>
+                        <TableCell>
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(story.id)}
+                            onChange={() => toggleSelected(story.id)}
+                            aria-label={`Select ${story.title} for bulk Jira sync`}
+                          />
+                        </TableCell>
                         <TableCell className="max-w-[16rem]">
                           <div className="truncate font-medium">{story.title}</div>
                           <div className="truncate text-xs text-muted-foreground">{story.epic || "—"}</div>
@@ -339,18 +457,21 @@ export function StoriesView({
                         </TableCell>
                         <TableCell className="text-xs">{story.story_points ?? "—"}</TableCell>
                         <TableCell>
-                          {story.jira_issue_url ? (
-                            <a
-                              href={story.jira_issue_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex items-center gap-1 text-xs font-medium text-primary underline-offset-2 hover:underline"
-                            >
-                              {story.jira_issue_key ?? story.jira_status} <ExternalLink className="h-3 w-3" />
-                            </a>
-                          ) : (
-                            <Badge variant={jiraBadgeVariant(story.jira_status)}>{story.jira_status}</Badge>
-                          )}
+                          <div className="flex flex-col gap-0.5">
+                            <Badge variant={syncStatusBadgeVariant(story.jira_sync_status)} className="w-fit">
+                              {SYNC_STATUS_LABEL[story.jira_sync_status]}
+                            </Badge>
+                            {story.jira_issue_url && (
+                              <a
+                                href={story.jira_issue_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1 text-xs font-medium text-primary underline-offset-2 hover:underline"
+                              >
+                                {story.jira_issue_key} <ExternalLink className="h-3 w-3" />
+                              </a>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell>
                           <Badge variant={laneBadgeVariant(story.lane_status)} className="whitespace-nowrap">
@@ -426,7 +547,7 @@ export function StoriesView({
 
                       {previewingId === story.id && (
                         <TableRow>
-                          <TableCell colSpan={10} className="bg-muted/30">
+                          <TableCell colSpan={11} className="bg-muted/30">
                             <div className="flex flex-col gap-3 py-2">
                               {previewLoading ? (
                                 <p className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -496,7 +617,7 @@ export function StoriesView({
 
                       {addingSprintFor === story.id && (
                         <TableRow>
-                          <TableCell colSpan={10} className="bg-muted/30">
+                          <TableCell colSpan={11} className="bg-muted/30">
                             <div className="flex flex-wrap items-center gap-2 py-1">
                               <span className="text-xs text-muted-foreground">Add to sprint:</span>
                               {sprints.length > 0 && (
@@ -535,7 +656,7 @@ export function StoriesView({
 
                       {isEditing && draft && (
                         <TableRow>
-                          <TableCell colSpan={10} className="bg-muted/30">
+                          <TableCell colSpan={11} className="bg-muted/30">
                             <div className="grid grid-cols-2 gap-3 py-2">
                               <div className="col-span-2">
                                 <label className="mb-1 block text-xs text-muted-foreground">Title</label>

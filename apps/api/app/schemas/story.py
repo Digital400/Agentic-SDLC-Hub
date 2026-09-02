@@ -3,7 +3,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import SprintStatus, SprintStoryStatus, StoryStatus, StoryType
+from app.models.enums import SprintStatus, SprintStoryStatus, StoryJiraSyncStatus, StoryStatus, StoryType
 
 
 class SyncStoriesFromBacklogRequest(BaseModel):
@@ -61,8 +61,16 @@ class StoryRead(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # Real, stored fields (requirement 6 — key, id, and URL, plus the
+    # sync state machine — see app/models/story.py).
+    jira_sync_status: StoryJiraSyncStatus = StoryJiraSyncStatus.NOT_SYNCED
+    jira_issue_id: str | None = None
+
     # Computed, not stored on Story itself — see
-    # app/api/routes/stories.py's _story_to_read.
+    # app/api/routes/stories.py's _story_to_read. jira_issue_key/url
+    # prefer Story's own stored value (requirement 6) but still fall back
+    # to the live JiraIssueLink for a story synced before those columns
+    # existed.
     lane_status: str = "No lane"
     jira_status: str = "Not Synced"
     jira_issue_key: str | None = None

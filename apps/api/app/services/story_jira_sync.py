@@ -31,6 +31,17 @@ NO UPDATE: consistent with jira_integration.py's disclosed HARD RULE,
 only app/api/routes/jira_integration.py's sync_jira_status route ever
 pulls anything back (a read), and only Story.status, only for a
 terminal/"done"-like Jira status (see that route for the narrow mapping).
+
+APPROVAL GATE ("Only approved stories can sync to Jira"): no dedicated
+per-story approval status exists in this codebase (Story.status tracks
+lane/sprint lifecycle, not a draft/approved distinction) — same
+ambiguity app/api/routes/sprints.py's own _require_story_is_approved
+already had to resolve, and resolved the same way here: a story synced
+from an approved story_backlog (source_artifact_version_id set) is
+approved only if that backlog's Artifact is still APPROVED; a story
+created directly (no backlog origin) has no draft/approval workflow of
+its own and is treated as approved by construction. See
+_require_story_approved_for_jira below.
 """
 
 import uuid
@@ -38,7 +49,19 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
-from app.models import ImplementationTask, JiraIssueLink, JiraProjectLink, JiraSourceType, Sprint, Story, User
+from app.models import (
+    Artifact,
+    ArtifactStatus,
+    ArtifactVersion,
+    ImplementationTask,
+    JiraIssueLink,
+    JiraProjectLink,
+    JiraSourceType,
+    Sprint,
+    Story,
+    StoryJiraSyncStatus,
+    User,
+)
 from app.services import jira_integration as jira_api
 from app.services.audit import record_audit_log
 from app.services.jira_export import normalize_jira_priority
@@ -46,6 +69,11 @@ from app.services.jira_integration import JiraIntegrationError
 
 STORY_POINTS_LABEL = "Story Points Estimate"
 SPRINT_LABEL = "Sprint"
+# Jira mapping — "Internal story id -> external reference field or
+# description metadata": no universal custom field exists for this
+# either (same reasoning as Story Points/Sprint above), so it's a
+# plainly-labeled description line instead.
+INTERNAL_REF_LABEL = "Internal Story ID"
 
 
 @dataclass
@@ -69,6 +97,7 @@ class StoryJiraPreview:
     priority: str | None
     story_points: int | None
     sprint_name: str | None
+    labels: list[str] = field(default_factory=list)
     subtasks: list[StorySubtaskPreview] = field(default_factory=list)
     validation_errors: list[str] = field(default_factory=list)
     already_linked: JiraIssueLink | None = None
@@ -80,8 +109,8 @@ class StoryJiraPreview:
 
 def render_story_description(story: Story) -> str:
     """Requirement 3 — "User story + acceptance criteria to Jira
-    description", plus the disclosed Story Points/Sprint lines (see
-    module docstring)."""
+    description", plus the disclosed Story Points/Sprint lines and the
+    internal story id (see module docstring)."""
     lines = []
     if story.user_story:
         lines.append(story.user_story)
@@ -93,7 +122,38 @@ def render_story_description(story: Story) -> str:
         lines.append("- (none specified)")
     if story.story_points is not None:
         lines += ["", f"{STORY_POINTS_LABEL}: {story.story_points}"]
+    lines += ["", f"{INTERNAL_REF_LABEL}: {story.id}"]
     return "\n".join(lines)
+
+
+def _story_labels(story: Story) -> list[str]:
+    """Jira mapping — "Labels -> project labels": this story's own
+    technical areas (already a plain string list on Story — see
+    app/models/story.py), sent as-is. Jira labels have no spaces, so
+    each area is slugified defensively; never silently dropped from the
+    preview if the mapping produces nothing usable."""
+    labels = []
+    for area in story.technical_areas:
+        slug = area.strip().replace(" ", "-").lower()
+        if slug:
+            labels.append(slug)
+    return labels
+
+
+def _require_story_approved_for_jira(db: Session, story: Story) -> str | None:
+    """Rule 2 — "Only approved stories can sync to Jira." See the module
+    docstring for why this mirrors app/api/routes/sprints.py's own
+    _require_story_is_approved reasoning. Returns an error string, or
+    None if the story is approved."""
+    if story.source_artifact_version_id is None:
+        return None  # created directly — no backlog draft/approval step to check
+    version = db.get(ArtifactVersion, story.source_artifact_version_id)
+    if version is None:
+        return None  # the version this story was parsed from is gone; nothing left to gate on
+    artifact = db.get(Artifact, version.artifact_id)
+    if artifact is not None and artifact.status != ArtifactStatus.APPROVED:
+        return f"This story's origin story backlog is not APPROVED (current status: {artifact.status.value})."
+    return None
 
 
 def _existing_link(db: Session, jira_project_link_id: uuid.UUID, source_type: JiraSourceType, source_key: str) -> JiraIssueLink | None:
@@ -127,6 +187,10 @@ def build_story_jira_preview(db: Session, *, story: Story, jira_project_link: Ji
     errors: list[str] = []
     if not story.title.strip():
         errors.append("Story title is missing.")
+
+    approval_error = _require_story_approved_for_jira(db, story)
+    if approval_error:
+        errors.append(approval_error)
 
     priority, priority_error = normalize_jira_priority(story.priority)
     if priority_error:
@@ -165,6 +229,7 @@ def build_story_jira_preview(db: Session, *, story: Story, jira_project_link: Ji
         priority=priority,
         story_points=story.story_points,
         sprint_name=sprint_name,
+        labels=_story_labels(story),
         subtasks=subtasks,
         validation_errors=errors,
         already_linked=_existing_link(db, jira_project_link.id, JiraSourceType.STORY, story.title),
@@ -199,7 +264,11 @@ def sync_story_to_jira(
     exactly what gets sent — never re-derived differently at sync time.
 
     NO UPDATE (see module docstring): a story (or subtask) already linked
-    is reported "skipped_duplicate", never edited."""
+    is reported "skipped_duplicate", never edited.
+
+    SYNC-FAILURE SAFETY (rule 3): a failed create_issue call only ever
+    sets `story.jira_sync_status = SYNC_FAILED` — the story row itself,
+    every other field on it, is never touched, let alone deleted."""
     preview = build_story_jira_preview(db, story=story, jira_project_link=jira_project_link)
 
     if preview.already_linked is not None:
@@ -209,14 +278,21 @@ def sync_story_to_jira(
         )
         story_jira_key = preview.already_linked.jira_issue_key
     elif not preview.is_valid:
+        story.jira_sync_status = StoryJiraSyncStatus.SYNC_FAILED
+        db.flush()
         return StoryJiraSyncResult(status="skipped_invalid", errors=preview.validation_errors)
     else:
+        story.jira_sync_status = StoryJiraSyncStatus.SYNC_PENDING
+        db.flush()
         try:
             issue = jira_api.create_issue(
                 base_url, email, token, project_key=jira_project_link.jira_project_key, issue_type="Story",
                 summary=preview.summary, description=preview.description, priority=preview.priority,
+                labels=preview.labels or None,
             )
         except JiraIntegrationError as exc:
+            story.jira_sync_status = StoryJiraSyncStatus.SYNC_FAILED
+            db.flush()
             return StoryJiraSyncResult(status="failed", errors=[str(exc)])
 
         link = JiraIssueLink(
@@ -225,7 +301,11 @@ def sync_story_to_jira(
             jira_issue_url=issue.url, triggered_by_user_id=triggered_by.id,
         )
         db.add(link)
+        # Requirement 6 — store key, id, and URL directly on the story.
         story.jira_issue_key = issue.key
+        story.jira_issue_id = issue.id
+        story.jira_issue_url = issue.url
+        story.jira_sync_status = StoryJiraSyncStatus.SYNCED
         db.flush()
 
         record_audit_log(

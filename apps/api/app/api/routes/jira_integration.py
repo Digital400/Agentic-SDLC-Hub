@@ -36,6 +36,8 @@ from app.models import (
     User,
 )
 from app.schemas.jira_integration import (
+    BulkPreviewStoriesToJiraRequest,
+    BulkStoryJiraPreviewResponse,
     BulkStoryJiraSyncResponse,
     BulkSyncStoriesToJiraRequest,
     ConnectJiraRequest,
@@ -433,7 +435,7 @@ def sync_jira_status(project_id: uuid.UUID, db: Session = Depends(get_db)) -> Ji
 def _to_story_preview_read(preview: StoryJiraPreview) -> StoryJiraPreviewRead:
     return StoryJiraPreviewRead(
         story_id=preview.story_id, summary=preview.summary, description=preview.description, priority=preview.priority,
-        story_points=preview.story_points, sprint_name=preview.sprint_name,
+        story_points=preview.story_points, sprint_name=preview.sprint_name, labels=preview.labels,
         subtasks=[
             StoryJiraSubtaskPreviewRead(
                 implementation_task_id=uuid.UUID(s.implementation_task_id), title=s.title, description=s.description,
@@ -469,6 +471,32 @@ def get_story_jira_preview(story_id: uuid.UUID, db: Session = Depends(get_db)) -
     jira_project_link = _get_jira_project_link_or_404(db, story.project_id)
     preview = build_story_jira_preview(db, story=story, jira_project_link=jira_project_link)
     return _to_story_preview_read(preview)
+
+
+@router.post("/stories/bulk-preview", response_model=BulkStoryJiraPreviewResponse)
+def bulk_preview_stories_jira(payload: BulkPreviewStoriesToJiraRequest, db: Session = Depends(get_db)) -> BulkStoryJiraPreviewResponse:
+    """Requirement 4 — preview several stories at once, e.g. every
+    checkbox-selected story before a bulk-sync confirmation. Read-only;
+    never calls Jira. Each story may belong to a different project, so
+    each is resolved against its own project's Jira link independently —
+    a story whose project has none simply reports that as a validation
+    error rather than 404ing the whole batch."""
+    previews: list[StoryJiraPreviewRead] = []
+    for story_id in payload.story_ids:
+        story = _get_story_or_404(db, story_id)
+        try:
+            jira_project_link = _get_jira_project_link_or_404(db, story.project_id)
+        except HTTPException as exc:
+            previews.append(
+                StoryJiraPreviewRead(
+                    story_id=story.id, summary=story.title, description="", priority=None, story_points=story.story_points,
+                    sprint_name=None, labels=[], subtasks=[], validation_errors=[str(exc.detail)], already_linked=None,
+                )
+            )
+            continue
+        preview = build_story_jira_preview(db, story=story, jira_project_link=jira_project_link)
+        previews.append(_to_story_preview_read(preview))
+    return BulkStoryJiraPreviewResponse(previews=previews)
 
 
 @router.post("/stories/{story_id}/sync", response_model=StoryJiraSyncResultRead)
