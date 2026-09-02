@@ -37,6 +37,8 @@ from app.models.enums import (
     SprintStoryStatus,
     ReleaseStatus,
     StoryJiraSyncStatus,
+    StoryTestExecutionStatus,
+    StoryTestExecutionQaDecision,
     CodeRunStatus,
     PRReviewRecommendation,
     PRReviewRunStatus,
@@ -66,6 +68,7 @@ from app.models.story_delivery_edge import StoryDeliveryEdge
 from app.models.story_delivery_lane import StoryDeliveryLane
 from app.models.story_artifact import StoryArtifact
 from app.models.story_activity_log import StoryActivityLog
+from app.models.story_test_execution import StoryTestExecution
 from app.models.review import Review, ReviewComment
 from app.models.agent import AgentDefinition, AgentPrompt, AgentRun, AgentRunLoopEvent
 from app.models.validator import ValidatorDefinition
@@ -124,6 +127,9 @@ __all__ = [
     "StoryDeliveryEdge",
     "StoryArtifact",
     "StoryActivityLog",
+    "StoryTestExecution",
+    "StoryTestExecutionStatus",
+    "StoryTestExecutionQaDecision",
     "Sprint",
     "SprintStatus",
     "SprintStory",

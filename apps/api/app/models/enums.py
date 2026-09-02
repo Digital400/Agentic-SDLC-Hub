@@ -491,6 +491,31 @@ class StoryDeliveryNodeStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
 
 
+class StoryTestExecutionStatus(str, enum.Enum):
+    """One StoryTestExecution's overall status (see
+    app/models/story_test_execution.py) — derived from its per-scenario
+    results_json, not chosen freehand by a caller (see
+    app/services/story_test_execution.py's _recompute_status)."""
+
+    NOT_STARTED = "NOT_STARTED"
+    IN_PROGRESS = "IN_PROGRESS"
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
+    QA_APPROVED = "QA_APPROVED"
+
+
+class StoryTestExecutionQaDecision(str, enum.Enum):
+    """QA's own decision on a StoryTestExecution — distinct from `status`
+    (which tracks the mechanical pass/fail rollup): this is the human
+    approval gate requirement 6/"Story cannot be DONE until QA approval"
+    actually checks."""
+
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
 class RepositoryFileEntryType(str, enum.Enum):
     """One entry in a RepositorySnapshot's file index — see
     app/models/repository.py's RepositoryFileIndex. Mirrors GitHub's own

@@ -409,6 +409,33 @@ export interface ApiPostPRReviewCommentsResponse {
   results: ApiPostedCommentResult[];
 }
 
+// Story Testing stage — see app/models/story_test_execution.py and
+// app/services/story_test_execution.py.
+export type ApiStoryTestExecutionStatus = "NOT_STARTED" | "IN_PROGRESS" | "PASSED" | "FAILED" | "BLOCKED" | "QA_APPROVED";
+export type ApiStoryTestExecutionQaDecision = "PENDING" | "APPROVED" | "REJECTED";
+
+export interface ApiStoryTestExecution {
+  id: string;
+  story_id: string;
+  lane_id: string | null;
+  test_scenario_artifact_id: string | null;
+  pull_request_link_id: string | null;
+  executed_by_user_id: string | null;
+  status: ApiStoryTestExecutionStatus;
+  results_json: { scenario: string; status: string; notes: string }[];
+  agent_checklist: { item: string; done: boolean }[];
+  evidence_urls: string[];
+  bugs_found: string[];
+  qa_decision: ApiStoryTestExecutionQaDecision;
+  qa_decision_reason: string;
+  qa_decided_by_user_id: string | null;
+  used_mock: boolean;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ApiArtifactVersion {
   id: string;
   artifact_id: string;
@@ -1484,6 +1511,24 @@ export const api = {
     // Implementation or Implementation Plan update." Story-scoped only.
     sendBackForRework: (id: string, body: { triggered_by_user_id: string; target_node_key: "IMPLEMENTATION" | "IMPLEMENTATION_PLAN" }) =>
       post<ApiPRReviewRun>(`/pr-review-runs/${id}/send-back-for-rework`, body),
+  },
+
+  // Story Testing stage — see app/api/routes/story_test_executions.py.
+  storyTestExecutions: {
+    start: (body: { story_id: string; triggered_by_user_id: string }) =>
+      post<ApiStoryTestExecution>("/story-test-executions", body),
+    get: (id: string) => get<ApiStoryTestExecution>(`/story-test-executions/${id}`),
+    listForStory: (storyId: string) => get<ApiStoryTestExecution[]>(`/story-test-executions/by-story/${storyId}`),
+    generateChecklist: (id: string, body: { triggered_by_user_id: string }) =>
+      post<ApiStoryTestExecution>(`/story-test-executions/${id}/generate-checklist`, body),
+    attachCodeRun: (id: string, body: { triggered_by_user_id: string; code_run_id: string }) =>
+      post<ApiStoryTestExecution>(`/story-test-executions/${id}/attach-code-run`, body),
+    recordResults: (
+      id: string,
+      body: { triggered_by_user_id: string; results: { scenario: string; status: string; notes: string }[]; evidence_urls: string[]; bugs_found: string[] }
+    ) => patch<ApiStoryTestExecution>(`/story-test-executions/${id}/results`, body),
+    qaApprove: (id: string, body: { actor_user_id: string; decision: "APPROVED" | "REJECTED"; reason?: string }) =>
+      post<ApiStoryTestExecution>(`/story-test-executions/${id}/qa-approve`, body),
   },
 
   integrations: {

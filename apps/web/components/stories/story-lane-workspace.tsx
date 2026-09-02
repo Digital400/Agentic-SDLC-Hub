@@ -22,6 +22,7 @@ import {
   ApiStoryArtifact,
   ApiStoryDeliveryLane,
   ApiStoryDeliveryNode,
+  ApiStoryTestExecution,
   ApiTestAgentType,
   ApiTestRun,
   ApiUser,
@@ -71,6 +72,7 @@ export function StoryLaneWorkspace({
   initialTestRuns,
   initialPrReviewRuns,
   initialTestReport,
+  initialTestExecutions,
   users,
   currentUserId,
 }: {
@@ -86,6 +88,7 @@ export function StoryLaneWorkspace({
   initialTestRuns: ApiTestRun[];
   initialPrReviewRuns: ApiPRReviewRun[];
   initialTestReport: ApiStoryArtifact | null;
+  initialTestExecutions: ApiStoryTestExecution[];
   users: ApiUser[];
   currentUserId: string | null;
 }) {
@@ -118,6 +121,14 @@ export function StoryLaneWorkspace({
   const [commentPostBusy, setCommentPostBusy] = useState(false);
   const [humanReviewBusy, setHumanReviewBusy] = useState(false);
   const [reworkBusy, setReworkBusy] = useState(false);
+  // Story Testing stage — StoryTestExecution, distinct from the AI
+  // Testing Agent's own TestRun above.
+  const [testExecutions, setTestExecutions] = useState<ApiStoryTestExecution[]>(initialTestExecutions);
+  const [testExecutionBusy, setTestExecutionBusy] = useState(false);
+  const [resultsDraft, setResultsDraft] = useState(""); // one line per scenario: "scenario | PASS|FAIL|BLOCKED | notes"
+  const [evidenceDraft, setEvidenceDraft] = useState("");
+  const [bugsDraft, setBugsDraft] = useState("");
+  const [codeRunIdDraft, setCodeRunIdDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const storyLldNode = nodes.find((n) => n.node_key === "STORY_LLD") ?? null;
@@ -132,6 +143,7 @@ export function StoryLaneWorkspace({
   const latestRun = implementationRuns[0] ?? null;
   const latestTestRun = testRuns[0] ?? null;
   const latestPrReviewRun = prReviewRuns[0] ?? null;
+  const latestTestExecution = testExecutions[0] ?? null;
 
   async function refresh() {
     const [refreshedLane, refreshedNodes] = await Promise.all([
@@ -140,6 +152,11 @@ export function StoryLaneWorkspace({
     ]);
     setLane(refreshedLane);
     setNodes(refreshedNodes);
+    try {
+      setTestExecutions(await api.storyTestExecutions.listForStory(story.id));
+    } catch (err) {
+      setTestExecutions([]);
+    }
     try {
       setLld(await api.stories.getLld(story.id));
     } catch (err) {
@@ -324,6 +341,105 @@ export function StoryLaneWorkspace({
       setError(err instanceof ApiError ? err.message : "Failed to send this lane back for rework.");
     } finally {
       setReworkBusy(false);
+    }
+  }
+
+  // --- Story Testing stage (StoryTestExecution) -----------------------------------------
+
+  async function handleStartTestExecution() {
+    if (currentUserId === null) return;
+    setTestExecutionBusy(true);
+    setError(null);
+    try {
+      await api.storyTestExecutions.start({ story_id: story.id, triggered_by_user_id: currentUserId });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to start testing.");
+    } finally {
+      setTestExecutionBusy(false);
+    }
+  }
+
+  async function handleGenerateChecklist() {
+    if (currentUserId === null || latestTestExecution === null) return;
+    setTestExecutionBusy(true);
+    setError(null);
+    try {
+      await api.storyTestExecutions.generateChecklist(latestTestExecution.id, { triggered_by_user_id: currentUserId });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to generate the testing checklist.");
+    } finally {
+      setTestExecutionBusy(false);
+    }
+  }
+
+  async function handleAttachCodeRun() {
+    if (currentUserId === null || latestTestExecution === null || !codeRunIdDraft.trim()) return;
+    setTestExecutionBusy(true);
+    setError(null);
+    try {
+      await api.storyTestExecutions.attachCodeRun(latestTestExecution.id, {
+        triggered_by_user_id: currentUserId, code_run_id: codeRunIdDraft.trim(),
+      });
+      setCodeRunIdDraft("");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to attach this code run's log.");
+    } finally {
+      setTestExecutionBusy(false);
+    }
+  }
+
+  // Each line: "scenario | PASS|FAIL|BLOCKED | notes" — a plain textarea
+  // rather than a dynamic row editor, same lightweight-input convention
+  // this workspace already uses (e.g. window.prompt for a rejection reason).
+  function parseResultsDraft(): { scenario: string; status: string; notes: string }[] {
+    return resultsDraft
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [scenario = "", statusRaw = "", ...rest] = line.split("|").map((p) => p.trim());
+        return { scenario, status: statusRaw.toUpperCase(), notes: rest.join("|").trim() };
+      });
+  }
+
+  async function handleRecordResults() {
+    if (currentUserId === null || latestTestExecution === null) return;
+    const results = parseResultsDraft();
+    if (results.length === 0) return;
+    setTestExecutionBusy(true);
+    setError(null);
+    try {
+      await api.storyTestExecutions.recordResults(latestTestExecution.id, {
+        triggered_by_user_id: currentUserId, results,
+        evidence_urls: evidenceDraft.split("\n").map((s) => s.trim()).filter(Boolean),
+        bugs_found: bugsDraft.split("\n").map((s) => s.trim()).filter(Boolean),
+      });
+      setResultsDraft("");
+      setEvidenceDraft("");
+      setBugsDraft("");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to record these test results.");
+    } finally {
+      setTestExecutionBusy(false);
+    }
+  }
+
+  async function handleTestExecutionQaDecision(decision: "APPROVED" | "REJECTED") {
+    if (currentUserId === null || latestTestExecution === null) return;
+    const reason = decision === "REJECTED" ? window.prompt("Why is QA rejecting this?") ?? "" : "";
+    setTestExecutionBusy(true);
+    setError(null);
+    try {
+      await api.storyTestExecutions.qaApprove(latestTestExecution.id, { actor_user_id: currentUserId, decision, reason });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to record this QA decision — QA only.");
+    } finally {
+      setTestExecutionBusy(false);
     }
   }
 
@@ -1103,6 +1219,7 @@ export function StoryLaneWorkspace({
       )}
 
       {tab === "testing" && (
+        <>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between gap-3">
             <div>
@@ -1228,6 +1345,155 @@ export function StoryLaneWorkspace({
             )}
           </CardContent>
         </Card>
+
+        <Card className="mt-4">
+          <CardHeader className="flex flex-row items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">Story Test Execution</CardTitle>
+              <CardDescription>
+                Manual QA execution against this story's own Test Scenarios — requires Test Scenarios, a PR or diff, and no
+                unresolved PR-review critical findings.
+              </CardDescription>
+            </div>
+            {latestTestExecution === null && (
+              <Button size="sm" onClick={handleStartTestExecution} disabled={testExecutionBusy || currentUserId === null}>
+                {testExecutionBusy && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+                <PlayCircle className="mr-1 h-3.5 w-3.5" />
+                Start Testing
+              </Button>
+            )}
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            {latestTestExecution === null ? (
+              <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
+                <FileText className="h-6 w-6" />
+                No test execution yet for this story.
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center gap-2">
+                  <Badge
+                    variant={
+                      latestTestExecution.status === "QA_APPROVED" || latestTestExecution.status === "PASSED"
+                        ? "success"
+                        : latestTestExecution.status === "FAILED"
+                          ? "destructive"
+                          : "info"
+                    }
+                  >
+                    {latestTestExecution.status}
+                  </Badge>
+                  <Badge variant={latestTestExecution.qa_decision === "APPROVED" ? "success" : latestTestExecution.qa_decision === "REJECTED" ? "destructive" : "gray"}>
+                    QA: {latestTestExecution.qa_decision}
+                  </Badge>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant="outline" onClick={handleGenerateChecklist} disabled={testExecutionBusy}>
+                    Generate agent checklist
+                  </Button>
+                </div>
+                {latestTestExecution.agent_checklist.length > 0 && (
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-muted-foreground">Agent-generated checklist</p>
+                    <ul className="list-inside list-disc text-xs">
+                      {latestTestExecution.agent_checklist.map((c, i) => (
+                        <li key={i}>{c.item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                <div className="flex flex-col gap-2">
+                  <p className="text-xs font-medium text-muted-foreground">
+                    Record results — one per line: <span className="font-mono">scenario | PASS/FAIL/BLOCKED | notes</span>
+                  </p>
+                  <Textarea
+                    className="min-h-[80px] text-xs"
+                    value={resultsDraft}
+                    onChange={(e) => setResultsDraft(e.target.value)}
+                    placeholder="Login with valid credentials | PASS | works as expected"
+                  />
+                  <Textarea
+                    className="min-h-[50px] text-xs"
+                    value={evidenceDraft}
+                    onChange={(e) => setEvidenceDraft(e.target.value)}
+                    placeholder="Evidence URLs, one per line"
+                  />
+                  <Textarea
+                    className="min-h-[50px] text-xs"
+                    value={bugsDraft}
+                    onChange={(e) => setBugsDraft(e.target.value)}
+                    placeholder="Bug creation suggestions, one per line"
+                  />
+                  <Button size="sm" onClick={handleRecordResults} disabled={testExecutionBusy || !resultsDraft.trim()} className="self-start">
+                    {testExecutionBusy && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+                    Record results
+                  </Button>
+                </div>
+
+                {latestTestExecution.results_json.length > 0 && (
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-muted-foreground">Per-scenario results</p>
+                    <ul className="text-xs">
+                      {latestTestExecution.results_json.map((r, i) => (
+                        <li key={i}>
+                          [{r.status}] <span className="font-mono">{r.scenario}</span> — {r.notes}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {latestTestExecution.bugs_found.length > 0 && (
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-muted-foreground">Bugs found</p>
+                    <ul className="list-inside list-disc text-xs text-muted-foreground">
+                      {latestTestExecution.bugs_found.map((b, i) => (
+                        <li key={i}>{b}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {latestTestExecution.evidence_urls.length > 0 && (
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-muted-foreground">Evidence</p>
+                    <ul className="list-inside list-disc text-xs text-muted-foreground">
+                      {latestTestExecution.evidence_urls.map((u, i) => (
+                        <li key={i} className="break-all">
+                          {u}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 border-t pt-3">
+                  <input
+                    className="flex-1 rounded-md border border-input bg-background px-2 py-1 text-xs shadow-sm"
+                    value={codeRunIdDraft}
+                    onChange={(e) => setCodeRunIdDraft(e.target.value)}
+                    placeholder="CodeRun id to attach as automated evidence"
+                  />
+                  <Button size="sm" variant="outline" onClick={handleAttachCodeRun} disabled={testExecutionBusy || !codeRunIdDraft.trim()}>
+                    Attach CodeRun log
+                  </Button>
+                </div>
+
+                {latestTestExecution.qa_decision === "PENDING" && (
+                  <div className="flex gap-2 border-t pt-3">
+                    <Button size="sm" onClick={() => handleTestExecutionQaDecision("APPROVED")} disabled={testExecutionBusy}>
+                      <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> QA Approve
+                    </Button>
+                    <Button size="sm" variant="destructive" onClick={() => handleTestExecutionQaDecision("REJECTED")} disabled={testExecutionBusy}>
+                      <XCircle className="mr-1 h-3.5 w-3.5" /> QA Reject
+                    </Button>
+                  </div>
+                )}
+              </>
+            )}
+          </CardContent>
+        </Card>
+        </>
       )}
     </div>
   );
