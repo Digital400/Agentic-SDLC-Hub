@@ -323,33 +323,37 @@ RICH_DEFAULT_PROMPTS: dict[str, dict] = {
             "so under Risks instead of making one up.\n"
             "3. Ask clarification questions when required — if the input genuinely doesn't give you enough to "
             "design a section responsibly, use the clarification-questions response format instead of guessing.\n"
-            "4. Do not write production code. Describe the design; Implementation writes the code.\n"
+            "4. Do not write production code, plan implementation tasks, or write test scenarios — those are "
+            "their own later lane stages (Implementation Plan, Test Scenarios). Describe the design only.\n"
             "5. Output must be developer-ready — concrete enough that a developer could start building from it "
             "without needing to ask you or anyone else what you meant.\n"
-            "6. Include API, database, frontend, validation, permission, error-handling, and test details — "
-            "every one that applies to this story, not just the ones that feel most relevant.\n"
-            "7. Highlight risks explicitly, and state clearly what is explicitly out of scope for this story.\n"
-            "8. This design requires Tech Lead review before Implementation can start in this lane — write it "
+            "6. Include API, database, frontend, validation, permission, error-handling, and logging/audit "
+            "details — every one that applies to this story, not just the ones that feel most relevant.\n"
+            "7. Name exactly which section(s) of the approved HLD this story's design builds on — don't restate "
+            "the whole HLD, just point at what's relevant.\n"
+            "8. Highlight risks explicitly, and state clearly what is explicitly out of scope for this story.\n"
+            "9. This design requires Tech Lead review before Implementation can start in this lane — write it "
             "for that reviewer, not just for yourself."
         ),
         # This exact section set/order is required — not just descriptive
         # prose. Keep in sync with app/services/story_lld_agent.py's
         # STORY_LLD_SECTIONS constant.
         "output_format": (
-            "Markdown with exactly these `## ` headings, in this order: Story Summary, Scope, Out of Scope, API "
-            "Changes, DB Changes, Frontend Changes, Business Rules, Validation Rules, Permission Rules, Error "
-            "Handling, Test Cases, Implementation Tasks, Dependencies, Risks. Write 'None.' for a section that "
-            "genuinely doesn't apply rather than omitting it or leaving it blank."
+            "Markdown with exactly these `## ` headings, in this order: Story Summary, Scope, Out of Scope, "
+            "Related HLD Sections, API Changes, Database Changes, Frontend Changes, Business Rules, Validation "
+            "Rules, Permission Rules, Error Handling, Logging/Audit Needs, Dependencies, Risks, Developer Notes. "
+            "Write 'None.' for a section that genuinely doesn't apply rather than omitting it or leaving it blank."
         ),
         "validation_checklist": [
-            "All 14 required sections are present, in order, and none are blank without an explicit 'None.'",
+            "All 15 required sections are present, in order, and none are blank without an explicit 'None.'",
             "Scoped to exactly this one story — does not design for any other story",
             "Uses only the approved HLD and this story's own fields — nothing outside them",
+            "Related HLD Sections names the specific HLD section(s) this design builds on, not the whole document",
             "No business rule is invented — anything not stated by the input is under Risks",
             "Scope and Out of Scope are both concrete and don't contradict each other",
             "Output is developer-ready: concrete enough to implement directly, not just descriptive",
             "Permission Rules reference real roles (see app/services/permissions.py's UserRole), not invented ones",
-            "Test Cases cover this story's acceptance criteria and the Validation/Permission rules stated earlier",
+            "Does not plan implementation tasks or write test scenarios — those belong to later lane stages",
             "Every unresolved decision or dependency is captured under Dependencies or Risks, not silently assumed",
         ],
     },
@@ -774,6 +778,43 @@ def _ensure_story_lld_agent(db: Session) -> AgentDefinition:
     return agent
 
 
+def _ensure_story_lld_validator_definition(db: Session) -> ValidatorDefinition:
+    """Ensures a story-lld-validator ValidatorDefinition exists — same
+    validator_key convention as _ensure_validator_definitions above
+    (f"{stage_key}-validator"), added on its own here for the same reason
+    _ensure_story_lld_agent is: STORY_LLD has no row in any project-level
+    workflow template's `nodes` list, so the loop that seeds one
+    ValidatorDefinition per template stage never reaches it.
+
+    DISCLOSED SCOPE: unlike a project-level stage's validator (run
+    automatically by app/services/loop_engine.py's LoopEngineService
+    after every GENERATE_DRAFT/IMPROVE step), nothing yet calls this one
+    automatically — app/services/story_lld_agent.py's run_story_lld_agent
+    is a single generate() call, not routed through the loop engine (a
+    story-delivery-lane node isn't a WorkflowNode). This row exists so
+    the stage has a real, discoverable rubric (same criteria shape as
+    every other stage's validator, listed the same way in the UI) ready
+    for whenever a story-lane loop/validation flow is built."""
+    rich = RICH_DEFAULT_PROMPTS["story_lld"]
+    criteria = rich["validation_checklist"]
+
+    validator = db.query(ValidatorDefinition).filter(ValidatorDefinition.stage == "story_lld").first()
+    if validator is None:
+        validator = ValidatorDefinition(
+            validator_key="story-lld-validator",
+            name="Story LLD Validator",
+            stage="story_lld",
+            description="Independently scores a drafted Story LLD for one story's own delivery lane before it's shown to the Tech Lead reviewer.",
+            model_name="stub-no-model-configured",  # no real AI call required — see get_active_provider
+            criteria=criteria,
+        )
+        db.add(validator)
+        db.flush()
+    elif validator.criteria != criteria:
+        validator.criteria = criteria
+    return validator
+
+
 def _kb_chunk(
     content: str,
     *,
@@ -1178,6 +1219,7 @@ def seed(db: Session) -> None:
     # attached (see app/services/story_lld_agent.py). No WorkflowNode
     # template lists it, so it's ensured on its own.
     agent_definitions["story-lld-agent"] = _ensure_story_lld_agent(db)
+    validator_definitions["story_lld"] = _ensure_story_lld_validator_definition(db)
 
     # Not project-owned, so — like agent definitions/prompts above — this
     # runs unconditionally rather than being gated by the sample project

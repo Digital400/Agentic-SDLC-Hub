@@ -94,6 +94,28 @@ def test_story_lld_blocked_while_locked_before_story_ready_completes(db, project
     assert exc_info.value.status_code == 409
 
 
+def test_story_lld_blocked_when_story_itself_is_not_approved(db, project, actor):
+    """Precondition 1 — "story is approved". A lane can't normally exist
+    for a PENDING story (create_story_lane itself requires an approved
+    Story Crafting backlog and sets status=LANE_ACTIVE), so this
+    defensive check in run_story_lld_agent is only reachable by directly
+    reverting the story's own status — done here to prove the check
+    itself, independent of how a real PENDING story could ever get a lane."""
+    story, lane, nodes = _lane_for_new_story(db, project, actor, with_hld_approved=True)
+    _complete(db, nodes["STORY_READY"], actor)
+
+    from app.models import Story, StoryStatus
+
+    story_row = db.get(Story, story.id)
+    story_row.status = StoryStatus.PENDING
+    db.flush()
+
+    with pytest.raises(HTTPException) as exc_info:
+        draft_story_lld(nodes["STORY_LLD"].id, DraftStoryLldRequest(triggered_by_user_id=actor.id), db)
+    assert exc_info.value.status_code == 409
+    assert "approved" in exc_info.value.detail.lower()
+
+
 def test_story_lld_drafts_successfully_once_all_preconditions_are_met(db, project, actor):
     story, lane, nodes = _lane_for_new_story(db, project, actor, with_hld_approved=True)
     _complete(db, nodes["STORY_READY"], actor)

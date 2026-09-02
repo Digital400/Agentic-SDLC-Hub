@@ -50,21 +50,28 @@ STORY_LLD_AGENT_KEY = "story-lld-agent"
 # seeded prompt) so app/db/seed.py's RICH_DEFAULT_PROMPTS and this
 # module's own validation, if any is ever added, can't silently drift
 # apart independently.
+#
+# "Test Cases" and "Implementation Tasks" — present in an earlier version
+# of this list — were deliberately dropped: they're now their own lane
+# stages (TEST_SCENARIOS, IMPLEMENTATION_PLAN — see
+# app/services/story_delivery.py), so keeping them here too would just
+# duplicate content across two places in the lane.
 STORY_LLD_SECTIONS = (
     "Story Summary",
     "Scope",
     "Out of Scope",
+    "Related HLD Sections",
     "API Changes",
-    "DB Changes",
+    "Database Changes",
     "Frontend Changes",
     "Business Rules",
     "Validation Rules",
     "Permission Rules",
     "Error Handling",
-    "Test Cases",
-    "Implementation Tasks",
+    "Logging/Audit Needs",
     "Dependencies",
     "Risks",
+    "Developer Notes",
 )
 
 
