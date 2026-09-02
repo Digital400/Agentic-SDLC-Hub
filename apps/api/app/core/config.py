@@ -93,6 +93,19 @@ class Settings(BaseSettings):
     # encrypted under the dev-only key is only as safe as this repo itself.
     GITHUB_TOKEN_ENCRYPTION_KEY: str | None = None
 
+    # CodeRunnerService (see app/services/code_runner.py) — where each
+    # story's isolated workspace is created on local disk. Defaults under
+    # the OS temp dir so nothing here needs provisioning to run; a real
+    # deployment should point this at a dedicated, cleaned-up volume, not
+    # the shared system temp dir.
+    CODE_RUNNER_WORKSPACE_ROOT: Path = Path.home() / ".agentic_sdlc_hub" / "code_runner_workspaces"
+    # SECURITY (rule 2 — "use allowlisted commands"): only these test-
+    # runner executables may ever be invoked by CodeRunnerService.run_tests
+    # — a configured test command whose first token isn't in this list is
+    # refused outright, never executed. Extend this list, don't bypass it,
+    # if a project needs a different test runner.
+    CODE_RUNNER_ALLOWED_TEST_EXECUTABLES: list[str] = ["pytest", "npm", "yarn", "pnpm", "go", "mvn", "gradle"]
+
     class Config:
         env_file = ".env"
 

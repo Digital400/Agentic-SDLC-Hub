@@ -37,6 +37,7 @@ from app.models.enums import (
     SprintStoryStatus,
     ReleaseStatus,
     StoryJiraSyncStatus,
+    CodeRunStatus,
     PRReviewRecommendation,
     PRReviewRunStatus,
     ProjectRole,
@@ -82,6 +83,7 @@ from app.models.knowledge import KnowledgeChunk, KnowledgeSource
 from app.models.integration import Integration
 from app.models.integration_connection import IntegrationConnection
 from app.models.repository import Repository, RepositoryFileIndex, RepositorySnapshot
+from app.models.code_run import CodeRun
 from app.models.audit import AuditLog
 
 __all__ = [
@@ -130,6 +132,8 @@ __all__ = [
     "ReleaseStatus",
     "ReleaseStory",
     "StoryJiraSyncStatus",
+    "CodeRun",
+    "CodeRunStatus",
     "JiraProjectLink",
     "JiraIssueLink",
     "JiraSourceType",

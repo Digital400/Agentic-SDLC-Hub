@@ -447,6 +447,26 @@ class StoryJiraSyncStatus(str, enum.Enum):
     SYNC_FAILED = "SYNC_FAILED"
 
 
+class CodeRunStatus(str, enum.Enum):
+    """One CodeRunnerService run's own lifecycle — see
+    app/models/code_run.py and app/services/code_runner.py. A strict,
+    forward-only sequence (no lane-style unlock graph): QUEUED ->
+    CLONING -> BRANCH_CREATED -> APPLYING_CHANGES -> TESTING ->
+    COMMITTED -> PUSHED. FAILED is reachable from any non-terminal state
+    — a run's own `error_message`/`logs` record what happened, the row
+    itself is never deleted (same "failure never destroys the record"
+    convention as every other run model in this codebase)."""
+
+    QUEUED = "QUEUED"
+    CLONING = "CLONING"
+    BRANCH_CREATED = "BRANCH_CREATED"
+    APPLYING_CHANGES = "APPLYING_CHANGES"
+    TESTING = "TESTING"
+    COMMITTED = "COMMITTED"
+    PUSHED = "PUSHED"
+    FAILED = "FAILED"
+
+
 class StoryDeliveryLaneStatus(str, enum.Enum):
     """One story's own delivery lane (see app/models/story_delivery_lane.py)
     — a dedicated, self-contained graph per story, deliberately NOT the

@@ -40,6 +40,7 @@ from app.models import (
     MaintenanceRun,
     Release,
     ReleaseStory,
+    CodeRun,
     JiraProjectLink,
     JiraIssueLink,
     ConfluenceSpaceLink,
@@ -111,6 +112,7 @@ TEST_TABLES = [
     Repository.__table__,
     RepositorySnapshot.__table__,
     RepositoryFileIndex.__table__,
+    CodeRun.__table__,
 ]
 
 
