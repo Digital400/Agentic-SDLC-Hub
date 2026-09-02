@@ -45,11 +45,25 @@ class StoryDeliveryError(Exception):
 # gates (LLD_REVIEW, HUMAN_CODE_REVIEW, QA_APPROVAL) as real, distinct,
 # approval-gated nodes rather than folding them into IMPLEMENTATION/
 # PULL_REQUEST/TESTING's own status.
+#
+# IMPLEMENTATION_PLAN / TEST_SCENARIOS were added later ("Update the
+# existing workflow after HLD and Story Crafting" — extend, don't rename,
+# the existing architecture): IMPLEMENTATION_PLAN sits between LLD_REVIEW
+# and IMPLEMENTATION (plan the work once the design is approved, before
+# writing code); TEST_SCENARIOS sits between IMPLEMENTATION and
+# PULL_REQUEST (scenarios drafted against the real diff, before a PR is
+# opened for them). Both are plain, non-review-gated nodes — a human
+# advances them through the same generic PATCH
+# /delivery-lane-nodes/{id} every other non-gate node already uses; no
+# dedicated agent/artifact type was added for either (a StoryArtifact can
+# still be attached to one by hand via its node_id, same as any node).
 DEFAULT_STORY_DELIVERY_NODES: tuple[tuple[str, str, bool], ...] = (
     ("STORY_READY", "Story Ready", False),
     ("STORY_LLD", "Story LLD", False),
     ("LLD_REVIEW", "LLD Review", True),
+    ("IMPLEMENTATION_PLAN", "Implementation Plan", False),
     ("IMPLEMENTATION", "Implementation", False),
+    ("TEST_SCENARIOS", "Test Scenarios", False),
     ("PULL_REQUEST", "Pull Request", False),
     ("PR_REVIEW_AGENT", "PR Review Agent", False),
     ("HUMAN_CODE_REVIEW", "Human Code Review", True),
@@ -66,7 +80,9 @@ _NODE_ASSIGNED_ROLE: dict[str, str] = {
     "STORY_READY": "PRODUCT_OWNER",
     "STORY_LLD": "ARCHITECT",
     "LLD_REVIEW": "TECH_LEAD",
+    "IMPLEMENTATION_PLAN": "TECH_LEAD",
     "IMPLEMENTATION": "DEVELOPER",
+    "TEST_SCENARIOS": "QA",
     "PULL_REQUEST": "DEVELOPER",
     "PR_REVIEW_AGENT": "TECH_LEAD",
     "HUMAN_CODE_REVIEW": "TECH_LEAD",

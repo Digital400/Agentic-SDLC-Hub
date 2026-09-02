@@ -112,7 +112,7 @@ def test_create_story_lane_materializes_the_exact_default_node_sequence(db, proj
 
     nodes = list_lane_nodes(lane.id, db)
     assert [n.node_key for n in nodes] == [key for key, _, _ in DEFAULT_STORY_DELIVERY_NODES]
-    assert [n.order_index for n in nodes] == list(range(10))
+    assert [n.order_index for n in nodes] == list(range(len(DEFAULT_STORY_DELIVERY_NODES)))
     # Only the first node starts unlocked.
     assert nodes[0].status == StoryDeliveryNodeStatus.READY
     assert all(n.status == StoryDeliveryNodeStatus.LOCKED for n in nodes[1:])
@@ -165,6 +165,29 @@ def test_completing_a_node_unlocks_only_its_immediate_successor(db, project, act
 
     lane_after = get_story_delivery_lane(story.id, db)
     assert lane_after.current_node_id == by_key["STORY_LLD"].id
+
+
+def test_implementation_plan_and_test_scenarios_are_in_the_default_sequence(db, project, actor):
+    """"Update the existing workflow after HLD and Story Crafting" —
+    IMPLEMENTATION_PLAN sits between LLD_REVIEW and IMPLEMENTATION;
+    TEST_SCENARIOS sits between IMPLEMENTATION and PULL_REQUEST. Both are
+    plain, non-review-gated nodes, driven the same generic way as
+    IMPLEMENTATION/PULL_REQUEST/TESTING already are."""
+    _approved_project(db, project, actor)
+    story = _create_direct_story(db, project, actor)
+    create_story_lane(story.id, CreateStoryLaneRequest(triggered_by_user_id=actor.id), db)
+    lane = get_story_delivery_lane(story.id, db)
+    nodes = list_lane_nodes(lane.id, db)
+    keys_in_order = [n.node_key for n in nodes]
+
+    assert keys_in_order.index("LLD_REVIEW") < keys_in_order.index("IMPLEMENTATION_PLAN") < keys_in_order.index("IMPLEMENTATION")
+    assert keys_in_order.index("IMPLEMENTATION") < keys_in_order.index("TEST_SCENARIOS") < keys_in_order.index("PULL_REQUEST")
+
+    by_key = {n.node_key: n for n in nodes}
+    assert by_key["IMPLEMENTATION_PLAN"].requires_approval is False
+    assert by_key["TEST_SCENARIOS"].requires_approval is False
+    assert by_key["IMPLEMENTATION_PLAN"].assigned_role == "TECH_LEAD"
+    assert by_key["TEST_SCENARIOS"].assigned_role == "QA"
 
 
 def test_a_locked_node_cannot_be_moved_directly(db, project, actor):

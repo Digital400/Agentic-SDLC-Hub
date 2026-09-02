@@ -149,6 +149,10 @@ def _story_with_accepted_run(db, project, actor, *, title: str = "Add reset endp
     draft_story_lld(nodes["STORY_LLD"].id, DraftStoryLldRequest(triggered_by_user_id=actor.id), db)
     tech_lead = _tech_lead(db)
     update_lane_node_status(nodes["LLD_REVIEW"].id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=tech_lead.id), db)
+    # IMPLEMENTATION_PLAN sits between LLD_REVIEW and IMPLEMENTATION (see
+    # app/services/story_delivery.py) — its completion is what unlocks
+    # IMPLEMENTATION and triggers _ensure_story_implementation_task.
+    update_lane_node_status(nodes["IMPLEMENTATION_PLAN"].id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=tech_lead.id), db)
 
     story_row = db.get(Story, story.id)
     task = db.query(ImplementationTask).filter(ImplementationTask.story_id == story_row.id).first()

@@ -120,6 +120,10 @@ def _story_ready_for_testing(db, project, actor):
     draft_story_lld(nodes["STORY_LLD"].id, DraftStoryLldRequest(triggered_by_user_id=actor.id), db)
     tech_lead = _tech_lead(db)
     update_lane_node_status(nodes["LLD_REVIEW"].id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=tech_lead.id), db)
+    # IMPLEMENTATION_PLAN sits between LLD_REVIEW and IMPLEMENTATION (see
+    # app/services/story_delivery.py) — its completion is what unlocks
+    # IMPLEMENTATION and triggers _ensure_story_implementation_task.
+    update_lane_node_status(nodes["IMPLEMENTATION_PLAN"].id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=tech_lead.id), db)
 
     task = db.query(ImplementationTask).filter(ImplementationTask.story_id == story.id).first()
     _add_repository(db, project)
@@ -130,7 +134,8 @@ def _story_ready_for_testing(db, project, actor):
     # TESTING unlocks — this module's own gate (an accepted
     # ImplementationRun) is independent of these generic node-status
     # transitions, so completing them doesn't itself satisfy requirement 2.
-    for key in ("IMPLEMENTATION", "PULL_REQUEST", "PR_REVIEW_AGENT", "HUMAN_CODE_REVIEW"):
+    # TEST_SCENARIOS sits between IMPLEMENTATION and PULL_REQUEST.
+    for key in ("IMPLEMENTATION", "TEST_SCENARIOS", "PULL_REQUEST", "PR_REVIEW_AGENT", "HUMAN_CODE_REVIEW"):
         update_lane_node_status(nodes[key].id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=actor.id), db)
 
     story_row = db.get(Story, story.id)
@@ -160,7 +165,7 @@ def test_testing_blocked_until_implementation_is_accepted(db, project, actor):
     # Advance the lane's own sequence up through HUMAN_CODE_REVIEW without
     # ever creating/accepting a real ImplementationRun — this module's own
     # gate is independent of those generic node-status transitions.
-    for key in ("IMPLEMENTATION", "PULL_REQUEST", "PR_REVIEW_AGENT", "HUMAN_CODE_REVIEW"):
+    for key in ("IMPLEMENTATION_PLAN", "IMPLEMENTATION", "TEST_SCENARIOS", "PULL_REQUEST", "PR_REVIEW_AGENT", "HUMAN_CODE_REVIEW"):
         update_lane_node_status(nodes[key].id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=actor.id), db)
 
     task = db.query(ImplementationTask).filter(ImplementationTask.story_id == story.id).first()

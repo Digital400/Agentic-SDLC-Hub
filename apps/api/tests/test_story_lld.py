@@ -134,7 +134,11 @@ def test_lld_review_locked_until_story_lld_completes(db, project, actor):
     assert implementation.status == StoryDeliveryNodeStatus.LOCKED
 
 
-def test_implementation_unlocks_only_after_lld_review_completes(db, project, actor):
+def test_implementation_plan_unlocks_only_after_lld_review_completes(db, project, actor):
+    """IMPLEMENTATION_PLAN sits between LLD_REVIEW and IMPLEMENTATION (see
+    app/services/story_delivery.py) — LLD_REVIEW's completion unlocks
+    IMPLEMENTATION_PLAN directly; IMPLEMENTATION itself stays LOCKED
+    until IMPLEMENTATION_PLAN also completes."""
     story, lane, nodes = _lane_for_new_story(db, project, actor, with_hld_approved=True)
     _complete(db, nodes["STORY_READY"], actor)
     draft_story_lld(nodes["STORY_LLD"].id, DraftStoryLldRequest(triggered_by_user_id=actor.id), db)
@@ -143,6 +147,12 @@ def test_implementation_unlocks_only_after_lld_review_completes(db, project, act
     update_lane_node_status(nodes["LLD_REVIEW"].id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=tech_lead.id), db)
 
     from app.models import StoryDeliveryNode
+    implementation_plan = db.get(StoryDeliveryNode, nodes["IMPLEMENTATION_PLAN"].id)
+    assert implementation_plan.status == StoryDeliveryNodeStatus.READY
+    implementation = db.get(StoryDeliveryNode, nodes["IMPLEMENTATION"].id)
+    assert implementation.status == StoryDeliveryNodeStatus.LOCKED
+
+    update_lane_node_status(implementation_plan.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=tech_lead.id), db)
     implementation = db.get(StoryDeliveryNode, nodes["IMPLEMENTATION"].id)
     assert implementation.status == StoryDeliveryNodeStatus.READY
 
