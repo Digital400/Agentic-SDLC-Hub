@@ -23,12 +23,13 @@ import {
   ApiUser,
 } from "@/lib/api";
 
-type Tab = "lane" | "lld" | "implementation-plan" | "implementation" | "pr-review" | "testing";
+type Tab = "lane" | "lld" | "implementation-plan" | "test-scenarios" | "implementation" | "pr-review" | "testing";
 
 const TAB_LABELS: Record<Tab, string> = {
   lane: "Lane",
   lld: "LLD",
   "implementation-plan": "Implementation Plan",
+  "test-scenarios": "Test Scenarios",
   implementation: "Implementation",
   "pr-review": "PR Review",
   testing: "Testing",
@@ -60,6 +61,7 @@ export function StoryLaneWorkspace({
   initialNodes,
   initialLld,
   initialImplementationPlan,
+  initialTestScenarios,
   initialImplementationTask,
   initialImplementationRuns,
   initialTestRuns,
@@ -74,6 +76,7 @@ export function StoryLaneWorkspace({
   initialNodes: ApiStoryDeliveryNode[];
   initialLld: ApiStoryArtifact | null;
   initialImplementationPlan: ApiStoryArtifact | null;
+  initialTestScenarios: ApiStoryArtifact | null;
   initialImplementationTask: ApiImplementationTask | null;
   initialImplementationRuns: ApiImplementationRun[];
   initialTestRuns: ApiTestRun[];
@@ -87,6 +90,7 @@ export function StoryLaneWorkspace({
   const [nodes, setNodes] = useState(initialNodes);
   const [lld, setLld] = useState(initialLld);
   const [implementationPlan, setImplementationPlan] = useState(initialImplementationPlan);
+  const [testScenarios, setTestScenarios] = useState(initialTestScenarios);
   const [implementationTask, setImplementationTask] = useState(initialImplementationTask);
   const [implementationRuns, setImplementationRuns] = useState(initialImplementationRuns);
   const [testRuns, setTestRuns] = useState(initialTestRuns);
@@ -102,6 +106,7 @@ export function StoryLaneWorkspace({
   const storyLldNode = nodes.find((n) => n.node_key === "STORY_LLD") ?? null;
   const lldReviewNode = nodes.find((n) => n.node_key === "LLD_REVIEW") ?? null;
   const implementationPlanNode = nodes.find((n) => n.node_key === "IMPLEMENTATION_PLAN") ?? null;
+  const testScenariosNode = nodes.find((n) => n.node_key === "TEST_SCENARIOS") ?? null;
   const implementationLaneNode = nodes.find((n) => n.node_key === "IMPLEMENTATION") ?? null;
   const prReviewLaneNode = nodes.find((n) => n.node_key === "PR_REVIEW_AGENT") ?? null;
   const humanCodeReviewNode = nodes.find((n) => n.node_key === "HUMAN_CODE_REVIEW") ?? null;
@@ -129,6 +134,12 @@ export function StoryLaneWorkspace({
     } catch (err) {
       if (!(err instanceof ApiError && err.status === 404)) throw err;
       setImplementationPlan(null);
+    }
+    try {
+      setTestScenarios(await api.stories.getTestScenarios(story.id));
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 404)) throw err;
+      setTestScenarios(null);
     }
     try {
       const task = await api.stories.getImplementationTask(story.id);
@@ -319,10 +330,58 @@ export function StoryLaneWorkspace({
     }
   }
 
+  async function handleDraftTestScenarios() {
+    if (currentUserId === null || testScenariosNode === null) return;
+    setBusyNodeId(testScenariosNode.id);
+    setError(null);
+    try {
+      const result = await api.storyDelivery.draftTestScenarios(testScenariosNode.id, currentUserId);
+      if (result.needs_clarification) {
+        setError("The agent needs more information before it can draft this story's Test Scenarios — see the generated notes.");
+      }
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to draft the Test Scenarios.");
+    } finally {
+      setBusyNodeId(null);
+    }
+  }
+
+  async function handleApproveTestScenarios() {
+    if (currentUserId === null || testScenariosNode === null) return;
+    setBusyNodeId(testScenariosNode.id);
+    setError(null);
+    try {
+      await api.storyDelivery.updateNodeStatus(testScenariosNode.id, { status: "COMPLETED", actor_user_id: currentUserId });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to approve these Test Scenarios — only QA or a Tech Lead may.");
+    } finally {
+      setBusyNodeId(null);
+    }
+  }
+
+  async function handleRequestChangesOnTestScenarios() {
+    if (currentUserId === null || testScenariosNode === null) return;
+    const reason = window.prompt("What changes are needed?") ?? "";
+    setBusyNodeId(testScenariosNode.id);
+    setError(null);
+    try {
+      await api.storyDelivery.updateNodeStatus(testScenariosNode.id, {
+        status: "BLOCKED", actor_user_id: currentUserId, blocked_reason: reason || "Changes requested.",
+      });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to request changes on these Test Scenarios.");
+    } finally {
+      setBusyNodeId(null);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex gap-1 border-b border-border">
-        {(["lane", "lld", "implementation-plan", "implementation", "pr-review", "testing"] as Tab[]).map((t) => (
+        {(["lane", "lld", "implementation-plan", "test-scenarios", "implementation", "pr-review", "testing"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -494,6 +553,67 @@ export function StoryLaneWorkspace({
               <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
                 <FileText className="h-6 w-6" />
                 No Implementation Plan has been drafted yet.
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {tab === "test-scenarios" && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">Test Scenarios</CardTitle>
+              <CardDescription>
+                Scoped to exactly this story. Based on the story, Story LLD, and Implementation Plan. Testing uses
+                these scenarios once approved.
+                {testScenariosNode && <> Node: {testScenariosNode.status}.</>}
+              </CardDescription>
+            </div>
+            {testScenariosNode && testScenariosNode.status !== "LOCKED" && (
+              <Button
+                size="sm" variant="outline" onClick={handleDraftTestScenarios}
+                disabled={busyNodeId === testScenariosNode.id || currentUserId === null}
+              >
+                {busyNodeId === testScenariosNode.id ? (
+                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                )}
+                {testScenarios ? "Regenerate" : "Draft Test Scenarios"}
+              </Button>
+            )}
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            {testScenariosNode?.status === "LOCKED" ? (
+              <p className="text-sm text-muted-foreground">Test Scenarios is locked — Implementation must complete first.</p>
+            ) : testScenarios ? (
+              <>
+                <div className="max-h-[70vh] overflow-y-auto rounded-md border border-border bg-muted/30 p-4">
+                  <pre className="whitespace-pre-wrap font-sans text-sm">{testScenarios.content_markdown}</pre>
+                </div>
+                {testScenariosNode && testScenariosNode.status !== "COMPLETED" && (
+                  <div className="flex gap-2">
+                    <Button size="sm" onClick={handleApproveTestScenarios} disabled={busyNodeId === testScenariosNode.id}>
+                      <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Approve
+                    </Button>
+                    <Button
+                      size="sm" variant="outline" onClick={handleRequestChangesOnTestScenarios}
+                      disabled={busyNodeId === testScenariosNode.id}
+                    >
+                      <XCircle className="mr-1 h-3.5 w-3.5" /> Request Changes
+                    </Button>
+                  </div>
+                )}
+                {testScenariosNode?.status === "COMPLETED" && <Badge variant="success">Approved</Badge>}
+                {testScenariosNode?.status === "BLOCKED" && testScenariosNode.blocked_reason && (
+                  <p className="text-sm text-destructive">Changes requested: {testScenariosNode.blocked_reason}</p>
+                )}
+              </>
+            ) : (
+              <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
+                <FileText className="h-6 w-6" />
+                No Test Scenarios have been drafted yet.
               </div>
             )}
           </CardContent>

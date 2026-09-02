@@ -56,6 +56,7 @@ from app.services.retrieval import retrieve_relevant_chunks
 from app.services.story_delivery import advance_lane
 from app.services.story_export import Story as StoryDataclass
 from app.services.story_lld_agent import STORY_LLD_ARTIFACT_TYPE
+from app.services.story_test_scenarios_agent import get_latest_story_test_scenarios
 from app.services.testing_agent import (
     COVERAGE_IMPACT_PLACEHOLDER,
     STORY_TEST_REPORT_ARTIFACT_TYPE,
@@ -205,6 +206,7 @@ def start_test_run(payload: StartTestRunRequest, db: Session = Depends(get_db)) 
     # story-scoped), existing test file paths, and RAG testing-pattern
     # chunks. None of these block a run.
     story_dataclass: StoryDataclass | None = None
+    test_scenarios_content = ""
     if story_row is not None:
         lld_content = ""
         story_lld_artifact = (
@@ -216,6 +218,13 @@ def start_test_run(payload: StartTestRunRequest, db: Session = Depends(get_db)) 
         if story_lld_artifact is not None:
             lld_content = story_lld_artifact.content_markdown
         lld_summary = lld_content
+        # Story Test Scenario Agent, rule 4 — "Testing stage should use
+        # these scenarios later." Additive: a story with no drafted/
+        # approved scenarios yet just gets "(not available)" in the
+        # agent's prompt (see testing_agent.py), never blocks a run.
+        test_scenarios_artifact = get_latest_story_test_scenarios(db, story_row.id)
+        if test_scenarios_artifact is not None:
+            test_scenarios_content = test_scenarios_artifact.content_markdown
         story_dataclass = StoryDataclass(
             title=story_row.title, epic=story_row.epic, feature=story_row.feature, user_story=story_row.user_story,
             priority=story_row.priority, dependencies=story_row.dependencies,
@@ -266,6 +275,7 @@ def start_test_run(payload: StartTestRunRequest, db: Session = Depends(get_db)) 
         result = run_testing_agent(
             task=task, agent_type=payload.agent_type, diff_text=implementation_run.diff_text, lld_summary=lld_summary,
             existing_test_paths=existing_test_paths, pattern_chunks=pattern_chunks, story=story_dataclass,
+            test_scenarios=test_scenarios_content,
         )
         result.evidence_attachments = payload.evidence_attachments
     except Exception as exc:  # noqa: BLE001 — anything unexpected fails this run cleanly, never a bare 500

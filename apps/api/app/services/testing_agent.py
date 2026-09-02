@@ -116,11 +116,17 @@ def _build_heuristic_result(
     diff_text: str,
     existing_test_paths: list[str],
     story: Story | None = None,
+    test_scenarios: str = "",
 ) -> TestingAgentResult:
     criteria = task.acceptance_criteria or [f"{task.title} behaves as described."]
     test_plan_lines = [f"- Verify: {c}" for c in criteria]
     if existing_test_paths:
         test_plan_lines.append(f"- Extend existing coverage in: {', '.join(existing_test_paths[:5])}")
+    if test_scenarios.strip():
+        # Rule 4 — "Testing stage should use these scenarios later." Not
+        # re-parsed/re-derived, just surfaced as-is so a human reviewing
+        # the test plan can see the scenarios it was built alongside.
+        test_plan_lines.append("- See the story's own Test Scenarios document for the full scenario set this plan is based on.")
 
     tests_to_add = [
         TestToAdd(name=f"test_{i}_{_slug(c)}", description=f"Verify: {c}", area=agent_type.value)
@@ -180,6 +186,7 @@ def _run_real_agent(
     existing_test_paths: list[str],
     pattern_chunks: list[RetrievedChunk],
     story: Story | None = None,
+    test_scenarios: str = "",
 ) -> TestingAgentResult:
     # Plain substring replace, not str.format — the template's JSON-shape
     # examples contain literal `{`/`}` that .format() would misparse as
@@ -198,6 +205,11 @@ def _run_real_agent(
         f"Acceptance criteria: {'; '.join(task.acceptance_criteria) or '(none declared)'}\n\n"
         f"# Related story\n{story_text}\n\n"
         f"# Approved LLD summary\n{lld_summary or '(not available)'}\n\n"
+        # Rule 4 — "Testing stage should use these scenarios later." The
+        # story's own Test Scenarios document (see
+        # app/services/story_test_scenarios_agent.py), if one has been
+        # approved — additive context, same as everything else here.
+        f"# Approved Test Scenarios\n{test_scenarios or '(not available)'}\n\n"
         f"# PR diff\n{diff_text or '(no diff available)'}\n\n"
         f"# Existing test files in the repository\n{', '.join(existing_test_paths) or '(none found)'}\n\n"
         f"# Existing test patterns / standards\n{patterns_text}"
@@ -242,14 +254,18 @@ def run_testing_agent(
     existing_test_paths: list[str],
     pattern_chunks: list[RetrievedChunk],
     story: Story | None = None,
+    test_scenarios: str = "",
 ) -> TestingAgentResult:
     """Real AI when configured; the deterministic heuristic otherwise, or if
     the real call errors or returns unparseable JSON (logged, not raised —
     same contract as every other agent in this codebase). `story`
     (requirement 4) is additive context — a story-scoped run's task
-    already carries the same acceptance criteria either way."""
+    already carries the same acceptance criteria either way. `test_scenarios`
+    is likewise additive (Story Test Scenario Agent rule 4 — "Testing
+    stage should use these scenarios later")."""
     kwargs = dict(
         task=task, agent_type=agent_type, diff_text=diff_text, existing_test_paths=existing_test_paths, story=story,
+        test_scenarios=test_scenarios,
     )
     if get_active_provider() == "mock":
         return _build_heuristic_result(**kwargs)

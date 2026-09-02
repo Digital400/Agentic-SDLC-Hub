@@ -1619,6 +1619,8 @@ export const api = {
     getLld: (storyId: string) => get<ApiStoryArtifact>(`/stories/${storyId}/lld`),
     // 404s when no Implementation Plan has been drafted yet.
     getImplementationPlan: (storyId: string) => get<ApiStoryArtifact>(`/stories/${storyId}/implementation-plan`),
+    // 404s when no Test Scenarios have been drafted yet.
+    getTestScenarios: (storyId: string) => get<ApiStoryArtifact>(`/stories/${storyId}/test-scenarios`),
     // 404s until Story LLD/LLD_REVIEW is approved — see
     // app/api/routes/stories.py's _ensure_story_implementation_task.
     getImplementationTask: (storyId: string) => get<ApiImplementationTask>(`/stories/${storyId}/implementation-task`),
@@ -1641,6 +1643,11 @@ export const api = {
     draftImplementationPlan: (nodeId: string, triggeredByUserId: string) =>
       post<{ needs_clarification: boolean; story_artifact: ApiStoryArtifact | null; node_status: string }>(
         `/delivery-lane-nodes/${nodeId}/draft-implementation-plan`,
+        { triggered_by_user_id: triggeredByUserId }
+      ),
+    draftTestScenarios: (nodeId: string, triggeredByUserId: string) =>
+      post<{ needs_clarification: boolean; story_artifact: ApiStoryArtifact | null; node_status: string }>(
+        `/delivery-lane-nodes/${nodeId}/draft-test-scenarios`,
         { triggered_by_user_id: triggeredByUserId }
       ),
   },

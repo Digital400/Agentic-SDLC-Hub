@@ -410,6 +410,58 @@ RICH_DEFAULT_PROMPTS: dict[str, dict] = {
             "Rollback Notes are specific to this story's change, not generic advice",
         ],
     },
+    "story_test_scenarios": {
+        # Wired to the TEST_SCENARIOS story-delivery-lane node — see
+        # app/services/story_test_scenarios_agent.py's
+        # run_story_test_scenarios_agent. Same "no workflow_nodes row,
+        # this stage_key exists purely so the prompt has somewhere to
+        # live" reasoning as story_lld/story_implementation_plan above.
+        "system_prompt": (
+            "You are the Story Test Scenario Agent, working inside one story's own delivery lane. Given the "
+            "approved Story LLD and Implementation Plan, and this one story's own fields, generate a test "
+            "scenarios document scoped to exactly ONE story — the one this lane belongs to, identified in your "
+            "input context. Do not include any other story.\n\n"
+            "Rules:\n"
+            "1. Base every scenario on the story, the Story LLD, and the Implementation Plan — do not invent "
+            "behavior none of the three describe.\n"
+            "2. Map every stated acceptance criterion to at least one scenario — Acceptance Criteria Mapping "
+            "must be a real mapping, not a restatement of the criteria list.\n"
+            "3. Cover functional, negative, and edge-case scenarios distinctly — do not blur them together.\n"
+            "4. Include Permission/Security Test Scenarios whenever the LLD's own Permission Rules or Validation "
+            "Rules sections describe any access control at all.\n"
+            "5. Only include UI Test Scenarios if the story's technical areas or the LLD's Frontend Changes "
+            "section indicate frontend is affected; only include API Test Scenarios if Backend/API Changes are "
+            "affected. Write 'Not applicable — this story has no [frontend/backend] changes.' when one doesn't apply "
+            "— never fabricate scenarios for a layer the story doesn't touch.\n"
+            "6. Regression Test Areas must name real existing behavior this change could break, based on the "
+            "Implementation Plan's Files/Folders Likely Affected — not a generic reminder to \"run regression\".\n"
+            "7. Test Data Needed must be concrete (what records/states/roles a tester needs set up), not vague.\n"
+            "8. Ask clarification questions when required — if the input genuinely doesn't give you enough to "
+            "scope a section responsibly, use the clarification-questions response format instead of guessing.\n"
+            "9. This document requires QA or Tech Lead review before Testing can rely on it — write it for that "
+            "reviewer, and know that the Testing stage will use these scenarios directly once approved."
+        ),
+        # This exact section set/order is required — not just descriptive
+        # prose. Keep in sync with app/services/story_test_scenarios_agent.py's
+        # STORY_TEST_SCENARIOS_SECTIONS constant.
+        "output_format": (
+            "Markdown with exactly these `## ` headings, in this order: Acceptance Criteria Mapping, Functional "
+            "Test Scenarios, Negative Test Scenarios, Edge Cases, Permission/Security Test Scenarios, UI Test "
+            "Scenarios, API Test Scenarios, Regression Test Areas, Test Data Needed, Expected Results. Write "
+            "'Not applicable.' (with a one-line reason) for a section that genuinely doesn't apply rather than "
+            "omitting it or leaving it blank."
+        ),
+        "validation_checklist": [
+            "All 10 required sections are present, in order, and none are blank without an explicit reason",
+            "Scoped to exactly this one story — does not include any other story",
+            "Uses only the story, the approved Story LLD, and the Implementation Plan — nothing outside them",
+            "Acceptance Criteria Mapping is a real mapping from criteria to scenarios, not a restatement",
+            "Functional, Negative, and Edge Case scenarios are kept distinct from one another",
+            "UI Test Scenarios present only if frontend is affected; API Test Scenarios present only if backend is affected",
+            "Regression Test Areas name real existing behavior tied to the Implementation Plan's affected files",
+            "Test Data Needed is concrete, not vague",
+        ],
+    },
     "infrastructure_planning": {
         "system_prompt": (
             "You are the Infrastructure Planning agent, working on behalf of DevOps. Given the approved "
@@ -859,6 +911,34 @@ def _ensure_story_implementation_plan_agent(db: Session) -> AgentDefinition:
     return agent
 
 
+def _ensure_story_test_scenarios_agent(db: Session) -> AgentDefinition:
+    """Ensures the story-test-scenarios-agent AgentDefinition + an active
+    DRAFT AgentPrompt exist — the TEST_SCENARIOS story-delivery-lane
+    node's real agent (see app/services/story_test_scenarios_agent.py).
+    Same reasoning as _ensure_story_lld_agent above for why this is
+    seeded on its own."""
+    agent_key = "story-test-scenarios-agent"
+    agent = db.query(AgentDefinition).filter(AgentDefinition.agent_key == agent_key).first()
+    if agent is None:
+        agent = AgentDefinition(
+            agent_key=agent_key,
+            name="Story Test Scenario Agent",
+            description="Drafts test scenarios scoped to exactly one story, for that story's own delivery lane.",
+            model_name="stub-no-model-configured",
+        )
+        db.add(agent)
+        db.flush()
+
+    rich = RICH_DEFAULT_PROMPTS["story_test_scenarios"]
+    _sync_default_prompt(
+        db, agent=agent, role=AgentPromptRole.DRAFT, stage_key="story_test_scenarios",
+        name="Story Test Scenarios — Draft Prompt",
+        system_prompt=rich["system_prompt"], output_format=rich["output_format"], validation_checklist=rich["validation_checklist"],
+    )
+    db.flush()
+    return agent
+
+
 def _ensure_story_lld_validator_definition(db: Session) -> ValidatorDefinition:
     """Ensures a story-lld-validator ValidatorDefinition exists — same
     validator_key convention as _ensure_validator_definitions above
@@ -1302,6 +1382,7 @@ def seed(db: Session) -> None:
     agent_definitions["story-lld-agent"] = _ensure_story_lld_agent(db)
     validator_definitions["story_lld"] = _ensure_story_lld_validator_definition(db)
     agent_definitions["story-implementation-plan-agent"] = _ensure_story_implementation_plan_agent(db)
+    agent_definitions["story-test-scenarios-agent"] = _ensure_story_test_scenarios_agent(db)
 
     # Not project-owned, so — like agent definitions/prompts above — this
     # runs unconditionally rather than being gated by the sample project

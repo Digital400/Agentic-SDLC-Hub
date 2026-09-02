@@ -48,6 +48,8 @@ from app.schemas.story import (
     DraftStoryImplementationPlanResponse,
     DraftStoryLldRequest,
     DraftStoryLldResponse,
+    DraftStoryTestScenariosRequest,
+    DraftStoryTestScenariosResponse,
     StoryArtifactRead,
     StoryCreate,
     StoryDeliveryLaneRead,
@@ -69,6 +71,11 @@ from app.services.story_implementation_plan_agent import (
     STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE,
     StoryImplementationPlanError,
     run_story_implementation_plan_agent,
+)
+from app.services.story_test_scenarios_agent import (
+    STORY_TEST_SCENARIOS_ARTIFACT_TYPE,
+    StoryTestScenariosError,
+    run_story_test_scenarios_agent,
 )
 from app.services.story_lld_agent import STORY_LLD_ARTIFACT_TYPE, StoryLldError, run_story_lld_agent
 from app.services.testing_agent import STORY_TEST_REPORT_ARTIFACT_TYPE
@@ -602,6 +609,17 @@ def update_lane_node_status(
         if plan_artifact is None:
             raise HTTPException(status.HTTP_409_CONFLICT, "Cannot accept — no Implementation Plan has been drafted for this story yet.")
 
+    # Story Test Scenario Agent, rule 3 — "QA or Tech Lead can
+    # review/approve test scenarios." Same review-is-this-node's-own-
+    # completion pattern as IMPLEMENTATION_PLAN above, but role-only (no
+    # assignee override — the rule names two roles, not "or whoever it's
+    # assigned to"); "Request Changes" is likewise the same endpoint with
+    # status=BLOCKED.
+    if node.node_key == "TEST_SCENARIOS" and new_status == StoryDeliveryNodeStatus.COMPLETED and actor.role not in (UserRole.QA, UserRole.TECH_LEAD, UserRole.ADMIN):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, f"Role {actor.role.value} may not approve these Test Scenarios — QA or Tech Lead only."
+        )
+
     # HARDENING FIX — "Human approval is required before final Done."
     # RELEASE_READY is this lane's terminal node; completing it is what
     # marks the story DONE (see advance_lane below). Until now nothing
@@ -643,6 +661,14 @@ def update_lane_node_status(
         elif new_status == StoryDeliveryNodeStatus.BLOCKED:
             _log_story_activity(
                 db, story=story, action="story_implementation_plan.changes_requested", actor=actor, lane_id=lane.id, node_id=node.id,
+                details={"reason": payload.blocked_reason},
+            )
+    if node.node_key == "TEST_SCENARIOS":
+        if new_status == StoryDeliveryNodeStatus.COMPLETED:
+            _log_story_activity(db, story=story, action="story_test_scenarios.approved", actor=actor, lane_id=lane.id, node_id=node.id)
+        elif new_status == StoryDeliveryNodeStatus.BLOCKED:
+            _log_story_activity(
+                db, story=story, action="story_test_scenarios.changes_requested", actor=actor, lane_id=lane.id, node_id=node.id,
                 details={"reason": payload.blocked_reason},
             )
 
@@ -774,6 +800,62 @@ def get_story_implementation_plan(story_id: uuid.UUID, db: Session = Depends(get
     )
     if artifact is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} has no Implementation Plan drafted yet.")
+    return artifact
+
+
+@router.post("/delivery-lane-nodes/{node_id}/draft-test-scenarios", response_model=DraftStoryTestScenariosResponse)
+def draft_story_test_scenarios(
+    node_id: uuid.UUID, payload: DraftStoryTestScenariosRequest, db: Session = Depends(get_db)
+) -> DraftStoryTestScenariosResponse:
+    """Drafts the TEST_SCENARIOS node's real output. See
+    app/services/story_test_scenarios_agent.py for the preconditions and
+    the 10-section output shape. Drafting never completes the node —
+    see update_lane_node_status's TEST_SCENARIOS branch for the separate
+    review/approve action."""
+    node = db.get(StoryDeliveryNode, node_id)
+    if node is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Delivery lane node {node_id} not found")
+    if node.node_key != "TEST_SCENARIOS":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Node {node_id} is '{node.node_key}', not TEST_SCENARIOS.")
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+    require_can_edit_stage(triggered_by, "story_test_scenarios")
+
+    try:
+        result = run_story_test_scenarios_agent(db, node=node, triggered_by=triggered_by)
+    except StoryTestScenariosError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    lane = node.lane
+    story = db.get(Story, lane.story_id)
+    _log_story_activity(
+        db, story=story, action="story_test_scenarios.drafted", actor=triggered_by, lane_id=lane.id, node_id=node.id,
+        details={"needs_clarification": result.needs_clarification, "used_mock": result.agent_run_used_mock},
+    )
+
+    db.commit()
+    db.refresh(node)
+    return DraftStoryTestScenariosResponse(
+        needs_clarification=result.needs_clarification,
+        story_artifact=StoryArtifactRead.model_validate(result.story_artifact) if result.story_artifact else None,
+        node_status=node.status.value,
+    )
+
+
+@router.get("/stories/{story_id}/test-scenarios", response_model=StoryArtifactRead)
+def get_story_test_scenarios(story_id: uuid.UUID, db: Session = Depends(get_db)) -> StoryArtifact:
+    """The latest STORY_TEST_SCENARIOS StoryArtifact for this story, if
+    one has been drafted yet."""
+    story = _get_story_or_404(db, story_id)
+    artifact = (
+        db.query(StoryArtifact)
+        .filter(StoryArtifact.story_id == story.id, StoryArtifact.artifact_type == STORY_TEST_SCENARIOS_ARTIFACT_TYPE)
+        .order_by(StoryArtifact.version_number.desc())
+        .first()
+    )
+    if artifact is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} has no Test Scenarios drafted yet.")
     return artifact
 
 

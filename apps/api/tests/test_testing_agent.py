@@ -73,6 +73,24 @@ def test_heuristic_never_fabricates_a_pass_fail_result():
     assert result.fail_count == 0
 
 
+def test_heuristic_surfaces_test_scenarios_when_provided():
+    """Story Test Scenario Agent, rule 4 — "Testing stage should use
+    these scenarios later." `test_scenarios` is additive: absent, the
+    plan is unaffected; present, the plan points at it."""
+    task = _FakeTask()
+
+    without = run_testing_agent(
+        task=task, agent_type=TestAgentType.UNIT, diff_text="", lld_summary="", existing_test_paths=[], pattern_chunks=[],
+    )
+    with_scenarios = run_testing_agent(
+        task=task, agent_type=TestAgentType.UNIT, diff_text="", lld_summary="", existing_test_paths=[], pattern_chunks=[],
+        test_scenarios="## Functional Test Scenarios\n- Verify password reset email is sent.\n",
+    )
+
+    assert "Test Scenarios" not in without.test_plan
+    assert "Test Scenarios" in with_scenarios.test_plan
+
+
 def test_heuristic_flags_a_todo_scaffold_diff_as_a_bug_and_suggests_a_fix():
     task = _FakeTask()
     result = run_testing_agent(

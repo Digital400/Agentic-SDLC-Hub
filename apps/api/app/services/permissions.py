@@ -43,6 +43,7 @@ STAGE_EDIT_ROLES: dict[str, set[UserRole]] = {
     # --- Scrum story lanes (workflows/scrum-story-lanes-*.json) ---
     "story_lld": {UserRole.ARCHITECT, UserRole.TECH_LEAD},  # inferred default — same owners as lld
     "story_implementation_plan": {UserRole.TECH_LEAD, UserRole.DEVELOPER},  # inferred default — same owners as implementation_planning
+    "story_test_scenarios": {UserRole.QA, UserRole.TECH_LEAD},  # explicit — rule 3 names both as reviewers
     "sprint_planning": {UserRole.PRODUCT_OWNER},  # inferred default
     "release_planning": {UserRole.PRODUCT_OWNER, UserRole.DEVOPS},  # inferred default
 }
