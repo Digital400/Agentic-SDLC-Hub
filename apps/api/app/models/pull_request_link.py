@@ -41,6 +41,17 @@ class PullRequestLink(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Set only for a PR created inside a per-story delivery lane — see
     # app/models/story.py.
     story_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), nullable=True)
+    lane_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("story_delivery_lanes.id", ondelete="CASCADE"), nullable=True)
+    # Set only when this PR was opened from a CodeRunnerService-pushed
+    # branch (see app/services/story_code_implementation.py's
+    # create_pull_request_from_code_run) rather than the older
+    # commit-file-by-file-via-REST-API path (create_pull_request in
+    # app/api/routes/implementation_runs.py), which never touches this.
+    code_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("code_runs.id", ondelete="SET NULL"), nullable=True)
+    # Denormalized from Story.jira_issue_key at PR-creation time — kept
+    # here too so a PR's own Jira linkage survives even if the story is
+    # later re-synced to a different issue; never written back to Jira.
+    jira_issue_key: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     branch_name: Mapped[str] = mapped_column(String(255), nullable=False)
     base_branch: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -66,4 +77,6 @@ class PullRequestLink(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     implementation_run: Mapped["ImplementationRun"] = relationship("ImplementationRun")
     repository: Mapped["Repository"] = relationship("Repository")
     story: Mapped["Story | None"] = relationship("Story")
+    lane: Mapped["StoryDeliveryLane | None"] = relationship("StoryDeliveryLane")
+    code_run: Mapped["CodeRun | None"] = relationship("CodeRun")
     triggered_by: Mapped["User | None"] = relationship("User", foreign_keys=[triggered_by_user_id])

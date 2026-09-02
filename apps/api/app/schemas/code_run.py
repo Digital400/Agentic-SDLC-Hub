@@ -31,6 +31,11 @@ class CodeRunRead(BaseModel):
     updated_at: datetime
 
 
+class CreatePrFromCodeRunRequest(BaseModel):
+    triggered_by_user_id: uuid.UUID = Field(..., description="Existing user id — who triggered PR creation.")
+    base_branch: str | None = Field(default=None, description="Defaults to the repository's default_branch.")
+
+
 class ApplyViaCodeRunnerRequest(BaseModel):
     implementation_run_id: uuid.UUID = Field(..., description="An ACCEPTED, story-scoped ImplementationRun.")
     triggered_by_user_id: uuid.UUID = Field(..., description="Existing user id — who triggered the apply.")

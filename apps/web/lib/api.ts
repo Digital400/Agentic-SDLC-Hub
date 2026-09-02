@@ -199,10 +199,14 @@ export type ApiPullRequestStatus = "OPEN" | "MERGED" | "CLOSED";
 export interface ApiPullRequestLink {
   id: string;
   project_id: string;
-  workflow_node_id: string;
+  workflow_node_id: string | null;
   implementation_task_id: string;
   implementation_run_id: string;
   repository_id: string;
+  story_id: string | null;
+  lane_id: string | null;
+  code_run_id: string | null;
+  jira_issue_key: string | null;
   branch_name: string;
   base_branch: string;
   pr_number: number;
@@ -212,6 +216,38 @@ export interface ApiPullRequestLink {
   triggered_by_user_id: string | null;
   commit_message: string;
   created_at: string;
+}
+
+// CodeRunnerService — see app/models/code_run.py and
+// app/api/routes/code_runs.py. The local-git alternative to
+// api.implementationRuns.createPullRequest (which commits file-by-file
+// through GitHub's REST API); this applies an accepted patch through a
+// real, isolated clone, runs configured tests, and only on success
+// commits/pushes a real branch.
+export type ApiCodeRunStatus =
+  | "QUEUED" | "CLONING" | "BRANCH_CREATED" | "APPLYING_CHANGES" | "TESTING" | "COMMITTED" | "PUSHED" | "FAILED";
+
+export interface ApiCodeRunLogEntry {
+  timestamp: string;
+  level: string;
+  message: string;
+}
+
+export interface ApiCodeRun {
+  id: string;
+  project_id: string;
+  story_id: string;
+  lane_id: string | null;
+  repository_id: string;
+  triggered_by_user_id: string | null;
+  branch_name: string;
+  status: ApiCodeRunStatus;
+  started_at: string | null;
+  completed_at: string | null;
+  logs: ApiCodeRunLogEntry[];
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ApiImplementationRun {
@@ -1395,6 +1431,20 @@ export const api = {
     // the run is ACCEPTED. Never targets the repository's default branch.
     createPullRequest: (id: string, body: { triggered_by_user_id: string; base_branch?: string | null }) =>
       post<ApiImplementationRun>(`/implementation-runs/${id}/create-pull-request`, body),
+  },
+
+  // CodeRunnerService — the local-git alternative flow: apply an
+  // accepted patch through a real isolated clone, run configured tests,
+  // and only on success commit/push a real branch (see
+  // app/api/routes/code_runs.py). Story-scoped implementation runs only.
+  codeRuns: {
+    apply: (body: { implementation_run_id: string; triggered_by_user_id: string; base_branch?: string | null; test_commands?: string[] }) =>
+      post<ApiCodeRun>("/code-runs", body),
+    get: (id: string) => get<ApiCodeRun>(`/code-runs/${id}`),
+    // Only reachable once the CodeRun reached PUSHED — creates a real
+    // GitHub PR from the already-pushed branch (no further commits).
+    createPullRequest: (id: string, body: { triggered_by_user_id: string; base_branch?: string | null }) =>
+      post<ApiPullRequestLink>(`/code-runs/${id}/create-pull-request`, body),
   },
 
   // Testing Agent system — see app/api/routes/test_runs.py. QA approval

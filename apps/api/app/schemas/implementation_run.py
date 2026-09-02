@@ -30,6 +30,10 @@ class PullRequestLinkRead(BaseModel):
     implementation_task_id: uuid.UUID
     implementation_run_id: uuid.UUID
     repository_id: uuid.UUID
+    story_id: uuid.UUID | None
+    lane_id: uuid.UUID | None
+    code_run_id: uuid.UUID | None
+    jira_issue_key: str | None
     branch_name: str
     base_branch: str
     pr_number: int

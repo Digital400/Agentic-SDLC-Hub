@@ -10,10 +10,12 @@ import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import {
   api,
+  ApiCodeRun,
   ApiError,
   ApiImplementationRun,
   ApiImplementationTask,
   ApiPRReviewRun,
+  ApiPullRequestLink,
   ApiStory,
   ApiStoryArtifact,
   ApiStoryDeliveryLane,
@@ -99,6 +101,9 @@ export function StoryLaneWorkspace({
   const [testAgentType, setTestAgentType] = useState<ApiTestAgentType>("UNIT");
   const [busyNodeId, setBusyNodeId] = useState<string | null>(null);
   const [runBusy, setRunBusy] = useState(false);
+  const [codeRun, setCodeRun] = useState<ApiCodeRun | null>(null);
+  const [codeRunPr, setCodeRunPr] = useState<ApiPullRequestLink | null>(null);
+  const [codeRunBusy, setCodeRunBusy] = useState(false);
   const [testRunBusy, setTestRunBusy] = useState(false);
   const [prReviewBusy, setPrReviewBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -201,6 +206,39 @@ export function StoryLaneWorkspace({
       setError(err instanceof ApiError ? err.message : "Failed to create the pull request.");
     } finally {
       setRunBusy(false);
+    }
+  }
+
+  // CodeRunnerService — the local-git alternative to the REST-API-based
+  // Create Pull Request button above (see app/api/routes/code_runs.py).
+  async function handleRunViaCodeRunner() {
+    if (currentUserId === null || latestRun === null) return;
+    setCodeRunBusy(true);
+    setError(null);
+    try {
+      const result = await api.codeRuns.apply({ implementation_run_id: latestRun.id, triggered_by_user_id: currentUserId });
+      setCodeRun(result);
+      setCodeRunPr(null);
+      if (result.status === "FAILED") {
+        setError(result.error_message || "The code runner pipeline failed — see its logs below.");
+      }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to run the code runner pipeline.");
+    } finally {
+      setCodeRunBusy(false);
+    }
+  }
+
+  async function handleCreatePrFromCodeRun() {
+    if (currentUserId === null || codeRun === null) return;
+    setCodeRunBusy(true);
+    setError(null);
+    try {
+      setCodeRunPr(await api.codeRuns.createPullRequest(codeRun.id, { triggered_by_user_id: currentUserId }));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to create the pull request from this code run.");
+    } finally {
+      setCodeRunBusy(false);
     }
   }
 
@@ -735,6 +773,58 @@ export function StoryLaneWorkspace({
                             className="inline-flex w-fit items-center gap-1 text-sm font-medium text-primary underline-offset-2 hover:underline"
                           >
                             <GitPullRequest className="h-3.5 w-3.5" /> PR #{latestRun.pull_request.pr_number} (branch {latestRun.pull_request.branch_name})
+                          </a>
+                        )}
+
+                        {/* CodeRunnerService — local-git alternative: apply the accepted patch
+                            through a real isolated clone, run configured tests, commit, push,
+                            then create the GitHub PR from that already-pushed branch. */}
+                        {latestRun.review_status === "ACCEPTED" && !latestRun.pull_request && !codeRunPr && (
+                          <div className="flex flex-col gap-2 rounded-md border border-dashed border-border p-3">
+                            <p className="text-xs font-medium text-muted-foreground">Or run via Code Runner (real isolated clone, tests, commit, push):</p>
+                            <div className="flex items-center gap-2">
+                              <Button size="sm" variant="outline" onClick={handleRunViaCodeRunner} disabled={codeRunBusy}>
+                                {codeRunBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <PlayCircle className="mr-1 h-3.5 w-3.5" />}
+                                {codeRun ? "Re-run via Code Runner" : "Run via Code Runner"}
+                              </Button>
+                              {codeRun && (
+                                <Badge
+                                  variant={codeRun.status === "PUSHED" ? "success" : codeRun.status === "FAILED" ? "destructive" : "warning"}
+                                >
+                                  {codeRun.status}
+                                </Badge>
+                              )}
+                            </div>
+                            {codeRun && codeRun.status === "FAILED" && (
+                              <p className="text-xs text-destructive">{codeRun.error_message}</p>
+                            )}
+                            {codeRun && codeRun.logs.length > 0 && (
+                              <details className="text-xs text-muted-foreground">
+                                <summary className="cursor-pointer">CodeRun logs ({codeRun.logs.length})</summary>
+                                <div className="mt-1 max-h-40 overflow-y-auto rounded-md border border-border bg-muted/30 p-2 font-mono">
+                                  {codeRun.logs.map((entry, i) => (
+                                    <div key={i} className={entry.level === "ERROR" ? "text-destructive" : undefined}>
+                                      [{entry.level}] {entry.message}
+                                    </div>
+                                  ))}
+                                </div>
+                              </details>
+                            )}
+                            {codeRun && codeRun.status === "PUSHED" && (
+                              <Button size="sm" onClick={handleCreatePrFromCodeRun} disabled={codeRunBusy} className="w-fit">
+                                <GitPullRequest className="mr-1 h-3.5 w-3.5" /> Create GitHub PR
+                              </Button>
+                            )}
+                          </div>
+                        )}
+                        {codeRunPr && (
+                          <a
+                            href={codeRunPr.pr_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex w-fit items-center gap-1 text-sm font-medium text-primary underline-offset-2 hover:underline"
+                          >
+                            <GitPullRequest className="h-3.5 w-3.5" /> Open GitHub PR — #{codeRunPr.pr_number} (branch {codeRunPr.branch_name})
                           </a>
                         )}
                       </>

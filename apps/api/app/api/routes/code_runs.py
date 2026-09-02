@@ -19,13 +19,16 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.api.routes.github_integration import decrypt_repository_token
 from app.core.database import get_db
-from app.models import CodeRun, ImplementationRun, Repository, Story, User
-from app.schemas.code_run import ApplyViaCodeRunnerRequest, CodeRunRead
+from app.models import CodeRun, ImplementationRun, PullRequestLink, Repository, Story, User
+from app.schemas.code_run import ApplyViaCodeRunnerRequest, CodeRunRead, CreatePrFromCodeRunRequest
+from app.schemas.implementation_run import PullRequestLinkRead
 from app.services.audit import record_audit_log
 from app.services.story_code_implementation import (
     StoryCodeImplementationError,
     create_code_run,
+    create_pull_request_from_code_run,
     run_code_implementation_pipeline,
 )
 
@@ -85,3 +88,46 @@ def get_code_run(code_run_id: uuid.UUID, db: Session = Depends(get_db)) -> CodeR
     if code_run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"CodeRun {code_run_id} not found")
     return code_run
+
+
+@router.post("/{code_run_id}/create-pull-request", response_model=PullRequestLinkRead, status_code=status.HTTP_201_CREATED)
+def create_pull_request(code_run_id: uuid.UUID, payload: CreatePrFromCodeRunRequest, db: Session = Depends(get_db)) -> PullRequestLink:
+    """"Implement GitHub PR creation for story lane" — creates a real
+    GitHub PR from a CodeRun's already-pushed branch (no further commits
+    — CodeRunnerService already pushed everything real). RULE — "PR
+    creation requires pushed branch"."""
+    code_run = db.get(CodeRun, code_run_id)
+    if code_run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"CodeRun {code_run_id} not found")
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+
+    if code_run.implementation_run_id is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"CodeRun {code_run_id} has no associated implementation run.")
+    implementation_run = db.get(ImplementationRun, code_run.implementation_run_id)
+    if implementation_run is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"CodeRun {code_run_id}'s implementation run no longer exists.")
+    story = db.get(Story, code_run.story_id)
+    if story is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"CodeRun {code_run_id}'s story no longer exists.")
+    repository = db.get(Repository, code_run.repository_id)
+    if repository is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"CodeRun {code_run_id}'s repository no longer exists.")
+    base_branch = payload.base_branch or repository.default_branch
+    if not base_branch:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No base_branch given and this repository has no known default branch.")
+
+    github_token = decrypt_repository_token(repository)  # a real write cannot silently degrade to "no token"
+
+    try:
+        link = create_pull_request_from_code_run(
+            db, code_run=code_run, implementation_run=implementation_run, story=story, repository=repository,
+            base_branch=base_branch, github_token=github_token, triggered_by=triggered_by,
+        )
+    except StoryCodeImplementationError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    db.commit()
+    db.refresh(link)
+    return link

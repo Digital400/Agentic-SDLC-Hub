@@ -36,6 +36,12 @@ class CodeRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     story_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), nullable=False)
     lane_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("story_delivery_lanes.id", ondelete="CASCADE"), nullable=True)
     repository_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    # The ACCEPTED ImplementationRun whose patch this run applies — added
+    # when GitHub PR creation (create_pull_request_from_code_run) needed
+    # to look this run's own diff/summary/risks back up from a CodeRun
+    # alone; nullable since a CodeRun can in principle exist for other
+    # future purposes this app doesn't have yet.
+    implementation_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("implementation_runs.id", ondelete="CASCADE"), nullable=True)
     triggered_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
     branch_name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -63,4 +69,5 @@ class CodeRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     story: Mapped["Story"] = relationship("Story")
     lane: Mapped["StoryDeliveryLane | None"] = relationship("StoryDeliveryLane")
     repository: Mapped["Repository"] = relationship("Repository")
+    implementation_run: Mapped["ImplementationRun | None"] = relationship("ImplementationRun")
     triggered_by: Mapped["User | None"] = relationship("User", foreign_keys=[triggered_by_user_id])

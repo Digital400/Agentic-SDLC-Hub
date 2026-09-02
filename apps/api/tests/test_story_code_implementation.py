@@ -21,7 +21,7 @@ import uuid
 import pytest
 from fastapi import HTTPException
 
-from app.api.routes.code_runs import apply_via_code_runner, get_code_run
+from app.api.routes.code_runs import apply_via_code_runner, create_pull_request, get_code_run
 from app.api.routes.implementation_runs import review_implementation_run, start_implementation_run
 from app.api.routes.stories import create_story, create_story_lane, draft_story_lld, update_lane_node_status
 from app.models import (
@@ -33,6 +33,7 @@ from app.models import (
     IntegrationConnection,
     IntegrationProvider,
     IntegrationStatus,
+    PullRequestLink,
     Repository,
     RepositoryFileEntryType,
     RepositoryFileIndex,
@@ -46,7 +47,7 @@ from app.models import (
     User,
     UserRole,
 )
-from app.schemas.code_run import ApplyViaCodeRunnerRequest
+from app.schemas.code_run import ApplyViaCodeRunnerRequest, CreatePrFromCodeRunRequest
 from app.schemas.implementation_run import ReviewImplementationRunRequest, StartImplementationRunRequest
 from app.schemas.story import CreateStoryLaneRequest, DraftStoryLldRequest, StoryCreate, UpdateLaneNodeStatusRequest
 from app.services import ai_generation, code_runner as code_runner_module, implementation_agent
@@ -275,3 +276,138 @@ def test_failing_test_command_marks_code_run_failed_and_never_commits_or_pushes(
     assert not any(c[:2] == ["git", "push"] for c in calls)
     implementation_node = db.get(StoryDeliveryNode, nodes["IMPLEMENTATION"].id)
     assert implementation_node.status != StoryDeliveryNodeStatus.COMPLETED
+
+
+# --- GitHub PR creation from a pushed CodeRun ------------------------------------------------
+
+
+def _pushed_code_run(db, project, actor, tmp_path, monkeypatch, *, jira_issue_key: str | None = "PROJ-42"):
+    story, lane, nodes, task, run, repository = _story_with_accepted_run(db, project, actor)
+    if jira_issue_key:
+        story.jira_issue_key = jira_issue_key
+        db.flush()
+    _mock_git_success(monkeypatch, tmp_path)
+    code_run = apply_via_code_runner(ApplyViaCodeRunnerRequest(implementation_run_id=run.id, triggered_by_user_id=actor.id), db)
+    assert code_run.status == CodeRunStatus.PUSHED
+    return story, lane, nodes, task, run, repository, code_run
+
+
+def _mock_github_pr(monkeypatch, *, pr_number=7):
+    import app.api.routes.code_runs as code_runs_module
+
+    monkeypatch.setattr(code_runs_module, "decrypt_repository_token", lambda repo: "fake-token")
+    captured = {}
+
+    def _fake_create_pull_request(token, owner, repo, *, title, head, base, body):
+        captured.update(title=title, head=head, base=base, body=body)
+        from app.services.github_integration import GitHubPullRequest
+
+        return GitHubPullRequest(number=pr_number, html_url=f"https://github.com/{owner}/{repo}/pull/{pr_number}", state="open")
+
+    monkeypatch.setattr("app.services.github_integration.create_pull_request", _fake_create_pull_request)
+    return captured
+
+
+def test_create_pull_request_requires_a_pushed_branch(db, project, actor):
+    story, lane, nodes, task, run, repository = _story_with_accepted_run(db, project, actor)
+    from app.models import CodeRun
+
+    code_run = CodeRun(
+        project_id=project.id, story_id=story.id, lane_id=lane.id, repository_id=repository.id,
+        implementation_run_id=run.id, branch_name="codegen/x-12345678", status=CodeRunStatus.COMMITTED, logs=[],
+    )
+    db.add(code_run)
+    db.flush()
+
+    with pytest.raises(HTTPException) as exc_info:
+        create_pull_request(code_run.id, CreatePrFromCodeRunRequest(triggered_by_user_id=actor.id), db)
+    assert exc_info.value.status_code == 409
+    assert db.query(PullRequestLink).count() == 0
+
+
+def test_create_pull_request_title_includes_jira_key_and_body_includes_jira_line(db, project, actor, tmp_path, monkeypatch):
+    story, lane, nodes, task, run, repository, code_run = _pushed_code_run(db, project, actor, tmp_path, monkeypatch, jira_issue_key="PROJ-42")
+    captured = _mock_github_pr(monkeypatch)
+
+    link = create_pull_request(code_run.id, CreatePrFromCodeRunRequest(triggered_by_user_id=actor.id), db)
+
+    assert captured["title"] == f"[PROJ-42] {story.title}"
+    assert "PROJ-42" in captured["body"]
+    assert "Jira" in captured["body"]
+    assert captured["head"] == code_run.branch_name
+
+
+def test_create_pull_request_body_discloses_missing_jira_link(db, project, actor, tmp_path, monkeypatch):
+    story, lane, nodes, task, run, repository, code_run = _pushed_code_run(db, project, actor, tmp_path, monkeypatch, jira_issue_key=None)
+    captured = _mock_github_pr(monkeypatch)
+
+    create_pull_request(code_run.id, CreatePrFromCodeRunRequest(triggered_by_user_id=actor.id), db)
+
+    assert "Not yet synced to Jira" in captured["body"]
+
+
+def test_create_pull_request_stores_all_required_links(db, project, actor, tmp_path, monkeypatch):
+    story, lane, nodes, task, run, repository, code_run = _pushed_code_run(db, project, actor, tmp_path, monkeypatch)
+    _mock_github_pr(monkeypatch)
+
+    link = create_pull_request(code_run.id, CreatePrFromCodeRunRequest(triggered_by_user_id=actor.id), db)
+
+    assert link.project_id == project.id
+    assert link.story_id == story.id
+    assert link.lane_id == lane.id
+    assert link.jira_issue_key == "PROJ-42"
+    assert link.implementation_run_id == run.id
+    assert link.code_run_id == code_run.id
+    assert link.pr_number == 7
+    assert link.branch_name == code_run.branch_name
+    assert link.status.value == "OPEN"
+
+
+def test_create_pull_request_is_refused_twice_for_the_same_code_run(db, project, actor, tmp_path, monkeypatch):
+    story, lane, nodes, task, run, repository, code_run = _pushed_code_run(db, project, actor, tmp_path, monkeypatch)
+    _mock_github_pr(monkeypatch)
+    create_pull_request(code_run.id, CreatePrFromCodeRunRequest(triggered_by_user_id=actor.id), db)
+
+    with pytest.raises(HTTPException) as exc_info:
+        create_pull_request(code_run.id, CreatePrFromCodeRunRequest(triggered_by_user_id=actor.id), db)
+    assert exc_info.value.status_code == 409
+    assert db.query(PullRequestLink).count() == 1
+
+
+def test_pr_review_agent_can_start_once_this_pr_exists(db, project, actor, tmp_path, monkeypatch):
+    """Rule — "PR Review Agent can start only after PR diff is
+    available." Proves the new PR-creation path satisfies the same,
+    already-existing gate in app/api/routes/pr_review_runs.py."""
+    story, lane, nodes, task, run, repository, code_run = _pushed_code_run(db, project, actor, tmp_path, monkeypatch)
+    _mock_github_pr(monkeypatch)
+    create_pull_request(code_run.id, CreatePrFromCodeRunRequest(triggered_by_user_id=actor.id), db)
+
+    from app.api.routes.pr_review_runs import start_pr_review_run
+    from app.schemas.pr_review_run import StartPRReviewRunRequest
+    from app.services import pr_review_agent
+
+    monkeypatch.setattr(pr_review_agent, "get_active_provider", lambda: "mock")
+    monkeypatch.setattr("app.api.routes.pr_review_runs.decrypt_repository_token", lambda repo: "fake-token")
+    monkeypatch.setattr(
+        "app.api.routes.pr_review_runs.github_api.get_pull_request",
+        lambda *a, **kw: __import__("app.services.github_integration", fromlist=["GitHubPullRequestDetail"]).GitHubPullRequestDetail(
+            number=7, title="PR", body="", html_url="https://github.com/x/y/pull/7", state="open",
+        ),
+    )
+
+    result = start_pr_review_run(StartPRReviewRunRequest(implementation_task_id=task.id, triggered_by_user_id=actor.id), db)
+    assert result.status.value == "COMPLETED"
+
+
+def test_pull_request_node_completes_only_when_reachable(db, project, actor, tmp_path, monkeypatch):
+    """Disclosed scope — PULL_REQUEST sits after TEST_SCENARIOS in the
+    default lane sequence, so it's still LOCKED right after a push; PR
+    creation still succeeds for real, but the lane node itself doesn't
+    advance out of order."""
+    story, lane, nodes, task, run, repository, code_run = _pushed_code_run(db, project, actor, tmp_path, monkeypatch)
+    _mock_github_pr(monkeypatch)
+
+    create_pull_request(code_run.id, CreatePrFromCodeRunRequest(triggered_by_user_id=actor.id), db)
+
+    pull_request_node = db.get(StoryDeliveryNode, nodes["PULL_REQUEST"].id)
+    assert pull_request_node.status == StoryDeliveryNodeStatus.LOCKED

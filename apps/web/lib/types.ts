@@ -173,10 +173,14 @@ export type PullRequestStatus = "OPEN" | "MERGED" | "CLOSED";
 export interface PullRequestLinkItem {
   id: string;
   projectId: string;
-  workflowNodeId: string;
+  workflowNodeId: string | null;
   implementationTaskId: string;
   implementationRunId: string;
   repositoryId: string;
+  storyId: string | null;
+  laneId: string | null;
+  codeRunId: string | null;
+  jiraIssueKey: string | null;
   branchName: string;
   baseBranch: string;
   prNumber: number;
