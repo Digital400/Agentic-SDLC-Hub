@@ -116,7 +116,7 @@
       "requiresHumanApproval": true,
       "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
       "nextNodes": [],
-      "position": { "x": 1100, "y": 180 },
+      "position": { "x": 880, "y": 240 },
       "contextTokenBudget": 12000,
       "outputTokenBudget": 3200,
       "fullContentArtifactTypes": ["hld_document", "lld_document"],
@@ -134,7 +134,7 @@
       "requiresHumanApproval": true,
       "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
       "nextNodes": ["implementation"],
-      "position": { "x": 1210, "y": 0 },
+      "position": { "x": 1320, "y": 0 },
       "fullContentArtifactTypes": ["lld_document", "story_backlog"]
     },
     {
@@ -148,7 +148,7 @@
       "requiresHumanApproval": false,
       "allowedActions": ["draft", "edit", "submit_for_review", "complete"],
       "nextNodes": ["pr_review"],
-      "position": { "x": 1320, "y": 0 },
+      "position": { "x": 1540, "y": 0 },
       "contextTokenBudget": 16000,
       "outputTokenBudget": 4096,
       "fullContentArtifactTypes": ["lld_document", "story_backlog", "implementation_plan"],
@@ -166,7 +166,7 @@
       "requiresHumanApproval": true,
       "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
       "nextNodes": ["testing", "implementation"],
-      "position": { "x": 1430, "y": 0 },
+      "position": { "x": 1760, "y": 0 },
       "fullContentArtifactTypes": ["code_change"],
       "ragTopK": 6,
       "maxRagTokens": 3000
@@ -182,7 +182,7 @@
       "requiresHumanApproval": true,
       "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
       "nextNodes": ["infrastructure", "implementation"],
-      "position": { "x": 1540, "y": 0 },
+      "position": { "x": 1980, "y": 0 },
       "fullContentArtifactTypes": ["code_change"],
       "ragTopK": 6,
       "maxRagTokens": 3000,
@@ -199,7 +199,7 @@
       "requiresHumanApproval": true,
       "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
       "nextNodes": ["release"],
-      "position": { "x": 1760, "y": 0 }
+      "position": { "x": 2200, "y": 0 }
     },
     {
       "id": "release",
@@ -212,7 +212,7 @@
       "requiresHumanApproval": true,
       "allowedActions": ["draft", "edit", "submit_for_review", "approve", "reject", "request_changes"],
       "nextNodes": ["maintenance"],
-      "position": { "x": 1980, "y": 0 }
+      "position": { "x": 2420, "y": 0 }
     },
     {
       "id": "maintenance",
@@ -225,7 +225,7 @@
       "requiresHumanApproval": false,
       "allowedActions": ["draft", "edit", "submit_for_review", "complete"],
       "nextNodes": [],
-      "position": { "x": 2200, "y": 0 }
+      "position": { "x": 2640, "y": 0 }
     }
   ],
   "edges": [
