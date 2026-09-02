@@ -143,7 +143,15 @@ export function StoriesView({
         story_type: mode,
         triggered_by_user_id: currentUserId,
       });
-      if (result.created.length > 0) setStories((prev) => [...prev, ...result.created]);
+      // Always re-fetch the full list from the server rather than only
+      // appending `created` — this component's `stories` state can be
+      // stale relative to the database (e.g. the page was loaded before
+      // these rows existed, or another sync ran elsewhere), and an
+      // already_existed-only response has no row data to append at all.
+      // Without this, "All N stories were already synced" could still
+      // render an empty list right below it.
+      const refreshed = await api.stories.list(projectId);
+      setStories(refreshed.items);
 
       // Never let a sync that changed nothing look identical to one that
       // silently did nothing — the parsed_count===0 case in particular is
