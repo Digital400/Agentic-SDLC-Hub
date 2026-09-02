@@ -72,6 +72,10 @@ class PRReviewRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     major_findings: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
     minor_findings: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
     missing_tests: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # Review check 4 ("are there unrelated file changes?") — a distinct
+    # output, not folded into findings, so a REQUEST_CHANGES send-back or
+    # the UI can act on it directly. See pr_review_agent.py.
+    unrelated_changes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     # The agent's proposal — {"file","body"}. Requirement "comments must be
     # editable before posting" is a frontend concern: the UI holds edit
     # state and sends final text to /post-comments, this column is never

@@ -28,10 +28,15 @@ from app.models import (
     ImplementationRunReviewStatus,
     ImplementationTask,
     KnowledgeContentType,
+    PRReviewRecommendation,
     PRReviewRun,
     PRReviewRunStatus,
     Project,
     PullRequestLink,
+    Story,
+    StoryArtifact,
+    StoryDeliveryNode,
+    StoryDeliveryNodeStatus,
     TestRun,
     TestRunStatus,
     User,
@@ -43,6 +48,7 @@ from app.schemas.pr_review_run import (
     PostPRReviewCommentsRequest,
     PostPRReviewCommentsResponse,
     PRReviewRunRead,
+    SendBackForReworkRequest,
     StartPRReviewRunRequest,
 )
 from app.services.audit import record_audit_log
@@ -51,7 +57,11 @@ from app.services.github_integration import GitHubIntegrationError
 from app.services.permissions import require_can_edit_stage
 from app.services.pr_review_agent import run_pr_review_agent
 from app.services.retrieval import retrieve_relevant_chunks
+from app.services.story_delivery import StoryDeliveryError, advance_lane, send_lane_back_for_rework
 from app.services.story_export import find_related_story
+from app.services.story_lld_agent import STORY_LLD_ARTIFACT_TYPE
+from app.services.story_implementation_plan_agent import STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE
+from app.services.story_test_scenarios_agent import STORY_TEST_SCENARIOS_ARTIFACT_TYPE
 
 router = APIRouter(prefix="/pr-review-runs", tags=["pr-review-runs"])
 
@@ -172,16 +182,54 @@ def start_pr_review_run(payload: StartPRReviewRunRequest, db: Session = Depends(
     except (HTTPException, GitHubIntegrationError):
         pass  # a read degrading to "" is fine; the diff/task fields still carry the review
 
-    lld_artifact = (
-        db.query(Artifact)
-        .filter(Artifact.project_id == project.id, Artifact.artifact_type == "lld_document", Artifact.status == ArtifactStatus.APPROVED)
-        .order_by(Artifact.updated_at.desc())
-        .first()
-    )
-    lld_summary = ""
-    if lld_artifact is not None and lld_artifact.current_version is not None:
-        version = lld_artifact.current_version
-        lld_summary = version.agent_context_summary or version.content_markdown
+    # Preconditions 3/4 — "Story LLD exists" (hard) / "test scenarios if
+    # available" (soft). For a story-scoped task the LLD/plan/scenarios
+    # live as StoryArtifacts on the story's own delivery lane, not the
+    # project-level lld_document Artifact — mirror that scoping here.
+    implementation_plan_summary, test_scenarios_summary = "", ""
+    if task.story_id is not None:
+        story_lld_artifact = (
+            db.query(StoryArtifact)
+            .filter(StoryArtifact.story_id == task.story_id, StoryArtifact.artifact_type == STORY_LLD_ARTIFACT_TYPE)
+            .order_by(StoryArtifact.version_number.desc())
+            .first()
+        )
+        if story_lld_artifact is None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "Cannot start a PR review — this story has no approved Story LLD yet."
+            )
+        lld_summary = story_lld_artifact.content_markdown
+
+        plan_artifact = (
+            db.query(StoryArtifact)
+            .filter(StoryArtifact.story_id == task.story_id, StoryArtifact.artifact_type == STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE)
+            .order_by(StoryArtifact.version_number.desc())
+            .first()
+        )
+        if plan_artifact is not None:
+            implementation_plan_summary = plan_artifact.content_markdown
+
+        scenarios_artifact = (
+            db.query(StoryArtifact)
+            .filter(StoryArtifact.story_id == task.story_id, StoryArtifact.artifact_type == STORY_TEST_SCENARIOS_ARTIFACT_TYPE)
+            .order_by(StoryArtifact.version_number.desc())
+            .first()
+        )
+        if scenarios_artifact is not None:
+            test_scenarios_summary = scenarios_artifact.content_markdown
+    else:
+        lld_artifact = (
+            db.query(Artifact)
+            .filter(Artifact.project_id == project.id, Artifact.artifact_type == "lld_document", Artifact.status == ArtifactStatus.APPROVED)
+            .order_by(Artifact.updated_at.desc())
+            .first()
+        )
+        lld_summary = ""
+        if lld_artifact is not None and lld_artifact.current_version is not None:
+            version = lld_artifact.current_version
+            lld_summary = version.agent_context_summary or version.content_markdown
+
+    jira_issue_key = pr_link.jira_issue_key or ""
 
     story_backlog_artifact = (
         db.query(Artifact)
@@ -222,6 +270,8 @@ def start_pr_review_run(payload: StartPRReviewRunRequest, db: Session = Depends(
             task=task, pr_title=pr_title, pr_body=pr_body, diff_text=implementation_run.diff_text,
             lld_summary=lld_summary, story=story, standards_chunks=standards_chunks,
             test_summary=test_summary, test_fail_count=test_fail_count, test_bugs_found=test_bugs_found,
+            jira_issue_key=jira_issue_key, implementation_plan_summary=implementation_plan_summary,
+            test_scenarios_summary=test_scenarios_summary,
         )
     except Exception as exc:  # noqa: BLE001 — anything unexpected fails this run cleanly, never a bare 500
         run.status = PRReviewRunStatus.FAILED
@@ -241,6 +291,7 @@ def start_pr_review_run(payload: StartPRReviewRunRequest, db: Session = Depends(
     run.major_findings = [{"file": f.file, "detail": f.detail} for f in result.major_findings]
     run.minor_findings = [{"file": f.file, "detail": f.detail} for f in result.minor_findings]
     run.missing_tests = result.missing_tests
+    run.unrelated_changes = result.unrelated_changes
     run.suggested_comments = [{"file": c.file, "body": c.body} for c in result.suggested_comments]
     run.risk_score = result.risk_score
     run.final_reviewer_note = result.final_reviewer_note
@@ -261,6 +312,24 @@ def start_pr_review_run(payload: StartPRReviewRunRequest, db: Session = Depends(
             "critical_count": len(result.critical_findings), "major_count": len(result.major_findings),
         },
     )
+
+    # Story lane wiring — PR_REVIEW_AGENT is a plain (non-approval) node,
+    # so the agent actually running it IS its completion, same
+    # "drafting-completes-its-own-node" pattern STORY_LLD uses (unlike
+    # IMPLEMENTATION_PLAN/TEST_SCENARIOS, whose review is a separate human
+    # action). This unlocks HUMAN_CODE_REVIEW next.
+    if task.story_id is not None:
+        lane_node = (
+            db.query(StoryDeliveryNode)
+            .join(StoryDeliveryNode.lane)
+            .filter(StoryDeliveryNode.node_key == "PR_REVIEW_AGENT", StoryDeliveryNode.lane.has(story_id=task.story_id))
+            .first()
+        )
+        if lane_node is not None and lane_node.status != StoryDeliveryNodeStatus.COMPLETED:
+            lane_node.status = StoryDeliveryNodeStatus.COMPLETED
+            lane_node.completed_at = datetime.now(timezone.utc)
+            db.flush()
+            advance_lane(db, lane=lane_node.lane, completed_node=lane_node)
 
     db.commit()
     db.refresh(run)
@@ -326,3 +395,48 @@ def post_pr_review_comments(
     db.commit()
     db.refresh(run)
     return PostPRReviewCommentsResponse(run=PRReviewRunRead.from_orm_run(run), results=results)
+
+
+@router.post("/{run_id}/send-back-for-rework", response_model=PRReviewRunRead)
+def send_pr_review_back_for_rework(
+    run_id: uuid.UUID, payload: SendBackForReworkRequest, db: Session = Depends(get_db)
+) -> PRReviewRunRead:
+    """Rule — "if recommendation is REQUEST_CHANGES, lane returns to Code
+    Implementation or Implementation Plan update." Story-scoped only: a
+    project-level PR review has no lane to send back. See
+    app/services/story_delivery.py's send_lane_back_for_rework for what
+    "returns to" actually does to the lane's nodes."""
+    run = _get_run_or_404(db, run_id)
+    if run.overall_recommendation != PRReviewRecommendation.REQUEST_CHANGES:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Run {run_id}'s recommendation is {run.overall_recommendation}, not REQUEST_CHANGES — nothing to send back.",
+        )
+    if run.story_id is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This PR review run has no story lane to send back.")
+
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+    require_can_edit_stage(triggered_by, "pr_review")
+
+    story = db.get(Story, run.story_id)
+    if story is None or story.delivery_lane is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Story {run.story_id} has no delivery lane.")
+
+    try:
+        target_node = send_lane_back_for_rework(
+            db, lane=story.delivery_lane, target_node_key=payload.target_node_key, actor=triggered_by
+        )
+    except StoryDeliveryError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    record_audit_log(
+        db, project_id=run.project_id, actor_user_id=triggered_by.id, action="pr_review_run.sent_back_for_rework",
+        entity_type="PRReviewRun", entity_id=run.id,
+        extra_data={"target_node_key": target_node.node_key, "lane_id": str(story.delivery_lane.id)},
+    )
+
+    db.commit()
+    db.refresh(run)
+    return PRReviewRunRead.from_orm_run(run)

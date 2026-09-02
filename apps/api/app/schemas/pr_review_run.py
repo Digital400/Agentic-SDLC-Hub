@@ -47,6 +47,7 @@ class PRReviewRunRead(BaseModel):
     major_findings: list[FindingRead]
     minor_findings: list[FindingRead]
     missing_tests: list[str]
+    unrelated_changes: list[str]
     suggested_comments: list[SuggestedCommentRead]
     risk_score: int | None
     final_reviewer_note: str
@@ -72,6 +73,7 @@ class PRReviewRunRead(BaseModel):
             major_findings=[FindingRead.model_validate(f) for f in run.major_findings],
             minor_findings=[FindingRead.model_validate(f) for f in run.minor_findings],
             missing_tests=run.missing_tests,
+            unrelated_changes=run.unrelated_changes,
             suggested_comments=[SuggestedCommentRead.model_validate(c) for c in run.suggested_comments],
             risk_score=run.risk_score, final_reviewer_note=run.final_reviewer_note,
             posted_comments=[PostedCommentRead.model_validate(c) for c in run.posted_comments],
@@ -102,3 +104,11 @@ class PostedCommentResultRead(BaseModel):
 class PostPRReviewCommentsResponse(BaseModel):
     run: PRReviewRunRead
     results: list[PostedCommentResultRead]
+
+
+class SendBackForReworkRequest(BaseModel):
+    triggered_by_user_id: uuid.UUID = Field(..., description="Existing user id — who is sending this lane back.")
+    target_node_key: str = Field(
+        default="IMPLEMENTATION",
+        description="Which lane node to reopen — 'IMPLEMENTATION' or 'IMPLEMENTATION_PLAN'.",
+    )

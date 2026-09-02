@@ -345,6 +345,7 @@ export interface PRReviewRunItem {
   majorFindings: FindingItem[];
   minorFindings: FindingItem[];
   missingTests: string[];
+  unrelatedChanges: string[];
   suggestedComments: SuggestedCommentItem[];
   riskScore: number | null;
   finalReviewerNote: string;

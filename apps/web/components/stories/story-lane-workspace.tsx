@@ -6,7 +6,9 @@ import { CheckCircle2, FileText, GitPullRequest, Loader2, PlayCircle, RefreshCw,
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Select } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import {
   api,
@@ -106,6 +108,16 @@ export function StoryLaneWorkspace({
   const [codeRunBusy, setCodeRunBusy] = useState(false);
   const [testRunBusy, setTestRunBusy] = useState(false);
   const [prReviewBusy, setPrReviewBusy] = useState(false);
+  // UI rules 2/3/4 — human can edit/select suggested comments before
+  // posting, mark Human Code Review complete, or (on REQUEST_CHANGES)
+  // send the lane back for rework. Keyed by run id so switching to a
+  // freshly re-run review starts with a clean slate.
+  const [commentRunId, setCommentRunId] = useState<string | null>(null);
+  const [selectedComments, setSelectedComments] = useState<Record<number, boolean>>({});
+  const [editedComments, setEditedComments] = useState<Record<number, string>>({});
+  const [commentPostBusy, setCommentPostBusy] = useState(false);
+  const [humanReviewBusy, setHumanReviewBusy] = useState(false);
+  const [reworkBusy, setReworkBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const storyLldNode = nodes.find((n) => n.node_key === "STORY_LLD") ?? null;
@@ -253,6 +265,65 @@ export function StoryLaneWorkspace({
       setError(err instanceof ApiError ? err.message : "Failed to start the PR review.");
     } finally {
       setPrReviewBusy(false);
+    }
+  }
+
+  // Comments are keyed by index into the run's own suggested_comments —
+  // reset selection/edits whenever a different run's comments are shown.
+  function commentState(run: ApiPRReviewRun) {
+    if (commentRunId !== run.id) {
+      setCommentRunId(run.id);
+      setSelectedComments({});
+      setEditedComments({});
+    }
+    return commentRunId === run.id;
+  }
+
+  async function handlePostSelectedComments(run: ApiPRReviewRun) {
+    if (currentUserId === null) return;
+    const items = run.suggested_comments
+      .map((c, i) => ({ i, c }))
+      .filter(({ i }) => selectedComments[i])
+      .map(({ i, c }) => ({ file: c.file, body: editedComments[i] ?? c.body }));
+    if (items.length === 0) return;
+    setCommentPostBusy(true);
+    setError(null);
+    try {
+      await api.prReviewRuns.postComments(run.id, { triggered_by_user_id: currentUserId, comments: items });
+      setSelectedComments({});
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to post the selected comments to GitHub.");
+    } finally {
+      setCommentPostBusy(false);
+    }
+  }
+
+  async function handleMarkHumanReviewComplete() {
+    if (currentUserId === null || humanCodeReviewNode === null) return;
+    setHumanReviewBusy(true);
+    setError(null);
+    try {
+      await api.storyDelivery.updateNodeStatus(humanCodeReviewNode.id, { status: "COMPLETED", actor_user_id: currentUserId });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to mark Human Code Review complete — Tech Lead only.");
+    } finally {
+      setHumanReviewBusy(false);
+    }
+  }
+
+  async function handleSendBackForRework(run: ApiPRReviewRun, targetNodeKey: "IMPLEMENTATION" | "IMPLEMENTATION_PLAN") {
+    if (currentUserId === null) return;
+    setReworkBusy(true);
+    setError(null);
+    try {
+      await api.prReviewRuns.sendBackForRework(run.id, { triggered_by_user_id: currentUserId, target_node_key: targetNodeKey });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to send this lane back for rework.");
+    } finally {
+      setReworkBusy(false);
     }
   }
 
@@ -930,10 +1001,99 @@ export function StoryLaneWorkspace({
                       </div>
                     )}
 
+                    {latestPrReviewRun.unrelated_changes.length > 0 && (
+                      <div>
+                        <p className="mb-1 text-xs font-medium text-muted-foreground">Unrelated changes</p>
+                        <ul className="list-inside list-disc text-xs text-muted-foreground">
+                          {latestPrReviewRun.unrelated_changes.map((u, i) => (
+                            <li key={i}>{u}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {latestPrReviewRun.suggested_comments.length > 0 &&
+                      (() => {
+                        commentState(latestPrReviewRun);
+                        return (
+                          <div className="flex flex-col gap-2">
+                            <p className="text-xs font-medium text-muted-foreground">
+                              Suggested comments — select and edit before posting to GitHub
+                            </p>
+                            {latestPrReviewRun.suggested_comments.map((c, i) => (
+                              <div key={i} className="flex items-start gap-2 rounded-md border p-2">
+                                <Checkbox
+                                  className="mt-1"
+                                  checked={!!selectedComments[i]}
+                                  onChange={(e) => setSelectedComments((prev) => ({ ...prev, [i]: e.target.checked }))}
+                                />
+                                <div className="flex-1">
+                                  <p className="mb-1 font-mono text-xs text-muted-foreground">{c.file}</p>
+                                  <Textarea
+                                    className="min-h-[60px] text-xs"
+                                    value={editedComments[i] ?? c.body}
+                                    onChange={(e) => setEditedComments((prev) => ({ ...prev, [i]: e.target.value }))}
+                                  />
+                                </div>
+                              </div>
+                            ))}
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handlePostSelectedComments(latestPrReviewRun)}
+                              disabled={commentPostBusy || currentUserId === null || !Object.values(selectedComments).some(Boolean)}
+                              className="self-start"
+                            >
+                              {commentPostBusy && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+                              Post selected comments to GitHub
+                            </Button>
+                            {latestPrReviewRun.posted_comments.length > 0 && (
+                              <p className="text-xs text-muted-foreground">
+                                Already posted: {latestPrReviewRun.posted_comments.length} comment(s).
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })()}
+
                     <p className="text-xs">
                       <span className="font-medium text-muted-foreground">Final reviewer note: </span>
                       {latestPrReviewRun.final_reviewer_note || "(none)"}
                     </p>
+
+                    {/* Rule — agent cannot merge; human reviewer has final
+                        authority. These two actions are that authority. */}
+                    <div className="flex flex-wrap items-center gap-2 border-t pt-3">
+                      {humanCodeReviewNode && humanCodeReviewNode.status !== "COMPLETED" && humanCodeReviewNode.status !== "LOCKED" && (
+                        <Button size="sm" onClick={handleMarkHumanReviewComplete} disabled={humanReviewBusy || currentUserId === null}>
+                          {humanReviewBusy && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+                          <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
+                          Mark Human Review Complete
+                        </Button>
+                      )}
+                      {latestPrReviewRun.overall_recommendation === "REQUEST_CHANGES" && (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => handleSendBackForRework(latestPrReviewRun, "IMPLEMENTATION")}
+                            disabled={reworkBusy || currentUserId === null}
+                          >
+                            {reworkBusy && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+                            <XCircle className="mr-1 h-3.5 w-3.5" />
+                            Send back to Code Implementation
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => handleSendBackForRework(latestPrReviewRun, "IMPLEMENTATION_PLAN")}
+                            disabled={reworkBusy || currentUserId === null}
+                          >
+                            Send back to Implementation Plan
+                          </Button>
+                        </>
+                      )}
+                    </div>
                   </>
                 )}
               </>

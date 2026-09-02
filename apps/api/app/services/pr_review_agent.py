@@ -63,6 +63,10 @@ class PRReviewAgentResult:
     major_findings: list[Finding] = field(default_factory=list)
     minor_findings: list[Finding] = field(default_factory=list)
     missing_tests: list[str] = field(default_factory=list)
+    # Review check 4 — "are there unrelated file changes?" — a distinct
+    # output, not folded into findings, so the UI/lane-rework logic can
+    # act on it directly without parsing prose out of a Finding.
+    unrelated_changes: list[str] = field(default_factory=list)
     suggested_comments: list[SuggestedComment] = field(default_factory=list)
     risk_score: int = 0
     final_reviewer_note: str = (
@@ -134,29 +138,34 @@ _SYSTEM_PROMPT = (
     "You are a senior software engineer performing a pull request review for a company-grade software delivery "
     "platform.\n\n"
     "Your job is to review the PR against:\n"
-    "1. Approved LLD\n"
-    "2. Related user stories\n"
-    "3. Acceptance criteria\n"
-    "4. Company coding standards\n"
-    "5. Security rules\n"
-    "6. Existing architecture\n"
-    "7. Test expectations\n\n"
-    "Review categories:\n"
-    "- Functional correctness\n"
-    "- Requirement alignment\n"
-    "- Architecture alignment\n"
-    "- Code quality\n"
-    "- Security\n"
-    "- Performance\n"
-    "- Error handling\n"
-    "- Observability\n"
-    "- Test coverage\n"
-    "- Maintainability\n\n"
+    "1. The story it claims to implement (title, Jira issue key, user story)\n"
+    "2. Its acceptance criteria\n"
+    "3. The approved Story LLD\n"
+    "4. The Implementation Plan\n"
+    "5. Test scenarios (if available)\n"
+    "6. Company coding standards\n"
+    "7. Security rules\n"
+    "8. Existing architecture\n"
+    "9. Previous test logs (if available)\n\n"
+    "Review checks — answer every one explicitly in your findings:\n"
+    "1. Does the PR implement ONLY this story — no unrelated feature or fix bundled in?\n"
+    "2. Does the PR satisfy every stated acceptance criterion?\n"
+    "3. Does the PR follow the approved Story LLD's design?\n"
+    "4. Are there unrelated file changes (files touched that this story's scope does not explain)? "
+    "List every such file in \"unrelated_changes\", not just in prose.\n"
+    "5. Are tests included or updated for this change?\n"
+    "6. Are there security risks?\n"
+    "7. Are there performance risks?\n"
+    "8. Is error handling correct?\n"
+    "9. Is logging/observability sufficient?\n"
+    "10. Is the code maintainable?\n\n"
     "Rules:\n"
     "- Be specific.\n"
     "- Reference changed files when possible.\n"
     "- Do not invent issues.\n"
     "- Do not approve if critical tests are missing.\n"
+    "- Do not approve if the PR bundles unrelated changes or fails to satisfy an acceptance criterion — use "
+    "REQUEST_CHANGES instead.\n"
     "- Do not merge the PR — you have no ability to do so and must not imply otherwise.\n"
     "- Human reviewer has final authority.\n\n"
     "Respond with ONLY a single JSON object (no markdown code fences, no commentary) with exactly these keys:\n"
@@ -164,6 +173,7 @@ _SYSTEM_PROMPT = (
     '- "summary": string.\n'
     '- "critical_findings", "major_findings", "minor_findings": arrays of objects {"file": string, "detail": string}.\n'
     '- "missing_tests": array of strings.\n'
+    '- "unrelated_changes": array of strings — each one a file or change this story\'s scope does not explain.\n'
     '- "suggested_comments": array of objects {"file": string, "body": string} — comments a human could post as-is.\n'
     '- "risk_score": integer from 0 to 100.\n'
     '- "final_reviewer_note": string — must state the human reviewer has final authority and this PR has not been merged.'
@@ -177,10 +187,13 @@ def _findings_from(items: list[dict]) -> list[Finding]:
 def _run_real_agent(
     *,
     task: ImplementationTask,
+    jira_issue_key: str,
     pr_title: str,
     pr_body: str,
     diff_text: str,
     lld_summary: str,
+    implementation_plan_summary: str,
+    test_scenarios_summary: str,
     story: Story | None,
     standards_chunks: list[RetrievedChunk],
     test_summary: str,
@@ -193,14 +206,16 @@ def _run_real_agent(
     standards_text = "\n".join(f"## {c.source_title}\n{c.content}" for c in standards_chunks) or "(none found)"
 
     user_content = (
-        f"# PR\nTitle: {pr_title}\nDescription: {pr_body or '(none)'}\n\n"
+        f"# PR\nTitle: {pr_title}\nDescription: {pr_body or '(none)'}\nJira issue key: {jira_issue_key or '(none)'}\n\n"
         f"# Diff\n{diff_text or '(no diff available)'}\n\n"
         f"# Task\nTitle: {task.title}\nDescription: {task.description}\n"
         f"Acceptance criteria: {'; '.join(task.acceptance_criteria) or '(none declared)'}\n\n"
-        f"# Approved LLD summary\n{lld_summary or '(not available)'}\n\n"
+        f"# Approved Story LLD\n{lld_summary or '(not available)'}\n\n"
+        f"# Implementation Plan\n{implementation_plan_summary or '(not available)'}\n\n"
+        f"# Test scenarios\n{test_scenarios_summary or '(not available — none drafted yet for this story)'}\n\n"
         f"# Related story\n{story_text}\n\n"
         f"# Coding standards / security rules\n{standards_text}\n\n"
-        f"# Test results\n{test_summary or '(not available — this task has not been tested yet)'}"
+        f"# Previous test logs\n{test_summary or '(not available — this task has not been tested yet)'}"
     )
 
     raw = generate_raw_text(system_prompt=_SYSTEM_PROMPT, user_content=user_content, output_token_budget=4096)
@@ -228,6 +243,7 @@ def _run_real_agent(
         major_findings=_findings_from(parsed.get("major_findings", [])),
         minor_findings=_findings_from(parsed.get("minor_findings", [])),
         missing_tests=[str(m) for m in parsed.get("missing_tests", [])],
+        unrelated_changes=[str(u) for u in parsed.get("unrelated_changes", [])],
         suggested_comments=[
             SuggestedComment(file=str(c.get("file", "")), body=str(c.get("body", ""))) for c in parsed.get("suggested_comments", [])
         ],
@@ -252,17 +268,27 @@ def run_pr_review_agent(
     test_summary: str,
     test_fail_count: int | None,
     test_bugs_found: list[str],
+    jira_issue_key: str = "",
+    implementation_plan_summary: str = "",
+    test_scenarios_summary: str = "",
 ) -> PRReviewAgentResult:
     """Real AI when configured; the deterministic heuristic otherwise, or
     if the real call errors or returns unparseable JSON (logged, not
-    raised — same contract as every other agent in this codebase)."""
+    raised — same contract as every other agent in this codebase).
+
+    `jira_issue_key`/`implementation_plan_summary`/`test_scenarios_summary`
+    default to "" so a project-level (non-story) PR review — which has no
+    story lane, hence no Implementation Plan/Test Scenarios artifacts and
+    no Jira key — keeps working unchanged."""
     if get_active_provider() == "mock":
         return _build_heuristic_result(task=task, diff_text=diff_text, test_fail_count=test_fail_count, test_bugs_found=test_bugs_found)
 
     try:
         return _run_real_agent(
-            task=task, pr_title=pr_title, pr_body=pr_body, diff_text=diff_text, lld_summary=lld_summary,
-            story=story, standards_chunks=standards_chunks, test_summary=test_summary,
+            task=task, jira_issue_key=jira_issue_key, pr_title=pr_title, pr_body=pr_body, diff_text=diff_text,
+            lld_summary=lld_summary, implementation_plan_summary=implementation_plan_summary,
+            test_scenarios_summary=test_scenarios_summary, story=story, standards_chunks=standards_chunks,
+            test_summary=test_summary,
         )
     except (AIGenerationError, json.JSONDecodeError, ValueError, TypeError, AttributeError, KeyError) as exc:
         logger.warning("Real-AI PR review agent failed (%s); falling back to heuristic scaffold.", exc)

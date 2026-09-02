@@ -169,3 +169,61 @@ def advance_lane(db: Session, *, lane: StoryDeliveryLane, completed_node: StoryD
     lane.current_node_id = next_node.id
     db.flush()
     return next_node
+
+
+# PR Review Agent rule — "if recommendation is REQUEST_CHANGES, lane
+# returns to Code Implementation or Implementation Plan update." These are
+# the only two valid rework targets; LLD/LLD_REVIEW are never reopened by
+# this mechanism.
+REWORK_TARGET_NODE_KEYS = ("IMPLEMENTATION", "IMPLEMENTATION_PLAN")
+
+
+def send_lane_back_for_rework(
+    db: Session, *, lane: StoryDeliveryLane, target_node_key: str, actor: User
+) -> StoryDeliveryNode:
+    """Reopens `target_node_key` (IMPLEMENTATION or IMPLEMENTATION_PLAN)
+    back to READY and re-LOCKS every node from there through the end of
+    the lane — their COMPLETED/BLOCKED status from the first pass no
+    longer reflects reality once the code they gated is being reworked.
+    The lane is otherwise a strict forward-only sequence (see advance_lane
+    above); this is the one place that ever moves a node backward.
+
+    DISCLOSED SCOPE: does not delete or invalidate previously-drafted
+    StoryArtifacts (Implementation Plan/Test Scenarios/PR Review runs) —
+    they stay visible for reference; a human or agent drafts fresh ones
+    once rework is complete. Does not reopen STORY_LLD/LLD_REVIEW — the
+    stated rule only ever sends work back to Implementation or
+    Implementation Plan update."""
+    if target_node_key not in REWORK_TARGET_NODE_KEYS:
+        raise StoryDeliveryError(
+            f"Cannot send a lane back to '{target_node_key}' — must be one of {REWORK_TARGET_NODE_KEYS}."
+        )
+
+    target = next((n for n in lane.nodes if n.node_key == target_node_key), None)
+    if target is None:
+        raise StoryDeliveryError(f"Lane {lane.id} has no '{target_node_key}' node.")
+
+    for node in lane.nodes:
+        if node.order_index < target.order_index:
+            continue
+        if node.id == target.id:
+            node.status = StoryDeliveryNodeStatus.READY
+            node.completed_at = None
+            node.blocked_reason = None
+        else:
+            node.status = StoryDeliveryNodeStatus.LOCKED
+            node.started_at = None
+            node.completed_at = None
+            node.blocked_reason = None
+
+    lane.current_node_id = target.id
+    lane.status = StoryDeliveryLaneStatus.ACTIVE
+    db.flush()
+
+    story = lane.story
+    _log(
+        db, story=story, lane=lane, node=target, action="story_lane.sent_back_for_rework", actor=actor,
+        details={"target_node_key": target_node_key},
+    )
+
+    return target

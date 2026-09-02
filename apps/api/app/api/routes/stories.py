@@ -620,6 +620,16 @@ def update_lane_node_status(
             status.HTTP_403_FORBIDDEN, f"Role {actor.role.value} may not approve these Test Scenarios — QA or Tech Lead only."
         )
 
+    # GitHub PR Review Agent, UI rule 4 — "Add button: Mark Human Review
+    # Complete." HUMAN_CODE_REVIEW is the lane's real, external-to-this-app
+    # GitHub PR review gate (see pr_review_run.py's docstring); completing
+    # it via this same generic endpoint IS that button. Same role gate as
+    # LLD_REVIEW above — Tech Lead (or Admin) only.
+    if node.node_key == "HUMAN_CODE_REVIEW" and new_status == StoryDeliveryNodeStatus.COMPLETED and actor.role not in (UserRole.TECH_LEAD, UserRole.ADMIN):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, f"Role {actor.role.value} may not mark Human Code Review complete — Tech Lead only."
+        )
+
     # HARDENING FIX — "Human approval is required before final Done."
     # RELEASE_READY is this lane's terminal node; completing it is what
     # marks the story DONE (see advance_lane below). Until now nothing

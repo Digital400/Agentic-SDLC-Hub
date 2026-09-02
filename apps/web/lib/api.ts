@@ -380,6 +380,7 @@ export interface ApiPRReviewRun {
   major_findings: ApiFinding[];
   minor_findings: ApiFinding[];
   missing_tests: string[];
+  unrelated_changes: string[];
   suggested_comments: ApiSuggestedComment[];
   risk_score: number | null;
   final_reviewer_note: string;
@@ -1479,6 +1480,10 @@ export const api = {
     get: (id: string) => get<ApiPRReviewRun>(`/pr-review-runs/${id}`),
     postComments: (id: string, body: { triggered_by_user_id: string; comments: { file: string; body: string }[] }) =>
       post<ApiPostPRReviewCommentsResponse>(`/pr-review-runs/${id}/post-comments`, body),
+    // Rule — "if recommendation is REQUEST_CHANGES, lane returns to Code
+    // Implementation or Implementation Plan update." Story-scoped only.
+    sendBackForRework: (id: string, body: { triggered_by_user_id: string; target_node_key: "IMPLEMENTATION" | "IMPLEMENTATION_PLAN" }) =>
+      post<ApiPRReviewRun>(`/pr-review-runs/${id}/send-back-for-rework`, body),
   },
 
   integrations: {

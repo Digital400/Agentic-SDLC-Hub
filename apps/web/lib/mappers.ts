@@ -294,6 +294,7 @@ export function toPRReviewRun(r: ApiPRReviewRun): PRReviewRunItem {
     majorFindings: r.major_findings.map((f) => ({ file: f.file, detail: f.detail })),
     minorFindings: r.minor_findings.map((f) => ({ file: f.file, detail: f.detail })),
     missingTests: r.missing_tests,
+    unrelatedChanges: r.unrelated_changes,
     suggestedComments: r.suggested_comments.map((c) => ({ file: c.file, body: c.body })),
     riskScore: r.risk_score,
     finalReviewerNote: r.final_reviewer_note,
