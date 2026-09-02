@@ -217,6 +217,68 @@ def test_completing_the_final_node_completes_the_lane_and_marks_the_story_done(d
     assert story_row.status == StoryStatus.DONE
 
 
+def _drive_to_release_ready(db, project, actor):
+    """Runs a fresh story's lane up to (but not including) completing its
+    final RELEASE_READY node — shared setup for the Done-approval-gate
+    tests below."""
+    _approved_project(db, project, actor)
+    story = _create_direct_story(db, project, actor)
+    create_story_lane(story.id, CreateStoryLaneRequest(triggered_by_user_id=actor.id), db)
+    lane = get_story_delivery_lane(story.id, db)
+
+    for _ in range(len(DEFAULT_STORY_DELIVERY_NODES) - 1):
+        nodes = list_lane_nodes(lane.id, db)
+        current = next(n for n in nodes if n.status == StoryDeliveryNodeStatus.READY)
+        if current.node_key == "QA_APPROVAL":
+            from app.models import StoryArtifact
+
+            db.add(
+                StoryArtifact(
+                    story_id=story.id, lane_id=lane.id, node_id=current.id, artifact_type="story_test_report",
+                    title="Test Report", content_markdown="## Test Evidence\nPass: 1 · Fail: 0\n", version_number=1,
+                    created_by_id=actor.id,
+                )
+            )
+            db.flush()
+        update_lane_node_status(current.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=actor.id), db)
+
+    nodes = list_lane_nodes(lane.id, db)
+    release_ready_node = next(n for n in nodes if n.node_key == "RELEASE_READY")
+    assert release_ready_node.status == StoryDeliveryNodeStatus.READY
+    return story, lane, release_ready_node
+
+
+def test_a_non_product_owner_cannot_mark_a_story_done(db, project, actor):
+    """Rule 8 — "Human approval is required before final Done." Before
+    this gate existed, any role could complete RELEASE_READY (and so
+    mark the story DONE) with a single PATCH."""
+    story, lane, release_ready_node = _drive_to_release_ready(db, project, actor)
+    developer = User(email=f"{uuid.uuid4()}@example.com", full_name="Dev", role=UserRole.DEVELOPER)
+    db.add(developer)
+    db.flush()
+
+    with pytest.raises(HTTPException) as exc_info:
+        update_lane_node_status(release_ready_node.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=developer.id), db)
+    assert exc_info.value.status_code == 403
+
+    from app.models import Story
+
+    assert db.get(Story, story.id).status != StoryStatus.DONE
+
+
+def test_a_product_owner_can_mark_a_story_done(db, project, actor):
+    story, lane, release_ready_node = _drive_to_release_ready(db, project, actor)
+    product_owner = User(email=f"{uuid.uuid4()}@example.com", full_name="PO", role=UserRole.PRODUCT_OWNER)
+    db.add(product_owner)
+    db.flush()
+
+    update_lane_node_status(release_ready_node.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=product_owner.id), db)
+
+    from app.models import Story
+
+    assert db.get(Story, story.id).status == StoryStatus.DONE
+
+
 def test_blocking_a_node_records_the_reason(db, project, actor):
     _approved_project(db, project, actor)
     story = _create_direct_story(db, project, actor)

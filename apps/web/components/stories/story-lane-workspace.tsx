@@ -325,7 +325,11 @@ export function StoryLaneWorkspace({
                             disabled={busy || currentUserId === null}
                           >
                             {busy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <CheckCircle2 className="mr-1 h-3 w-3" />}
-                            {node.node_key === "LLD_REVIEW" ? "Approve (Tech Lead)" : "Complete"}
+                            {node.node_key === "LLD_REVIEW"
+                              ? "Approve (Tech Lead)"
+                              : node.node_key === "RELEASE_READY"
+                                ? "Mark Done (Product Owner)"
+                                : "Complete"}
                           </Button>
                         )}
                     </div>

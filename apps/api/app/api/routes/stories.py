@@ -568,6 +568,20 @@ def update_lane_node_status(
         if evidence_error:
             raise HTTPException(status.HTTP_409_CONFLICT, evidence_error)
 
+    # HARDENING FIX — "Human approval is required before final Done."
+    # RELEASE_READY is this lane's terminal node; completing it is what
+    # marks the story DONE (see advance_lane below). Until now nothing
+    # gated who could complete it — any actor, any role, could mark a
+    # story DONE with a single PATCH. Fixed the same way as every other
+    # review gate in this lane (LLD_REVIEW/QA_APPROVAL above): only the
+    # role this node is already advisory-assigned to
+    # (_NODE_ASSIGNED_ROLE["RELEASE_READY"] = PRODUCT_OWNER, see
+    # app/services/story_delivery.py) or Admin may complete it.
+    if node.node_key == "RELEASE_READY" and new_status == StoryDeliveryNodeStatus.COMPLETED and actor.role not in (UserRole.PRODUCT_OWNER, UserRole.ADMIN):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, f"Role {actor.role.value} may not mark this story Done (RELEASE_READY) — Product Owner only."
+        )
+
     if payload.assigned_user_id is not None:
         assigned_user = db.get(User, payload.assigned_user_id)
         if assigned_user is None:
