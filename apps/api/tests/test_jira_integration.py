@@ -12,6 +12,7 @@ import pytest
 
 from app.services.jira_integration import (
     JiraIntegrationError,
+    add_comment,
     create_issue,
     get_issue_status,
     get_project,
@@ -142,6 +143,32 @@ def test_get_issue_status_returns_status_name():
     status_name = get_issue_status(BASE_URL, "suru@example.com", "fake-token", "PROJ-42", transport=_transport(handler))
 
     assert status_name == "In Progress"
+
+
+# --- add_comment (Done gate's "optionally update Jira status") ---------------------------
+
+
+def test_add_comment_posts_to_the_issues_comment_endpoint():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/rest/api/3/issue/PROJ-42/comment"
+        captured["body"] = json.loads(request.content)
+        return _json_response(201, {"id": "10001"})
+
+    add_comment(BASE_URL, "suru@example.com", "fake-token", "PROJ-42", "Story is DONE.", transport=_transport(handler))
+
+    # ADF-wrapped, not a raw status field write — see this function's own
+    # docstring for why this isn't the forbidden update/transition call.
+    assert captured["body"]["body"]["content"][0]["content"][0]["text"] == "Story is DONE."
+
+
+def test_add_comment_failure_raises_cleanly():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(404, {"errorMessages": ["Issue does not exist"]})
+
+    with pytest.raises(JiraIntegrationError):
+        add_comment(BASE_URL, "suru@example.com", "fake-token", "NOPE-1", "x", transport=_transport(handler))
 
 
 def test_write_methods_never_leak_the_token_in_an_error_message():

@@ -12,11 +12,14 @@ app/api/routes/jira_integration.py):
     in an exception message — every `JiraIntegrationError` raised below is
     built only from the response status code and Jira's own JSON error
     body, which never echoes back the credential that sent the request.
-  - Only four methods exist: verify_credentials, get_project (both reads),
+  - Five methods exist: verify_credentials, get_project (both reads),
     create_issue (a write — creates exactly the one issue described, never
-    more), and get_issue_status (a read, for status sync). There is no
-    update, delete, transition, or merge-equivalent method anywhere in
-    this module — enforced by construction, the same way
+    more), get_issue_status (a read, for status sync), and add_comment (a
+    write, but purely additive activity — see its own docstring for why
+    this doesn't count as the update it sounds like). There is no update,
+    delete, transition, or merge-equivalent method anywhere in this
+    module that mutates an issue's own fields or workflow status —
+    enforced by construction, the same way
     app/services/github_integration.py has no merge method.
 
 Real network calls only — no mock/heuristic fallback exists for this
@@ -182,6 +185,24 @@ def create_issue(
     ).json()
     issue_key = data["key"]
     return JiraIssue(key=issue_key, id=str(data.get("id", "")), url=f"{base_url.rstrip('/')}/browse/{issue_key}")
+
+
+def add_comment(
+    base_url: str, email: str, api_token: str, issue_key: str, body: str, *, transport: httpx.BaseTransport | None = None
+) -> None:
+    """POST /rest/api/3/issue/{key}/comment — the Done gate's "optionally
+    update Jira status" (see app/services/story_done_gate.py). This is
+    NOT the update/delete/transition/merge-equivalent call this module's
+    HARD RULE forbids — a comment never mutates the issue's own fields or
+    workflow status, it only appends activity, the same category GitHub's
+    create_issue_comment already is for PR review comments in this
+    codebase. There is still no way to flip the issue's actual status
+    field anywhere in this client — a completion comment is the honest
+    equivalent this integration can offer."""
+    _request(
+        "POST", f"/rest/api/{_API_VERSION}/issue/{issue_key}/comment", base_url=base_url, email=email, api_token=api_token,
+        json_body={"body": _to_adf(body)}, transport=transport,
+    )
 
 
 def get_issue_status(

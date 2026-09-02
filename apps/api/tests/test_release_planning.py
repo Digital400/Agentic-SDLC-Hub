@@ -37,7 +37,7 @@ from app.schemas.release import (
 from app.schemas.story import CreateStoryLaneRequest, StoryCreate, UpdateLaneNodeStatusRequest
 from app.services.story_delivery import DEFAULT_STORY_DELIVERY_NODES
 
-from tests.conftest import make_approved_artifact, make_node
+from tests.conftest import fabricate_done_gate_prereqs, make_approved_artifact, make_node
 
 
 def _approved_project(db, project, actor):
@@ -83,6 +83,7 @@ def _drive_lane_to_release_ready(db, project, story, actor):
                 )
             )
             db.flush()
+        fabricate_done_gate_prereqs(db, project=project, story=story, lane=lane, node=current, actor=actor)
         update_lane_node_status(current.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=actor.id), db)
 
 

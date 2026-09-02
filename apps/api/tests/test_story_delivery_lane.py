@@ -32,7 +32,7 @@ from app.schemas.story import (
 )
 from app.services.story_delivery import DEFAULT_STORY_DELIVERY_NODES
 
-from tests.conftest import make_approved_artifact, make_node
+from tests.conftest import fabricate_done_gate_prereqs, make_approved_artifact, make_node
 
 
 def _ba(db) -> User:
@@ -239,6 +239,10 @@ def test_completing_the_final_node_completes_the_lane_and_marks_the_story_done(d
                 )
             )
             db.flush()
+        # Final Done gate (app/services/story_done_gate.py) additionally
+        # requires Jira sync / Test Scenarios / a PR / a completed PR
+        # review / a QA-approved StoryTestExecution — fabricated here too.
+        fabricate_done_gate_prereqs(db, project=project, story=story, lane=lane, node=current, actor=actor)
         update_lane_node_status(current.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=actor.id), db)
 
     lane_after = get_story_delivery_lane(story.id, db)
@@ -286,6 +290,7 @@ def _drive_to_release_ready(db, project, actor):
                 )
             )
             db.flush()
+        fabricate_done_gate_prereqs(db, project=project, story=story, lane=lane, node=current, actor=actor)
         update_lane_node_status(current.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=actor.id), db)
 
     nodes = list_lane_nodes(lane.id, db)

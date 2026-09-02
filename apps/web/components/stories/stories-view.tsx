@@ -4,6 +4,7 @@ import { Fragment, useState } from "react";
 import Link from "next/link";
 import {
   CalendarPlus,
+  CheckCircle2,
   CheckSquare,
   ClipboardList,
   Eye,
@@ -424,7 +425,14 @@ export function StoriesView({
                           />
                         </TableCell>
                         <TableCell className="max-w-[16rem]">
-                          <div className="truncate font-medium">{story.title}</div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate font-medium">{story.title}</span>
+                            {story.status === "DONE" && (
+                              <Badge variant="success" className="shrink-0 gap-1">
+                                <CheckCircle2 className="h-3 w-3" /> Done
+                              </Badge>
+                            )}
+                          </div>
                           <div className="truncate text-xs text-muted-foreground">{story.epic || "—"}</div>
                         </TableCell>
                         <TableCell>

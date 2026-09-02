@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
+from app.core.security import SecretDecryptionError, decrypt_secret
 from app.models import (
     Artifact,
     ArtifactStatus,
@@ -369,3 +370,33 @@ def sync_story_to_jira(
         )
 
     return story_result
+
+
+def try_post_story_done_comment(db: Session, *, story: Story) -> bool:
+    """Done gate rule — "optionally update Jira status." See
+    app/services/jira_integration.py's add_comment docstring for why a
+    comment, not a real status transition, is the honest ceiling of what
+    this integration can do. Best-effort by design: no linked Jira
+    project, no decryptable credential, or any Jira API failure all just
+    return False — never raises, never blocks marking the story DONE
+    (see app/services/story_done_gate.py, the only caller)."""
+    if not story.jira_issue_key:
+        return False
+    link = db.query(JiraProjectLink).filter(JiraProjectLink.project_id == story.project_id).first()
+    if link is None:
+        return False
+    connection = link.connection
+    integration = connection.integration
+    config = integration.config_json or {}
+    base_url, email = config.get("base_url", ""), config.get("email", "")
+    if not base_url or not email:
+        return False
+    try:
+        token = decrypt_secret(connection.access_token_encrypted)
+        jira_api.add_comment(
+            base_url, email, token, story.jira_issue_key,
+            f"Story \"{story.title}\" has completed its delivery lane and is now DONE in the Agentic SDLC Hub.",
+        )
+    except (SecretDecryptionError, JiraIntegrationError):
+        return False
+    return True

@@ -423,3 +423,53 @@ def test_bulk_preview_reports_every_named_story(db, project, actor, monkeypatch)
     assert not by_id[story_b.id].is_valid
     # Bulk preview never calls Jira or writes anything.
     assert db.get(Story, story_a.id).jira_sync_status == StoryJiraSyncStatus.NOT_SYNCED
+
+
+# --- try_post_story_done_comment (Done gate's "optionally update Jira status") -----------
+
+
+def test_done_comment_best_effort_false_without_a_jira_project_link(db, project, actor):
+    from app.services.story_jira_sync import try_post_story_done_comment
+
+    story = _make_full_story(db, project, actor)
+    story.jira_issue_key = "PROJ-1"
+    db.flush()
+
+    assert try_post_story_done_comment(db, story=story) is False
+
+
+def test_done_comment_posts_when_linked_and_synced(db, project, actor, monkeypatch):
+    from app.services.story_jira_sync import try_post_story_done_comment
+
+    _connect_and_link(db, actor, project, monkeypatch)
+    story = _make_full_story(db, project, actor)
+    story.jira_issue_key = "PROJ-1"
+    story.jira_sync_status = StoryJiraSyncStatus.SYNCED
+    db.flush()
+
+    posted = {}
+    monkeypatch.setattr(
+        "app.services.story_jira_sync.jira_api.add_comment",
+        lambda base_url, email, token, issue_key, body, **kw: posted.update(issue_key=issue_key, body=body),
+    )
+
+    assert try_post_story_done_comment(db, story=story) is True
+    assert posted["issue_key"] == "PROJ-1"
+    assert "DONE" in posted["body"]
+
+
+def test_done_comment_best_effort_false_when_jira_api_fails(db, project, actor, monkeypatch):
+    from app.services.story_jira_sync import try_post_story_done_comment
+
+    _connect_and_link(db, actor, project, monkeypatch)
+    story = _make_full_story(db, project, actor)
+    story.jira_issue_key = "PROJ-1"
+    story.jira_sync_status = StoryJiraSyncStatus.SYNCED
+    db.flush()
+
+    def _fail(*a, **kw):
+        raise JiraIntegrationError("boom")
+
+    monkeypatch.setattr("app.services.story_jira_sync.jira_api.add_comment", _fail)
+
+    assert try_post_story_done_comment(db, story=story) is False

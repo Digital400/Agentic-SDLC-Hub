@@ -66,6 +66,8 @@ from app.services.implementation_planner import AREA_TO_AGENT_TYPE, _infer_area
 from app.services.markdown_sections import find_section
 from app.services.permissions import require_can_edit_stage
 from app.services.story_delivery import StoryDeliveryError, advance_lane, create_story_delivery_lane
+from app.services.story_done_gate import evaluate_story_done_gate
+from app.services.story_jira_sync import try_post_story_done_comment
 from app.services.story_export import parse_story_backlog
 from app.services.story_implementation_plan_agent import (
     STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE,
@@ -644,6 +646,14 @@ def update_lane_node_status(
             status.HTTP_403_FORBIDDEN, f"Role {actor.role.value} may not mark this story Done (RELEASE_READY) — Product Owner only."
         )
 
+    # Final Done gate — see app/services/story_done_gate.py. Re-checks all
+    # 9 conditions directly against their source of truth, one last time,
+    # rather than trusting the lane's own node sequence alone.
+    if node.node_key == "RELEASE_READY" and new_status == StoryDeliveryNodeStatus.COMPLETED:
+        unmet = evaluate_story_done_gate(db, story=db.get(Story, node.lane.story_id), lane=node.lane)
+        if unmet:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Cannot mark this story Done yet: " + "; ".join(unmet))
+
     if payload.assigned_user_id is not None:
         assigned_user = db.get(User, payload.assigned_user_id)
         if assigned_user is None:
@@ -697,8 +707,24 @@ def update_lane_node_status(
             if unlocked.node_key == "IMPLEMENTATION":
                 _ensure_story_implementation_task(db, story=story, created_by=actor)
         elif lane.status == StoryDeliveryLaneStatus.COMPLETED:
+            # Final Done gate side effects — see app/services/story_done_gate.py.
+            # "Update Story Lane status to DONE" is StoryDeliveryLaneStatus
+            # .COMPLETED above — this lane model's own terminal status,
+            # reused rather than adding a second, functionally-identical
+            # enum value.
             story.status = StoryStatus.DONE
             _log_story_activity(db, story=story, action="story_lane.completed", actor=actor, lane_id=lane.id)
+            record_audit_log(
+                db, project_id=story.project_id, actor_user_id=actor.id, action="story.done",
+                entity_type="Story", entity_id=story.id,
+                extra_data={"lane_id": str(lane.id), "jira_issue_key": story.jira_issue_key},
+            )
+            # Optional — best-effort, never blocks marking the story DONE
+            # (see try_post_story_done_comment's own docstring for why a
+            # comment, not a real status write, is this integration's
+            # honest ceiling).
+            if try_post_story_done_comment(db, story=story):
+                _log_story_activity(db, story=story, action="story.jira_done_comment_posted", actor=actor, lane_id=lane.id)
 
     db.commit()
     db.refresh(node)
