@@ -410,6 +410,24 @@ class SprintStoryStatus(str, enum.Enum):
     REMOVED = "REMOVED"
 
 
+class ReleaseStatus(str, enum.Enum):
+    """A Release's own lifecycle — see app/models/release.py. Distinct
+    from a Sprint's release_planning stage (app/services/release_export.py,
+    which renders one sprint's own release readiness as a project-level
+    Artifact): a Release is a free-standing, human-curated set of
+    RELEASE_READY stories, not implicitly tied to any one sprint.
+
+    DRAFT -> APPROVED is the one real gate (POST /releases/{id}/approve —
+    requirement 7's approval gate); RELEASED marks it actually shipped
+    (a separate, later human action, not implied by approval alone);
+    CANCELLED is a manual override reachable from DRAFT or APPROVED."""
+
+    DRAFT = "DRAFT"
+    APPROVED = "APPROVED"
+    RELEASED = "RELEASED"
+    CANCELLED = "CANCELLED"
+
+
 class StoryDeliveryLaneStatus(str, enum.Enum):
     """One story's own delivery lane (see app/models/story_delivery_lane.py)
     — a dedicated, self-contained graph per story, deliberately NOT the

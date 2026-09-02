@@ -19,6 +19,7 @@ from app.api.routes import (
     pr_review_runs,
     projects,
     prompts,
+    releases,
     reviews,
     sprints,
     stories,
@@ -71,6 +72,7 @@ app.include_router(pr_review_runs.router)
 app.include_router(maintenance_runs.router)
 app.include_router(stories.router)
 app.include_router(sprints.router)
+app.include_router(releases.router)
 app.include_router(ops.router)
 app.include_router(users.router)
 app.include_router(validators.router)

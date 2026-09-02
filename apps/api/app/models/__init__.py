@@ -35,6 +35,7 @@ from app.models.enums import (
     StoryDeliveryNodeStatus,
     SprintStatus,
     SprintStoryStatus,
+    ReleaseStatus,
     PRReviewRecommendation,
     PRReviewRunStatus,
     ProjectRole,
@@ -54,6 +55,8 @@ from app.models.workflow import WorkflowEdge, WorkflowNode
 from app.models.artifact import Artifact, ArtifactVersion
 from app.models.sprint import Sprint
 from app.models.sprint_story import SprintStory
+from app.models.release import Release
+from app.models.release_story import ReleaseStory
 from app.models.story import Story
 from app.models.story_assignee import StoryAssignee
 from app.models.story_delivery_node import StoryDeliveryNode
@@ -122,6 +125,9 @@ __all__ = [
     "SprintStatus",
     "SprintStory",
     "SprintStoryStatus",
+    "Release",
+    "ReleaseStatus",
+    "ReleaseStory",
     "JiraProjectLink",
     "JiraIssueLink",
     "JiraSourceType",

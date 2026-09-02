@@ -497,6 +497,37 @@ export interface ApiSprintBoard {
   over_capacity: boolean;
 }
 
+// Release planning from story delivery lanes — see app/models/release.py
+// and app/api/routes/releases.py. Distinct from the older per-Sprint
+// release_planning stage (api.sprints' generateReleasePlan).
+export interface ApiRelease {
+  id: string;
+  project_id: string;
+  name: string;
+  version: string;
+  target_date: string | null;
+  status: "DRAFT" | "APPROVED" | "RELEASED" | "CANCELLED";
+  release_notes: string;
+  created_by_id: string;
+  approved_by_id: string | null;
+  approved_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiReleaseStory {
+  id: string;
+  release_id: string;
+  story_id: string;
+  added_by_id: string;
+  created_at: string;
+}
+
+export interface ApiReleaseBoard {
+  release: ApiRelease;
+  items: { release_story: ApiReleaseStory; story: ApiStory }[];
+}
+
 export interface ApiReviewComment {
   id: string;
   review_id: string;
@@ -1618,5 +1649,28 @@ export const api = {
         triggered_by_user_id: triggeredByUserId,
         reviewer_id: reviewerId,
       }),
+  },
+
+  // Release planning from story delivery lanes — see
+  // app/api/routes/releases.py. A release only ever holds explicitly
+  // added stories (never an implicit "add every ready story").
+  releases: {
+    list: (projectId: string) => get<ApiRelease[]>(`/projects/${projectId}/releases`),
+    releaseReadyStories: (projectId: string) => get<ApiStory[]>(`/projects/${projectId}/release-ready-stories`),
+    create: (body: { project_id: string; name: string; version: string; target_date?: string; created_by_id: string }) =>
+      post<ApiRelease>("/releases", body),
+    update: (
+      releaseId: string,
+      body: Partial<{ name: string; version: string; target_date: string; release_notes: string }> & { updated_by_id: string }
+    ) => patch<ApiRelease>(`/releases/${releaseId}`, body),
+    board: (releaseId: string) => get<ApiReleaseBoard>(`/releases/${releaseId}/board`),
+    addStory: (releaseId: string, storyId: string, actorUserId: string) =>
+      post<ApiReleaseStory>(`/releases/${releaseId}/stories`, { story_id: storyId, actor_user_id: actorUserId }),
+    removeStory: (releaseId: string, storyId: string, actorUserId: string) =>
+      del<void>(`/releases/${releaseId}/stories/${storyId}`, { actor_user_id: actorUserId }),
+    generateNotes: (releaseId: string, triggeredByUserId: string) =>
+      post<ApiRelease>(`/releases/${releaseId}/generate-notes`, { triggered_by_user_id: triggeredByUserId }),
+    approvalChecklist: (releaseId: string) => get<string[]>(`/releases/${releaseId}/approval-checklist`),
+    approve: (releaseId: string, actorUserId: string) => post<ApiRelease>(`/releases/${releaseId}/approve`, { actor_user_id: actorUserId }),
   },
 };
