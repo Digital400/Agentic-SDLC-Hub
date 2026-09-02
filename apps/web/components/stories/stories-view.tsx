@@ -5,6 +5,7 @@ import Link from "next/link";
 import {
   CalendarPlus,
   ClipboardList,
+  Eye,
   ExternalLink,
   Loader2,
   Pencil,
@@ -21,7 +22,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { api, ApiError, ApiSprint, ApiStory, ApiUser } from "@/lib/api";
+import { api, ApiError, ApiSprint, ApiStory, ApiStoryJiraPreview, ApiUser } from "@/lib/api";
 
 const MODE_HELPER_TEXT: Record<"VERTICAL" | "HORIZONTAL", string> = {
   VERTICAL: "Creates end-to-end user value stories suitable for Scrum sprint delivery.",
@@ -95,6 +96,12 @@ export function StoriesView({
   const [addingSprintFor, setAddingSprintFor] = useState<string | null>(null);
   const [newSprintName, setNewSprintName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Requirement 2 — "User must preview Jira payload before creating/
+  // updating Jira issue": a preview is fetched and shown inline before
+  // any sync call can be confirmed, for exactly one story at a time.
+  const [previewingId, setPreviewingId] = useState<string | null>(null);
+  const [preview, setPreview] = useState<ApiStoryJiraPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   function updateStory(updated: ApiStory) {
     setStories((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
@@ -157,18 +164,36 @@ export function StoriesView({
     }
   }
 
-  async function handleSyncToJira(story: ApiStory) {
+  async function handleOpenPreview(story: ApiStory) {
+    if (previewingId === story.id) {
+      setPreviewingId(null);
+      setPreview(null);
+      return;
+    }
+    setPreviewingId(story.id);
+    setPreview(null);
+    setPreviewLoading(true);
+    setError(null);
+    try {
+      setPreview(await api.jira.storyPreview(story.id));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to load the Jira preview for this story.");
+      setPreviewingId(null);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  async function handleConfirmSyncToJira(story: ApiStory) {
     if (currentUserId === null) return;
     setBusyStoryId(story.id);
     setError(null);
     try {
-      await api.jira.push({
-        project_id: projectId,
-        triggered_by_user_id: currentUserId,
-        selections: [{ source_type: "STORY", source_key: story.title }],
-      });
+      await api.jira.syncStory(story.id, { triggered_by_user_id: currentUserId });
       const refreshed = await api.stories.list(projectId);
       setStories(refreshed.items);
+      setPreviewingId(null);
+      setPreview(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to sync this story to Jira.");
     } finally {
@@ -350,12 +375,23 @@ export function StoriesView({
                               size="icon"
                               variant="ghost"
                               className="h-7 w-7"
-                              title={jiraConnected ? "Sync to Jira" : "Connect Jira first"}
-                              disabled={!jiraConnected || busy}
-                              onClick={() => handleSyncToJira(story)}
+                              title={jiraConnected ? "Preview Jira sync" : "Connect Jira first"}
+                              disabled={!jiraConnected}
+                              onClick={() => handleOpenPreview(story)}
                             >
-                              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="h-3.5 w-3.5" />}
+                              <Eye className="h-3.5 w-3.5" />
                             </Button>
+                            {story.jira_issue_url && (
+                              <a
+                                href={story.jira_issue_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                title="Open Jira issue"
+                                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                              >
+                                <ExternalLink className="h-3.5 w-3.5" />
+                              </a>
+                            )}
                             <Button
                               size="icon"
                               variant="ghost"
@@ -387,6 +423,76 @@ export function StoriesView({
                           </div>
                         </TableCell>
                       </TableRow>
+
+                      {previewingId === story.id && (
+                        <TableRow>
+                          <TableCell colSpan={10} className="bg-muted/30">
+                            <div className="flex flex-col gap-3 py-2">
+                              {previewLoading ? (
+                                <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading Jira preview…
+                                </p>
+                              ) : preview ? (
+                                <>
+                                  <div className="grid grid-cols-2 gap-3 text-xs">
+                                    <div>
+                                      <div className="mb-1 text-muted-foreground">Summary</div>
+                                      <div className="font-medium">{preview.summary}</div>
+                                    </div>
+                                    <div>
+                                      <div className="mb-1 text-muted-foreground">Priority</div>
+                                      <div className="font-medium">{preview.priority ?? "—"}</div>
+                                    </div>
+                                    <div className="col-span-2">
+                                      <div className="mb-1 text-muted-foreground">Description (sent to Jira as-is)</div>
+                                      <pre className="whitespace-pre-wrap rounded-md border bg-background p-2 font-mono text-xs">{preview.description}</pre>
+                                    </div>
+                                    {preview.subtasks.length > 0 && (
+                                      <div className="col-span-2">
+                                        <div className="mb-1 text-muted-foreground">Subtasks (from Implementation tasks)</div>
+                                        <ul className="list-disc space-y-1 pl-4">
+                                          {preview.subtasks.map((s) => (
+                                            <li key={s.implementation_task_id}>
+                                              {s.title}
+                                              {s.already_linked && (
+                                                <span className="ml-1 text-muted-foreground">(already linked — {s.already_linked.jira_issue_key})</span>
+                                              )}
+                                              {s.validation_errors.length > 0 && (
+                                                <span className="ml-1 text-destructive">— {s.validation_errors.join(" ")}</span>
+                                              )}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    )}
+                                  </div>
+                                  {preview.already_linked ? (
+                                    <p className="text-xs text-muted-foreground">
+                                      Already linked to Jira issue {preview.already_linked.jira_issue_key} — syncing again will not
+                                      create a duplicate or edit the existing issue.
+                                    </p>
+                                  ) : preview.validation_errors.length > 0 ? (
+                                    <p className="text-xs text-destructive">{preview.validation_errors.join(" ")}</p>
+                                  ) : null}
+                                  <div className="flex justify-end gap-2">
+                                    <Button size="sm" variant="outline" onClick={() => { setPreviewingId(null); setPreview(null); }}>
+                                      Cancel
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      onClick={() => handleConfirmSyncToJira(story)}
+                                      disabled={busy || currentUserId === null || preview.validation_errors.length > 0 || !!preview.already_linked}
+                                    >
+                                      {busy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <UploadCloud className="mr-1 h-3 w-3" />}
+                                      {preview.already_linked ? "Already synced" : "Confirm & sync to Jira"}
+                                    </Button>
+                                  </div>
+                                </>
+                              ) : null}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
 
                       {addingSprintFor === story.id && (
                         <TableRow>

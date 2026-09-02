@@ -116,9 +116,10 @@ export type ImplementationTaskStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" |
 export interface ImplementationTaskItem {
   id: string;
   projectId: string;
-  workflowNodeId: string;
-  artifactId: string;
-  artifactVersionId: string;
+  storyId: string | null;
+  workflowNodeId: string | null;
+  artifactId: string | null;
+  artifactVersionId: string | null;
   title: string;
   description: string;
   linkedStory: string | null;
@@ -238,14 +239,18 @@ export interface TestExecutedItem {
 export interface TestRunItem {
   id: string;
   projectId: string;
-  workflowNodeId: string;
+  workflowNodeId: string | null;
   implementationTaskId: string;
   implementationRunId: string;
   pullRequestLinkId: string | null;
+  storyId: string | null;
+  laneId: string | null;
   artifactId: string | null;
   artifactVersionId: string | null;
+  storyArtifactId: string | null;
   triggeredByUserId: string | null;
   agentType: TestAgentType;
+  testAgentKey: string | null;
   status: TestRunStatus;
   testPlan: string;
   testsToAdd: TestToAddItem[];
@@ -255,6 +260,7 @@ export interface TestRunItem {
   bugsFound: string[];
   suggestedFixes: string[];
   coverageImpact: Record<string, string>;
+  evidenceAttachments: string[];
   usedMock: boolean;
   tokenUsage: Record<string, number> | null;
   cost: number | null;

@@ -152,9 +152,10 @@ export type ApiImplementationTaskStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED
 export interface ApiImplementationTask {
   id: string;
   project_id: string;
-  workflow_node_id: string;
-  artifact_id: string;
-  artifact_version_id: string;
+  story_id: string | null;
+  workflow_node_id: string | null;
+  artifact_id: string | null;
+  artifact_version_id: string | null;
   title: string;
   description: string;
   linked_story: string | null;
@@ -219,13 +220,19 @@ export interface ApiImplementationRun {
   implementation_task_id: string;
   repository_snapshot_id: string | null;
   triggered_by_user_id: string | null;
+  story_id: string | null;
+  lane_id: string | null;
+  story_lld_artifact_id: string | null;
+  assigned_user_id: string | null;
   agent_type: string;
+  assigned_agent_key: string | null;
   status: ApiImplementationRunStatus;
   proposed_file_changes: ApiProposedFileChange[];
   diff_text: string;
   explanation: string;
   test_command: string;
   risks: string[];
+  pr_description: string;
   used_mock: boolean;
   token_usage: Record<string, number> | null;
   cost: number | null;
@@ -263,14 +270,18 @@ export interface ApiTestExecuted {
 export interface ApiTestRun {
   id: string;
   project_id: string;
-  workflow_node_id: string;
+  workflow_node_id: string | null;
   implementation_task_id: string;
   implementation_run_id: string;
   pull_request_link_id: string | null;
+  story_id: string | null;
+  lane_id: string | null;
   artifact_id: string | null;
   artifact_version_id: string | null;
+  story_artifact_id: string | null;
   triggered_by_user_id: string | null;
   agent_type: ApiTestAgentType;
+  test_agent_key: string | null;
   status: ApiTestRunStatus;
   test_plan: string;
   tests_to_add: ApiTestToAdd[];
@@ -280,6 +291,7 @@ export interface ApiTestRun {
   bugs_found: string[];
   suggested_fixes: string[];
   coverage_impact: Record<string, string>;
+  evidence_attachments: string[];
   used_mock: boolean;
   token_usage: Record<string, number> | null;
   cost: number | null;
@@ -700,6 +712,52 @@ export interface ApiJiraPushResponse {
 
 export interface ApiJiraSyncStatusResponse {
   links: ApiJiraIssueLink[];
+}
+
+// Per-story Jira sync — see app/services/story_jira_sync.py and
+// app/api/routes/jira_integration.py's /jira/stories/... routes.
+// Story Points / Sprint have no standard Jira field, so both are shown
+// as plainly-labeled lines inside `description` — exactly what a sync
+// would send, never a hidden custom-field guess.
+export interface ApiStoryJiraSubtaskPreview {
+  implementation_task_id: string;
+  title: string;
+  description: string;
+  validation_errors: string[];
+  already_linked: ApiJiraIssueLink | null;
+}
+
+export interface ApiStoryJiraPreview {
+  story_id: string;
+  summary: string;
+  description: string;
+  priority: string | null;
+  story_points: number | null;
+  sprint_name: string | null;
+  subtasks: ApiStoryJiraSubtaskPreview[];
+  validation_errors: string[];
+  already_linked: ApiJiraIssueLink | null;
+}
+
+export interface ApiSubtaskJiraSyncResult {
+  implementation_task_id: string;
+  status: "created" | "skipped_duplicate" | "skipped_invalid" | "failed";
+  jira_issue_key: string | null;
+  jira_issue_url: string | null;
+  errors: string[];
+}
+
+export interface ApiStoryJiraSyncResult {
+  story_id: string;
+  status: "created" | "skipped_duplicate" | "skipped_invalid" | "failed";
+  jira_issue_key: string | null;
+  jira_issue_url: string | null;
+  errors: string[];
+  subtasks: ApiSubtaskJiraSyncResult[];
+}
+
+export interface ApiBulkStoryJiraSyncResponse {
+  results: ApiStoryJiraSyncResult[];
 }
 
 // Real Confluence integration — see app/services/confluence_integration.py
@@ -1295,8 +1353,13 @@ export const api = {
   // Testing Agent system — see app/api/routes/test_runs.py. QA approval
   // happens at the existing /reviews/{id} screen (review_id above), not here.
   testRuns: {
-    start: (body: { implementation_task_id: string; agent_type: ApiTestAgentType; triggered_by_user_id: string; reviewer_id: string }) =>
-      post<ApiTestRun>("/test-runs", body),
+    start: (body: {
+      implementation_task_id: string;
+      agent_type: ApiTestAgentType;
+      triggered_by_user_id: string;
+      reviewer_id?: string; // required for a project-level task; ignored for a story-scoped one
+      evidence_attachments?: string[];
+    }) => post<ApiTestRun>("/test-runs", body),
     get: (id: string) => get<ApiTestRun>(`/test-runs/${id}`),
   },
 
@@ -1365,6 +1428,14 @@ export const api = {
     push: (body: { project_id: string; triggered_by_user_id: string; selections: { source_type: ApiJiraSourceType; source_key: string }[] }) =>
       post<ApiJiraPushResponse>("/jira/push", body),
     syncStatus: (projectId: string) => post<ApiJiraSyncStatusResponse>(`/jira/projects/${projectId}/sync-status`),
+    // Per-story sync — always preview before sync (see the panel in
+    // components/stories/stories-view.tsx). Bulk sync only ever touches
+    // the exact `story_ids` passed in — never an implicit "sync all".
+    storyPreview: (storyId: string) => get<ApiStoryJiraPreview>(`/jira/stories/${storyId}/preview`),
+    syncStory: (storyId: string, body: { triggered_by_user_id: string }) =>
+      post<ApiStoryJiraSyncResult>(`/jira/stories/${storyId}/sync`, body),
+    bulkSyncStories: (body: { story_ids: string[]; triggered_by_user_id: string }) =>
+      post<ApiBulkStoryJiraSyncResponse>("/jira/stories/bulk-sync", body),
   },
 
   // Real Confluence integration — see app/api/routes/confluence_integration.py.
@@ -1497,6 +1568,12 @@ export const api = {
     // 404s when no Story LLD has been drafted yet — callers should catch
     // ApiError with status 404 and treat it as "not drafted yet."
     getLld: (storyId: string) => get<ApiStoryArtifact>(`/stories/${storyId}/lld`),
+    // 404s until Story LLD/LLD_REVIEW is approved — see
+    // app/api/routes/stories.py's _ensure_story_implementation_task.
+    getImplementationTask: (storyId: string) => get<ApiImplementationTask>(`/stories/${storyId}/implementation-task`),
+    // 404s until a test run has completed for this story — see
+    // app/services/testing_agent.STORY_TEST_REPORT_ARTIFACT_TYPE.
+    getTestReport: (storyId: string) => get<ApiStoryArtifact>(`/stories/${storyId}/test-report`),
   },
 
   storyDelivery: {
