@@ -26,7 +26,7 @@ class PullRequestLinkRead(BaseModel):
 
     id: uuid.UUID
     project_id: uuid.UUID
-    workflow_node_id: uuid.UUID
+    workflow_node_id: uuid.UUID | None  # null for a story-scoped PR — see the model's own docstring
     implementation_task_id: uuid.UUID
     implementation_run_id: uuid.UUID
     repository_id: uuid.UUID

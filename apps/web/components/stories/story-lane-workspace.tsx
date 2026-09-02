@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { CheckCircle2, FileText, GitPullRequest, Loader2, PlayCircle, RefreshCw, XCircle } from "lucide-react";
+import { CheckCircle2, FileText, GitPullRequest, Loader2, PlayCircle, RefreshCw, ShieldAlert, XCircle } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,7 @@ import {
   ApiError,
   ApiImplementationRun,
   ApiImplementationTask,
+  ApiPRReviewRun,
   ApiStory,
   ApiStoryArtifact,
   ApiStoryDeliveryLane,
@@ -22,7 +23,7 @@ import {
   ApiUser,
 } from "@/lib/api";
 
-type Tab = "lane" | "lld" | "implementation" | "testing";
+type Tab = "lane" | "lld" | "implementation" | "pr-review" | "testing";
 
 const TEST_AGENT_TYPES: ApiTestAgentType[] = ["UNIT", "API", "UI", "REGRESSION", "SECURITY"];
 
@@ -52,6 +53,7 @@ export function StoryLaneWorkspace({
   initialImplementationTask,
   initialImplementationRuns,
   initialTestRuns,
+  initialPrReviewRuns,
   initialTestReport,
   users,
   currentUserId,
@@ -64,6 +66,7 @@ export function StoryLaneWorkspace({
   initialImplementationTask: ApiImplementationTask | null;
   initialImplementationRuns: ApiImplementationRun[];
   initialTestRuns: ApiTestRun[];
+  initialPrReviewRuns: ApiPRReviewRun[];
   initialTestReport: ApiStoryArtifact | null;
   users: ApiUser[];
   currentUserId: string | null;
@@ -75,20 +78,25 @@ export function StoryLaneWorkspace({
   const [implementationTask, setImplementationTask] = useState(initialImplementationTask);
   const [implementationRuns, setImplementationRuns] = useState(initialImplementationRuns);
   const [testRuns, setTestRuns] = useState(initialTestRuns);
+  const [prReviewRuns, setPrReviewRuns] = useState(initialPrReviewRuns);
   const [testReport, setTestReport] = useState(initialTestReport);
   const [testAgentType, setTestAgentType] = useState<ApiTestAgentType>("UNIT");
   const [busyNodeId, setBusyNodeId] = useState<string | null>(null);
   const [runBusy, setRunBusy] = useState(false);
   const [testRunBusy, setTestRunBusy] = useState(false);
+  const [prReviewBusy, setPrReviewBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const storyLldNode = nodes.find((n) => n.node_key === "STORY_LLD") ?? null;
   const lldReviewNode = nodes.find((n) => n.node_key === "LLD_REVIEW") ?? null;
   const implementationLaneNode = nodes.find((n) => n.node_key === "IMPLEMENTATION") ?? null;
+  const prReviewLaneNode = nodes.find((n) => n.node_key === "PR_REVIEW_AGENT") ?? null;
+  const humanCodeReviewNode = nodes.find((n) => n.node_key === "HUMAN_CODE_REVIEW") ?? null;
   const testingLaneNode = nodes.find((n) => n.node_key === "TESTING") ?? null;
   const qaApprovalNode = nodes.find((n) => n.node_key === "QA_APPROVAL") ?? null;
   const latestRun = implementationRuns[0] ?? null;
   const latestTestRun = testRuns[0] ?? null;
+  const latestPrReviewRun = prReviewRuns[0] ?? null;
 
   async function refresh() {
     const [refreshedLane, refreshedNodes] = await Promise.all([
@@ -108,11 +116,13 @@ export function StoryLaneWorkspace({
       setImplementationTask(task);
       setImplementationRuns(await api.projects.implementationTaskRuns(projectId, task.id));
       setTestRuns(await api.projects.implementationTaskTestRuns(projectId, task.id));
+      setPrReviewRuns(await api.projects.implementationTaskPrReviewRuns(projectId, task.id));
     } catch (err) {
       if (!(err instanceof ApiError && err.status === 404)) throw err;
       setImplementationTask(null);
       setImplementationRuns([]);
       setTestRuns([]);
+      setPrReviewRuns([]);
     }
     try {
       setTestReport(await api.stories.getTestReport(story.id));
@@ -161,6 +171,20 @@ export function StoryLaneWorkspace({
       setError(err instanceof ApiError ? err.message : "Failed to create the pull request.");
     } finally {
       setRunBusy(false);
+    }
+  }
+
+  async function handleStartPrReview() {
+    if (currentUserId === null || implementationTask === null) return;
+    setPrReviewBusy(true);
+    setError(null);
+    try {
+      await api.prReviewRuns.start({ implementation_task_id: implementationTask.id, triggered_by_user_id: currentUserId });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to start the PR review.");
+    } finally {
+      setPrReviewBusy(false);
     }
   }
 
@@ -231,7 +255,7 @@ export function StoryLaneWorkspace({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex gap-1 border-b border-border">
-        {(["lane", "lld", "implementation", "testing"] as Tab[]).map((t) => (
+        {(["lane", "lld", "implementation", "pr-review", "testing"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -240,7 +264,15 @@ export function StoryLaneWorkspace({
               tab === t ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"
             )}
           >
-            {t === "lane" ? "Lane" : t === "lld" ? "LLD" : t === "implementation" ? "Implementation" : "Testing"}
+            {t === "lane"
+              ? "Lane"
+              : t === "lld"
+                ? "LLD"
+                : t === "implementation"
+                  ? "Implementation"
+                  : t === "pr-review"
+                    ? "PR Review"
+                    : "Testing"}
           </button>
         ))}
       </div>
@@ -464,6 +496,111 @@ export function StoryLaneWorkspace({
                       </>
                     )}
                   </div>
+                )}
+              </>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {tab === "pr-review" && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">PR Review</CardTitle>
+              <CardDescription>
+                Requires an accepted implementation run with a created pull request.
+                {prReviewLaneNode && <> Node: {prReviewLaneNode.status}.</>}
+                {humanCodeReviewNode && <> Human Code Review: {humanCodeReviewNode.status} — the real GitHub PR review, external to this app.</>}
+              </CardDescription>
+            </div>
+            {implementationTask && latestRun?.pull_request && (
+              <Button size="sm" onClick={handleStartPrReview} disabled={prReviewBusy || currentUserId === null}>
+                {prReviewBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1 h-3.5 w-3.5" />}
+                {latestPrReviewRun ? "Re-run" : "Start PR Review"}
+              </Button>
+            )}
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            {implementationTask === null ? (
+              <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
+                <FileText className="h-6 w-6" />
+                Not available yet — approve this story's LLD first.
+              </div>
+            ) : !latestRun?.pull_request ? (
+              <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
+                <GitPullRequest className="h-6 w-6" />
+                Create a pull request from the Implementation tab first.
+              </div>
+            ) : latestPrReviewRun === null ? (
+              <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
+                <FileText className="h-6 w-6" />
+                No PR review run yet.
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center gap-2">
+                  <Badge variant={latestPrReviewRun.status === "COMPLETED" ? "success" : latestPrReviewRun.status === "FAILED" ? "destructive" : "info"}>
+                    {latestPrReviewRun.status}
+                  </Badge>
+                  {latestPrReviewRun.overall_recommendation && (
+                    <Badge variant={latestPrReviewRun.overall_recommendation === "APPROVE" ? "success" : "warning"}>
+                      {latestPrReviewRun.overall_recommendation}
+                    </Badge>
+                  )}
+                  {latestPrReviewRun.risk_score !== null && (
+                    <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                      <ShieldAlert className="h-3 w-3" /> Risk: {latestPrReviewRun.risk_score}
+                    </span>
+                  )}
+                  {latestPrReviewRun.used_mock && <span className="text-xs text-muted-foreground">(mock provider)</span>}
+                </div>
+
+                {latestPrReviewRun.error_message ? (
+                  <p className="text-sm text-destructive">{latestPrReviewRun.error_message}</p>
+                ) : (
+                  <>
+                    <div>
+                      <p className="mb-1 text-xs font-medium text-muted-foreground">Summary</p>
+                      <p className="text-sm">{latestPrReviewRun.summary}</p>
+                    </div>
+
+                    {[
+                      { label: "Critical findings", items: latestPrReviewRun.critical_findings },
+                      { label: "Major findings", items: latestPrReviewRun.major_findings },
+                      { label: "Minor findings", items: latestPrReviewRun.minor_findings },
+                    ].map(
+                      ({ label, items }) =>
+                        items.length > 0 && (
+                          <div key={label}>
+                            <p className="mb-1 text-xs font-medium text-muted-foreground">{label}</p>
+                            <ul className="list-inside list-disc text-xs">
+                              {items.map((f, i) => (
+                                <li key={i}>
+                                  <span className="font-mono">{f.file}</span> — {f.detail}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )
+                    )}
+
+                    {latestPrReviewRun.missing_tests.length > 0 && (
+                      <div>
+                        <p className="mb-1 text-xs font-medium text-muted-foreground">Missing tests</p>
+                        <ul className="list-inside list-disc text-xs text-muted-foreground">
+                          {latestPrReviewRun.missing_tests.map((t, i) => (
+                            <li key={i}>{t}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    <p className="text-xs">
+                      <span className="font-medium text-muted-foreground">Final reviewer note: </span>
+                      {latestPrReviewRun.final_reviewer_note || "(none)"}
+                    </p>
+                  </>
                 )}
               </>
             )}

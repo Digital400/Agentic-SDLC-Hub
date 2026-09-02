@@ -328,10 +328,11 @@ export interface PostedCommentItem {
 export interface PRReviewRunItem {
   id: string;
   projectId: string;
-  workflowNodeId: string;
+  workflowNodeId: string | null; // null for a story-scoped run
   implementationTaskId: string;
   implementationRunId: string;
   pullRequestLinkId: string;
+  storyId: string | null;
   triggeredByUserId: string | null;
   status: PRReviewRunStatus;
   overallRecommendation: PRReviewRecommendation | null;

@@ -37,7 +37,9 @@ class PRReviewRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "pr_review_runs"
 
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
-    workflow_node_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workflow_nodes.id", ondelete="CASCADE"), nullable=False)
+    # Null for a story-scoped run — see PullRequestLink.workflow_node_id's
+    # own docstring for the same reasoning.
+    workflow_node_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("workflow_nodes.id", ondelete="CASCADE"), nullable=True)
     implementation_task_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("implementation_tasks.id", ondelete="CASCADE"), nullable=False
     )
@@ -90,7 +92,7 @@ class PRReviewRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     project: Mapped["Project"] = relationship("Project")
-    workflow_node: Mapped["WorkflowNode"] = relationship("WorkflowNode")
+    workflow_node: Mapped["WorkflowNode | None"] = relationship("WorkflowNode")
     implementation_task: Mapped["ImplementationTask"] = relationship("ImplementationTask")
     implementation_run: Mapped["ImplementationRun"] = relationship("ImplementationRun")
     pull_request_link: Mapped["PullRequestLink"] = relationship("PullRequestLink")

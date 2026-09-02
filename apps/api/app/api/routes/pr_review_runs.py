@@ -36,6 +36,7 @@ from app.models import (
     TestRunStatus,
     User,
     WorkflowNode,
+    WorkflowStatus,
 )
 from app.schemas.pr_review_run import (
     PostedCommentResultRead,
@@ -74,6 +75,26 @@ def _fetch_standards_chunks(db: Session, project: Project, node: WorkflowNode, t
         return []
 
 
+def _virtual_pr_review_node(project: Project) -> WorkflowNode:
+    """HARDENING FIX — a story-scoped task has no WorkflowNode row for the
+    pr_review stage (lanes are materialized entirely in StoryDeliveryNode;
+    see app/services/story_delivery.py), so the previous unconditional
+    `WorkflowNode.query(...).filter(story_id == task.story_id)` lookup
+    always returned None for one, 400ing every story-level PR review
+    before it could ever run. A transient, never-persisted WorkflowNode
+    stands in for _fetch_standards_chunks' `node` parameter instead — same
+    reuse pattern as app/api/routes/implementation_runs.py's own
+    _fetch_standards_chunks and app/services/story_lld_agent.py's module
+    docstring."""
+    return WorkflowNode(
+        project_id=project.id, node_key="pr_review", name="PR Review",
+        description="Coding standards retrieval for a PR review run.",
+        agent_key="pr-review-agent", required_inputs=[], output_artifact_type="pr_review_report",
+        requires_human_approval=False, allowed_actions=["draft"], status=WorkflowStatus.READY,
+        order_index=0, position_x=0, position_y=0,
+    )
+
+
 def _latest_test_summary(db: Session, task_id: uuid.UUID) -> tuple[str, int | None, list[str]]:
     """Best-effort — a task may not have been tested yet (requirement 2's
     "test results if available")."""
@@ -105,18 +126,21 @@ def start_pr_review_run(payload: StartPRReviewRunRequest, db: Session = Depends(
     if triggered_by is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
 
-    pr_review_node = (
-        db.query(WorkflowNode)
-        .filter(
-            WorkflowNode.project_id == project.id,
-            WorkflowNode.node_key == "pr_review",
-            WorkflowNode.story_id == task.story_id,
+    # HARDENING FIX — see _virtual_pr_review_node's docstring: a
+    # story-scoped task has no real WorkflowNode row for this stage, so
+    # this lookup is skipped entirely for one (only the project-level
+    # path still requires and looks up a real node).
+    pr_review_node: WorkflowNode | None = None
+    if task.story_id is None:
+        pr_review_node = (
+            db.query(WorkflowNode)
+            .filter(WorkflowNode.project_id == project.id, WorkflowNode.node_key == "pr_review", WorkflowNode.story_id.is_(None))
+            .first()
         )
-        .first()
-    )
-    if pr_review_node is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Project {project.id}'s workflow has no pr_review stage.")
-    require_can_edit_stage(triggered_by, pr_review_node.node_key)
+        if pr_review_node is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Project {project.id}'s workflow has no pr_review stage.")
+    require_can_edit_stage(triggered_by, "pr_review")
+    standards_lookup_node = pr_review_node if pr_review_node is not None else _virtual_pr_review_node(project)
 
     # Requirement 1's gate — an accepted run AND a created PR (stricter
     # than Testing's either/or) AND a non-empty diff.
@@ -170,12 +194,12 @@ def start_pr_review_run(payload: StartPRReviewRunRequest, db: Session = Depends(
         story_backlog_content = story_backlog_artifact.current_version.content_markdown
     story = find_related_story(story_backlog_content, task.linked_story)
 
-    standards_chunks = _fetch_standards_chunks(db, project, pr_review_node, task)
+    standards_chunks = _fetch_standards_chunks(db, project, standards_lookup_node, task)
     test_summary, test_fail_count, test_bugs_found = _latest_test_summary(db, task.id)
 
     run = PRReviewRun(
         project_id=project.id,
-        workflow_node_id=pr_review_node.id,
+        workflow_node_id=pr_review_node.id if pr_review_node is not None else None,
         implementation_task_id=task.id,
         implementation_run_id=implementation_run.id,
         pull_request_link_id=pr_link.id,

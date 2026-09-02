@@ -421,18 +421,26 @@ def create_pull_request(
     if triggered_by is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
 
-    implementation_node = (
-        db.query(WorkflowNode)
-        .filter(
-            WorkflowNode.project_id == project.id,
-            WorkflowNode.node_key == "implementation",
-            WorkflowNode.story_id == task.story_id,
+    # HARDENING FIX: a story-scoped task (task.story_id set) belongs to
+    # that story's own StoryDeliveryNode-based lane, not the project-level
+    # WorkflowNode graph — there is no WorkflowNode row with node_key=
+    # "implementation" and story_id=task.story_id for it to find (lanes
+    # are materialized entirely in StoryDeliveryNode, a different table;
+    # see app/services/story_delivery.py). The unconditional lookup this
+    # used to be always returned None for a story-scoped task, so
+    # create_pull_request 400'd on every single story-level PR — same
+    # branch-once convention start_implementation_run above already
+    # established for exactly this reason.
+    implementation_node = None
+    if task.story_id is None:
+        implementation_node = (
+            db.query(WorkflowNode)
+            .filter(WorkflowNode.project_id == project.id, WorkflowNode.node_key == "implementation", WorkflowNode.story_id.is_(None))
+            .first()
         )
-        .first()
-    )
-    if implementation_node is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Project {project.id}'s workflow has no implementation stage.")
-    require_can_edit_stage(triggered_by, implementation_node.node_key)
+        if implementation_node is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Project {project.id}'s workflow has no implementation stage.")
+    require_can_edit_stage(triggered_by, "implementation")
 
     # RULE: user must approve the patch before PR creation.
     if run.status != ImplementationRunStatus.COMPLETED or run.review_status != ImplementationRunReviewStatus.ACCEPTED:
@@ -505,7 +513,7 @@ def create_pull_request(
 
     link = PullRequestLink(
         project_id=project.id,
-        workflow_node_id=implementation_node.id,
+        workflow_node_id=implementation_node.id if implementation_node is not None else None,
         implementation_task_id=task.id,
         implementation_run_id=run.id,
         repository_id=repository.id,

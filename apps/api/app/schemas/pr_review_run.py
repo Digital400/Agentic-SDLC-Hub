@@ -34,10 +34,11 @@ class PostedCommentRead(BaseModel):
 class PRReviewRunRead(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID
-    workflow_node_id: uuid.UUID
+    workflow_node_id: uuid.UUID | None  # null for a story-scoped run — see the model's own docstring
     implementation_task_id: uuid.UUID
     implementation_run_id: uuid.UUID
     pull_request_link_id: uuid.UUID
+    story_id: uuid.UUID | None
     triggered_by_user_id: uuid.UUID | None
     status: PRReviewRunStatus
     overall_recommendation: PRReviewRecommendation | None
@@ -64,7 +65,8 @@ class PRReviewRunRead(BaseModel):
         return cls(
             id=run.id, project_id=run.project_id, workflow_node_id=run.workflow_node_id,
             implementation_task_id=run.implementation_task_id, implementation_run_id=run.implementation_run_id,
-            pull_request_link_id=run.pull_request_link_id, triggered_by_user_id=run.triggered_by_user_id,
+            pull_request_link_id=run.pull_request_link_id, story_id=run.story_id,
+            triggered_by_user_id=run.triggered_by_user_id,
             status=run.status, overall_recommendation=run.overall_recommendation, summary=run.summary,
             critical_findings=[FindingRead.model_validate(f) for f in run.critical_findings],
             major_findings=[FindingRead.model_validate(f) for f in run.major_findings],

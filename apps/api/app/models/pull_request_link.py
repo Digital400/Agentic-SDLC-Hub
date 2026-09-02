@@ -27,7 +27,10 @@ class PullRequestLink(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "pull_request_links"
 
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
-    workflow_node_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workflow_nodes.id", ondelete="CASCADE"), nullable=False)
+    # Null for a story-scoped PR — a StoryDeliveryNode, not a WorkflowNode,
+    # governs that PR's stage (see app/models/story_delivery_node.py); same
+    # nullable-relaxation precedent as ImplementationTask.workflow_node_id.
+    workflow_node_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("workflow_nodes.id", ondelete="CASCADE"), nullable=True)
     implementation_task_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("implementation_tasks.id", ondelete="CASCADE"), nullable=False
     )
@@ -58,7 +61,7 @@ class PullRequestLink(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     commit_message: Mapped[str] = mapped_column(Text, nullable=False)
 
     project: Mapped["Project"] = relationship("Project")
-    workflow_node: Mapped["WorkflowNode"] = relationship("WorkflowNode")
+    workflow_node: Mapped["WorkflowNode | None"] = relationship("WorkflowNode")
     implementation_task: Mapped["ImplementationTask"] = relationship("ImplementationTask")
     implementation_run: Mapped["ImplementationRun"] = relationship("ImplementationRun")
     repository: Mapped["Repository"] = relationship("Repository")

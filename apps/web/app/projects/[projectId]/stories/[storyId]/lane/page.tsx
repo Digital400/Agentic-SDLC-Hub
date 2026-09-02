@@ -40,9 +40,10 @@ export default async function StoryLanePage({ params }: { params: { projectId: s
     }),
   ]);
 
-  const [implementationRuns, testRuns, testReport] = await Promise.all([
+  const [implementationRuns, testRuns, prReviewRuns, testReport] = await Promise.all([
     implementationTask ? api.projects.implementationTaskRuns(project.id, implementationTask.id) : Promise.resolve([]),
     implementationTask ? api.projects.implementationTaskTestRuns(project.id, implementationTask.id) : Promise.resolve([]),
+    implementationTask ? api.projects.implementationTaskPrReviewRuns(project.id, implementationTask.id) : Promise.resolve([]),
     api.stories.getTestReport(story.id).catch((err) => {
       if (err instanceof ApiError && err.status === 404) return null;
       throw err;
@@ -69,6 +70,7 @@ export default async function StoryLanePage({ params }: { params: { projectId: s
         initialImplementationTask={implementationTask}
         initialImplementationRuns={implementationRuns}
         initialTestRuns={testRuns}
+        initialPrReviewRuns={prReviewRuns}
         initialTestReport={testReport}
         users={users}
         currentUserId={currentUserId}

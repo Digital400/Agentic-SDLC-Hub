@@ -331,10 +331,11 @@ export interface ApiPostedComment {
 export interface ApiPRReviewRun {
   id: string;
   project_id: string;
-  workflow_node_id: string;
+  workflow_node_id: string | null; // null for a story-scoped run
   implementation_task_id: string;
   implementation_run_id: string;
   pull_request_link_id: string;
+  story_id: string | null;
   triggered_by_user_id: string | null;
   status: ApiPRReviewRunStatus;
   overall_recommendation: ApiPRReviewRecommendation | null;

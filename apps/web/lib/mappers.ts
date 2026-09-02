@@ -281,6 +281,7 @@ export function toPRReviewRun(r: ApiPRReviewRun): PRReviewRunItem {
     implementationTaskId: r.implementation_task_id,
     implementationRunId: r.implementation_run_id,
     pullRequestLinkId: r.pull_request_link_id,
+    storyId: r.story_id,
     triggeredByUserId: r.triggered_by_user_id,
     status: r.status,
     overallRecommendation: r.overall_recommendation,
