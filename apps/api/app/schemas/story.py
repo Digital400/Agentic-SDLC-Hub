@@ -85,6 +85,13 @@ class StoryListResponse(BaseModel):
 class SyncStoriesResponse(BaseModel):
     created: list[StoryRead]
     already_existed: int
+    # Total `## Story: <title>` blocks parse_story_backlog found in the
+    # approved document, before dedup against already-persisted titles —
+    # `created` and `already_existed` alone can't distinguish "the
+    # backlog has 0 stories in it" (a real drafting/formatting problem)
+    # from "every story already synced" (nothing to do); the UI needs
+    # this to tell those apart and never silently show "nothing happened."
+    parsed_count: int
 
 
 class StoryUpdate(BaseModel):

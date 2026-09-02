@@ -1684,7 +1684,7 @@ export const api = {
   stories: {
     list: (projectId: string) => get<{ items: ApiStory[]; total: number }>(`/projects/${projectId}/stories`),
     syncFromBacklog: (projectId: string, body: { story_type: "VERTICAL" | "HORIZONTAL"; triggered_by_user_id: string }) =>
-      post<{ created: ApiStory[]; already_existed: number }>(`/projects/${projectId}/stories/sync-from-backlog`, body),
+      post<{ created: ApiStory[]; already_existed: number; parsed_count: number }>(`/projects/${projectId}/stories/sync-from-backlog`, body),
     update: (
       storyId: string,
       body: Partial<{

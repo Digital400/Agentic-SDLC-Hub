@@ -275,7 +275,9 @@ def sync_stories_from_backlog(
     db.commit()
     for row in created:
         db.refresh(row)
-    return SyncStoriesResponse(created=[_story_to_read(db, r) for r in created], already_existed=already_existed)
+    return SyncStoriesResponse(
+        created=[_story_to_read(db, r) for r in created], already_existed=already_existed, parsed_count=len(parsed)
+    )
 
 
 @router.post("/stories", response_model=StoryRead, status_code=status.HTTP_201_CREATED)

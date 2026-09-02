@@ -47,6 +47,7 @@ def test_sync_from_backlog_is_idempotent_and_audits_creation(db, project, actor)
     )
     assert len(result.created) == 2
     assert result.already_existed == 0
+    assert result.parsed_count == 2
     assert result.created[0].suggested_owner_role in {"DEVELOPER", "QA", "DEVOPS", "BA"}
     assert result.created[0].lane_status == "No delivery lane yet"
     assert result.created[0].jira_status == "Not Synced"
@@ -60,6 +61,25 @@ def test_sync_from_backlog_is_idempotent_and_audits_creation(db, project, actor)
     )
     assert len(result_2.created) == 0
     assert result_2.already_existed == 2
+    assert result_2.parsed_count == 2
+
+
+def test_sync_from_backlog_with_no_parseable_stories_reports_zero_parsed(db, project, actor):
+    """UI regression guard — a sync that runs but finds nothing must be
+    distinguishable from "everything already existed": `parsed_count`
+    lets the frontend tell an empty/malformed backlog apart from a
+    fully-synced one, instead of silently showing an empty list either
+    way."""
+    node = make_node(db, project, node_key="story_crafting", order_index=0, output_artifact_type="story_backlog")
+    make_approved_artifact(db, project, node, actor, content="Some free-form text with no '## Story:' headings at all.\n")
+    ba = _ba(db)
+
+    result = sync_stories_from_backlog(
+        project.id, SyncStoriesFromBacklogRequest(story_type=StoryType.VERTICAL, triggered_by_user_id=ba.id), db
+    )
+    assert result.created == []
+    assert result.already_existed == 0
+    assert result.parsed_count == 0
 
 
 def test_assigning_an_owner_audits_story_assigned(db, project, actor):

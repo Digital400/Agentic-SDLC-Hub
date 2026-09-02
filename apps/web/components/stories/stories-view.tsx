@@ -25,6 +25,7 @@ import { Select } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { api, ApiError, ApiSprint, ApiStory, ApiStoryJiraPreview, ApiUser } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 const MODE_HELPER_TEXT: Record<"VERTICAL" | "HORIZONTAL", string> = {
   VERTICAL: "Creates end-to-end user value stories suitable for Scrum sprint delivery.",
@@ -111,6 +112,10 @@ export function StoriesView({
   const [addingSprintFor, setAddingSprintFor] = useState<string | null>(null);
   const [newSprintName, setNewSprintName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Feedback for the sync action specifically — a sync that runs
+  // successfully but finds/creates nothing must never look identical to
+  // one that silently did nothing; see handleSync.
+  const [syncNotice, setSyncNotice] = useState<{ tone: "warning" | "success"; text: string } | null>(null);
   // Requirement 2 — "User must preview Jira payload before creating/
   // updating Jira issue": a preview is fetched and shown inline before
   // any sync call can be confirmed, for exactly one story at a time.
@@ -132,12 +137,37 @@ export function StoriesView({
     if (currentUserId === null) return;
     setSyncing(true);
     setError(null);
+    setSyncNotice(null);
     try {
       const result = await api.stories.syncFromBacklog(projectId, {
         story_type: mode,
         triggered_by_user_id: currentUserId,
       });
       if (result.created.length > 0) setStories((prev) => [...prev, ...result.created]);
+
+      // Never let a sync that changed nothing look identical to one that
+      // silently did nothing — the parsed_count===0 case in particular is
+      // a real drafting/formatting problem worth surfacing, not a no-op.
+      if (result.parsed_count === 0) {
+        setSyncNotice({
+          tone: "warning",
+          text:
+            "No stories were found in the approved Story Crafting document — it should contain one \"## Story: <title>\" " +
+            "section per story. If it doesn't, re-draft Story Crafting (Workflow tab) before syncing again.",
+        });
+      } else if (result.created.length === 0) {
+        setSyncNotice({
+          tone: "success",
+          text: `All ${result.already_existed} stor${result.already_existed === 1 ? "y was" : "ies were"} already synced — nothing new to add.`,
+        });
+      } else {
+        setSyncNotice({
+          tone: "success",
+          text:
+            `Synced ${result.created.length} new stor${result.created.length === 1 ? "y" : "ies"}` +
+            (result.already_existed > 0 ? ` (${result.already_existed} already existed).` : "."),
+        });
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to sync stories from the approved backlog.");
     } finally {
@@ -335,6 +365,11 @@ export function StoriesView({
             )}
           </div>
           <p className="text-xs text-muted-foreground">{MODE_HELPER_TEXT[mode]}</p>
+          {syncNotice && (
+            <p className={cn("text-sm", syncNotice.tone === "warning" ? "text-amber-600 dark:text-amber-500" : "text-muted-foreground")}>
+              {syncNotice.text}
+            </p>
+          )}
         </CardContent>
       </Card>
 
@@ -404,7 +439,7 @@ export function StoriesView({
                   <TableHead>Owner</TableHead>
                   <TableHead>Points</TableHead>
                   <TableHead>Jira</TableHead>
-                  <TableHead>Lane</TableHead>
+                  <TableHead>Lane / Workspace</TableHead>
                   <TableHead>Dependencies</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -482,9 +517,29 @@ export function StoriesView({
                           </div>
                         </TableCell>
                         <TableCell>
-                          <Badge variant={laneBadgeVariant(story.lane_status)} className="whitespace-nowrap">
-                            {story.lane_status}
-                          </Badge>
+                          <div className="flex flex-col items-start gap-1">
+                            <Badge variant={laneBadgeVariant(story.lane_status)} className="whitespace-nowrap">
+                              {story.lane_status}
+                            </Badge>
+                            {story.lane_created_at ? (
+                              <Link href={`/projects/${projectId}/stories/${story.id}/lane`}>
+                                <Button size="sm" className="h-6 px-2 text-xs">
+                                  Open story workspace
+                                </Button>
+                              </Link>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-6 px-2 text-xs"
+                                onClick={() => handleCreateLane(story.id)}
+                                disabled={busy || currentUserId === null}
+                              >
+                                {busy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <PlusCircle className="mr-1 h-3 w-3" />}
+                                Create lane
+                              </Button>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell className="max-w-[10rem] truncate text-xs text-muted-foreground" title={story.dependencies}>
                           {story.dependencies || "None."}
@@ -530,25 +585,6 @@ export function StoriesView({
                             >
                               <CalendarPlus className="h-3.5 w-3.5" />
                             </Button>
-                            {story.lane_created_at ? (
-                              <Link
-                                href={`/projects/${projectId}/stories/${story.id}/lane`}
-                                className="text-xs font-medium text-primary underline-offset-2 hover:underline"
-                              >
-                                Open lane
-                              </Link>
-                            ) : (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-7 px-2 text-xs"
-                                onClick={() => handleCreateLane(story.id)}
-                                disabled={busy || currentUserId === null}
-                              >
-                                {busy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <PlusCircle className="mr-1 h-3 w-3" />}
-                                Create lane
-                              </Button>
-                            )}
                           </div>
                         </TableCell>
                       </TableRow>
