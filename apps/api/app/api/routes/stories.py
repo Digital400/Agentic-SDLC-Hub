@@ -102,6 +102,21 @@ def _suggest_owner_role(*, feature: str, title: str, user_story: str) -> str:
     return _AREA_TO_SUGGESTED_ROLE.get(area, "DEVELOPER")
 
 
+def _clip(value: str, max_length: int) -> str:
+    """Defense in depth for sync-from-backlog: parse_story_backlog's
+    field regex has already been hardened against the one real failure
+    mode found (a bulleted "- **Label:**" field format bleeding an entire
+    story block into one field — see story_export.py's _FIELD_RE
+    comment), but this route still shouldn't let any future
+    drafting/parsing quirk turn into a bare psycopg2
+    StringDataRightTruncation 500 on a VARCHAR column. Truncating here is
+    silent by design for the same reason app/services/ai_generation.py's
+    truncation warning is NOT duplicated here — a stray 300-character
+    "Epic" is a cosmetic, human-editable annoyance (PATCH /stories/{id}
+    fixes it), not a lost story worth surfacing as an error."""
+    return value if len(value) <= max_length else value[: max_length - 1].rstrip() + "…"
+
+
 def _parse_story_points(raw: str) -> int | None:
     """The agent's "Story Points Estimate" is free text (a plain number,
     or a sizing label like "M" / "5 (Fibonacci)") — only seed Story.
@@ -236,28 +251,30 @@ def sync_stories_from_backlog(
         if parsed_story.title in existing_titles:
             already_existed += 1
             continue
+        suggested_owner_role = parsed_story.suggested_owner_role.strip().upper() or _suggest_owner_role(
+            feature=parsed_story.feature, title=parsed_story.title, user_story=parsed_story.user_story
+        )
         row = Story(
             project_id=project.id,
             source_artifact_version_id=artifact.current_version_id,
             story_type=payload.story_type,
             status=StoryStatus.PENDING,
-            epic=parsed_story.epic,
-            feature=parsed_story.feature,
-            title=parsed_story.title,
+            epic=_clip(parsed_story.epic, 255),
+            feature=_clip(parsed_story.feature, 255),
+            title=_clip(parsed_story.title, 500),
             user_story=parsed_story.user_story,
-            priority=parsed_story.priority,
+            priority=_clip(parsed_story.priority, 50),
             dependencies=parsed_story.dependencies,
             acceptance_criteria=parsed_story.acceptance_criteria,
             definition_of_done=parsed_story.definition_of_done,
             # Prefer the agent's own "Suggested Owner Role" field; only
             # fall back to the keyword heuristic when the agent didn't
             # state one (an older-format backlog, or a malformed story).
-            suggested_owner_role=parsed_story.suggested_owner_role.strip().upper()
-            or _suggest_owner_role(feature=parsed_story.feature, title=parsed_story.title, user_story=parsed_story.user_story),
+            suggested_owner_role=_clip(suggested_owner_role, 50),
             story_points=_parse_story_points(parsed_story.story_points_estimate),
             business_value=parsed_story.business_value,
             technical_areas=parsed_story.technical_areas,
-            jira_issue_type=parsed_story.jira_issue_type,
+            jira_issue_type=_clip(parsed_story.jira_issue_type, 50),
             suggested_subtasks=parsed_story.suggested_subtasks,
             release_readiness_criteria=parsed_story.release_readiness_criteria,
             created_by_id=triggered_by.id,

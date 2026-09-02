@@ -34,7 +34,18 @@ _STORY_HEADING_RE = re.compile(r"^##\s*Story:\s*(.+)$", re.MULTILINE)
 # Matches "**Label:** value" up to the next "**Label:**" line or end of
 # block — covers both a single-line value and a checklist that follows on
 # subsequent lines.
-_FIELD_RE = re.compile(r"\*\*([^*:]+):\*\*[ \t]*(.*?)(?=\n\*\*[^*:]+:\*\*|\Z)", re.DOTALL)
+#
+# The lookahead tolerates an optional leading bullet ("- **Label:**" or
+# "* **Label:**", with or without indentation) before the next field
+# marker — a real, observed model output rendered every field as a
+# Markdown list item ("- **Epic:** ...\n- **Feature:** ...") rather than
+# bare "**Epic:**" lines. Without this, the lookahead's stricter
+# `\n\*\*` never matched (the next line actually starts with "- **"), so
+# a field's value swallowed everything through the rest of the block —
+# in one real case, "Epic" ended up 2800+ characters long and the
+# subsequent INSERT failed on Story.epic's VARCHAR(255) column, which is
+# what actually surfaced to the user as "Failed to sync stories."
+_FIELD_RE = re.compile(r"\*\*([^*:]+):\*\*[ \t]*(.*?)(?=\n[ \t]*[-*]?[ \t]*\*\*[^*:]+:\*\*|\Z)", re.DOTALL)
 
 _CHECKLIST_ITEM_RE = re.compile(r"^\s*-\s*\[[ xX]?\]\s*(.+)$", re.MULTILINE)
 
