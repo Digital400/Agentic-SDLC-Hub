@@ -135,8 +135,9 @@ def test_supported_areas_is_exactly_the_four_named_agent_types():
 def test_real_ai_path_is_used_and_parsed_when_a_real_provider_is_active(monkeypatch):
     monkeypatch.setattr(implementation_agent, "get_active_provider", lambda: "anthropic")
     canned = {
-        "proposed_file_changes": [{"path": "apps/api/app/api/routes/auth.py", "change_type": "modify", "summary": "Add endpoint"}],
-        "diff": "--- a/apps/api/app/api/routes/auth.py\n+++ b/apps/api/app/api/routes/auth.py\n@@\n+def reset(): ...\n",
+        "proposed_file_changes": [
+            {"path": "apps/api/app/api/routes/auth.py", "change_type": "modify", "summary": "Add endpoint", "content": "def reset(): ...\n"}
+        ],
         "explanation": "Adds the password reset endpoint.",
         "test_command": "pytest tests/test_auth.py",
         "risks": ["Token expiry not yet enforced."],
@@ -149,6 +150,11 @@ def test_real_ai_path_is_used_and_parsed_when_a_real_provider_is_active(monkeypa
     assert result.proposed_file_changes[0].path == "apps/api/app/api/routes/auth.py"
     assert result.test_command == "pytest tests/test_auth.py"
     assert result.risks == ["Token expiry not yet enforced."]
+    # diff_text is no longer asked of the model (see _SYSTEM_PROMPT) — it's
+    # now built deterministically from "content" via difflib, so it must
+    # still come back populated and consistent, not the old raw "diff" key.
+    assert "def reset(): ..." in result.diff_text
+    assert "+++ b/apps/api/app/api/routes/auth.py" in result.diff_text
 
 
 def test_real_ai_failure_falls_back_to_heuristic(monkeypatch):

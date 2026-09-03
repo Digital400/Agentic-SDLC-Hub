@@ -217,17 +217,25 @@ _SYSTEM_PROMPT = (
     '- "proposed_file_changes": array of objects {"path": string, "change_type": one of "create"/"modify"/"delete", '
     '"summary": string, "content": string (the FULL proposed final content of the file after this change; omit or '
     'use null for a "delete")}.\n'
-    '- "diff": a single string containing a unified diff (git-style "--- a/<path>" / "+++ b/<path>" hunks) covering '
-    "every proposed file change — for human review; must be consistent with each file's \"content\" above.\n"
     '- "explanation": string — what the change does and why.\n'
     '- "test_command": string — the exact command a human should run to verify this change.\n'
     '- "risks": array of strings — include any blocker that would stop this from being mergeable as-is.\n'
     '- "pr_description": string — a complete pull request description (what changed, why, and how to verify), '
     "referencing the Jira issue key when one is given.\n"
-    "RULES: Output a diff only. Do NOT claim the change has been applied, committed, or pushed anywhere — you have "
-    "no ability to do so and must not imply otherwise. Never reference creating or pushing to a branch, and never "
-    "reference the repository's default/main branch as a target. Use only the repository content given to you; do "
-    "not invent file contents you weren't shown."
+    # Deliberately NOT asking for a hand-written unified diff here anymore
+    # (it used to be a required "diff" key): a real multi-file change made
+    # the model restate every file's full content twice — once as "content",
+    # once again as diff hunks — which routinely exhausted the output
+    # budget before the JSON even finished, silently producing the mock
+    # scaffold (this was the root cause behind a real "still mock" bug).
+    # The diff is now built deterministically below via difflib from
+    # "content" plus the existing repository snippet, so it's always
+    # complete and always consistent with "content" by construction,
+    # instead of just hoping the model kept the two in sync.
+    "RULES: Do NOT claim the change has been applied, committed, or pushed anywhere — you have no ability to do so "
+    "and must not imply otherwise. Never reference creating or pushing to a branch, and never reference the "
+    "repository's default/main branch as a target. Use only the repository content given to you; do not invent "
+    "file contents you weren't shown."
 )
 
 
@@ -295,21 +303,29 @@ def _run_real_agent(
     parsed = json.loads(cleaned)
 
     changes = []
+    diff_parts: list[str] = []
     for item in parsed.get("proposed_file_changes", []):
         change_type = str(item.get("change_type", "modify")).lower()
         if change_type not in _VALID_CHANGE_TYPES:
             change_type = "modify"
         content = item.get("content")
+        path = str(item.get("path", ""))
+        after_content = str(content) if content is not None and change_type != "delete" else None
         changes.append(
             ProposedFileChange(
-                path=str(item.get("path", "")), change_type=change_type, summary=str(item.get("summary", "")),
-                after_content=(str(content) if content is not None and change_type != "delete" else None),
+                path=path, change_type=change_type, summary=str(item.get("summary", "")),
+                after_content=after_content,
             )
         )
+        # Built here, not asked of the model — see _SYSTEM_PROMPT's comment
+        # on why: guaranteed consistent with "content" by construction,
+        # and it doesn't cost the model any of its own output budget.
+        before = "" if change_type == "create" else _existing_snippet(path, repo_context)
+        diff_parts.append(_unified_diff_for_path(path, before=before, after=after_content or ""))
 
     return ImplementationAgentResult(
         proposed_file_changes=changes,
-        diff_text=str(parsed.get("diff", "")),
+        diff_text="\n".join(diff_parts),
         pr_description=str(parsed.get("pr_description", "")) or _build_pr_description(task=task, story=story, jira_issue_key=jira_issue_key),
         explanation=str(parsed.get("explanation", "")),
         test_command=str(parsed.get("test_command", "")) or _DEFAULT_TEST_COMMAND_BY_AREA.get(task.area.value, "N/A"),
