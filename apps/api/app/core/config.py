@@ -107,7 +107,20 @@ class Settings(BaseSettings):
     CODE_RUNNER_ALLOWED_TEST_EXECUTABLES: list[str] = ["pytest", "npm", "yarn", "pnpm", "go", "mvn", "gradle"]
 
     class Config:
-        env_file = ".env"
+        # Absolute path, not the bare relative ".env" this used to be —
+        # pydantic-settings resolves a relative env_file against the
+        # process's current working directory at the moment Settings() is
+        # instantiated, not against this file's own location. Launching
+        # uvicorn from anywhere other than apps/api (the repo root, an
+        # IDE's default run directory, etc.) silently found no .env file
+        # at all and fell back to every default — including no AI
+        # provider key — with no error, ever. This is exactly what caused
+        # a real, repeatedly-reported bug: the API process kept resolving
+        # to the mock provider even with a real key already sitting in
+        # apps/api/.env, because the running process was never actually
+        # looking there. An absolute path makes this correct regardless
+        # of the launching shell's working directory.
+        env_file = REPO_ROOT / "apps" / "api" / ".env"
 
 
 @lru_cache
