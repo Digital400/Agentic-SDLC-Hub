@@ -850,10 +850,24 @@ def generate_raw_text(*, system_prompt: str, user_content: str, output_token_bud
     two-part draft/clarification response contract — used by
     app/services/artifact_summary.py's real-AI summarization path (that
     module writes its own JSON-response instructions into `system_prompt`
-    instead). Raises AIGenerationError on a provider failure, same as
-    `generate`. Never called when the mock provider is active — mock
-    summaries use a deterministic heuristic instead (see
-    artifact_summary.py), so this assumes a real key is configured."""
+    instead), and by every bespoke structured-JSON agent (implementation,
+    PR review, testing, implementation planning, validation). Raises
+    AIGenerationError on a provider failure, same as `generate`. Never
+    called when the mock provider is active — mock paths use a
+    deterministic heuristic instead, so this assumes a real key is
+    configured.
+
+    TRUNCATION (a real, previously-silent bug): every caller here expects
+    a complete JSON object back and parses it with json.loads. A response
+    cut off by output_token_budget is never valid JSON — it fails as a
+    confusing JSONDecodeError ("Unterminated string...") deep in the
+    caller, which every one of those callers' own except blocks quietly
+    swallows and falls back to a heuristic scaffold, with nothing telling
+    a human *why* real code never actually arrived. Raising here instead,
+    with the budget named explicitly, turns that into an honest,
+    diagnosable `AIGenerationError` your caller's existing fallback
+    handling already understands — the same fix generate() got for its
+    own callers, applied at this entry point too."""
     provider = get_active_provider()
     if provider == "gemini":
         result = _generate_with_gemini(system_prompt, user_content, output_token_budget)
@@ -865,4 +879,10 @@ def generate_raw_text(*, system_prompt: str, user_content: str, output_token_bud
         result = _generate_with_ollama(system_prompt, user_content, output_token_budget)
     else:
         result = _generate_with_anthropic(system_prompt, user_content, output_token_budget)
+    if result.truncated:
+        raise AIGenerationError(
+            f"Provider output was truncated at the {output_token_budget}-token output budget before "
+            "finishing — the response is incomplete, not just short. Increase output_token_budget for "
+            "this call."
+        )
     return result.content_markdown

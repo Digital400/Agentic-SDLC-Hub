@@ -282,7 +282,13 @@ def _run_real_agent(
         + (task.test_expectation or "(not specified — propose a reasonable test command)")
     )
 
-    raw = generate_raw_text(system_prompt=_SYSTEM_PROMPT, user_content=user_content, output_token_budget=4096)
+    # 16000, not 4096 — a real code change routinely proposes multiple
+    # full file contents (see ProposedFileChange.after_content), which a
+    # single-file placeholder-sized budget silently truncated mid-JSON in
+    # practice (confirmed: a real multi-file C# change was cut off at
+    # ~4096 tokens, producing invalid JSON that fell back to the mock
+    # scaffold with no visible error anywhere).
+    raw = generate_raw_text(system_prompt=_SYSTEM_PROMPT, user_content=user_content, output_token_budget=16000)
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`").removeprefix("json").strip()

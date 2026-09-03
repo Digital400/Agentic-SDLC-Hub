@@ -215,7 +215,7 @@ def _run_real_agent(
         f"# Existing test patterns / standards\n{patterns_text}"
     )
 
-    raw = generate_raw_text(system_prompt=system_prompt, user_content=user_content, output_token_budget=4096)
+    raw = generate_raw_text(system_prompt=system_prompt, user_content=user_content, output_token_budget=8192)
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`").removeprefix("json").strip()

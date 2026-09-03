@@ -218,7 +218,7 @@ def _run_real_agent(
         f"# Previous test logs\n{test_summary or '(not available — this task has not been tested yet)'}"
     )
 
-    raw = generate_raw_text(system_prompt=_SYSTEM_PROMPT, user_content=user_content, output_token_budget=4096)
+    raw = generate_raw_text(system_prompt=_SYSTEM_PROMPT, user_content=user_content, output_token_budget=8192)
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`").removeprefix("json").strip()

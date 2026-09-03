@@ -188,7 +188,7 @@ def _run_real_planner(*, lld_content: str, story_backlog_content: str) -> list[T
         f"# Approved Low-Level Design\n{lld_content}\n\n"
         f"# Approved Story Backlog\n{story_backlog_content or '(not provided)'}"
     )
-    raw = generate_raw_text(system_prompt=_PLANNER_SYSTEM_PROMPT, user_content=user_content, output_token_budget=4096)
+    raw = generate_raw_text(system_prompt=_PLANNER_SYSTEM_PROMPT, user_content=user_content, output_token_budget=8192)
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`").removeprefix("json").strip()

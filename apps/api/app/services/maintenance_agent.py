@@ -177,7 +177,7 @@ def _run_real_agent(
         f"# User Feedback\n{user_feedback or '(not available)'}"
     )
 
-    raw = generate_raw_text(system_prompt=_SYSTEM_PROMPT, user_content=user_content, output_token_budget=3000)
+    raw = generate_raw_text(system_prompt=_SYSTEM_PROMPT, user_content=user_content, output_token_budget=6000)
     return MaintenanceAgentResult(content_markdown=raw.strip(), used_mock=False)
 
 

@@ -11,7 +11,7 @@ import pytest
 
 from app.core.config import Settings
 from app.services import ai_generation
-from app.services.ai_generation import AIGenerationError, _generate_with_nvidia, _generate_with_openrouter
+from app.services.ai_generation import AIGenerationError, _generate_with_nvidia, _generate_with_openrouter, generate_raw_text
 
 
 def _settings(**overrides) -> SimpleNamespace:
@@ -269,3 +269,53 @@ def test_append_truncation_warning_names_the_budget_and_the_fix():
     assert "Some cut-off draft" in warned
     assert "2048" in warned
     assert "outputTokenBudget" in warned
+
+
+def test_generate_raw_text_raises_instead_of_returning_truncated_json(monkeypatch):
+    """Regression test for the bug behind a persistent, hard-to-diagnose
+    "still mock" symptom: every generate_raw_text caller (implementation_agent,
+    pr_review_agent, testing_agent, implementation_planner, maintenance_agent)
+    expects a COMPLETE JSON/text response and either json.loads()s it directly
+    or treats it as finished prose. A truncated response used to come back as
+    ordinary content_markdown — the caller's json.loads() then failed with a
+    confusing "Unterminated string..." JSONDecodeError, silently caught by
+    that caller's own broad except-and-fall-back-to-heuristic block, with
+    nothing anywhere telling a human the model call was ever cut short.
+    generate_raw_text must now raise AIGenerationError itself so that failure
+    is at least attributable to truncation instead of masquerading as bad
+    JSON."""
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"proposed_file_changes": [{"path": "a.cs"'}, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    with pytest.raises(AIGenerationError) as exc_info:
+        generate_raw_text(system_prompt="system", user_content="user", output_token_budget=512)
+    assert "512" in str(exc_info.value)
+    assert "truncat" in str(exc_info.value).lower()
+
+
+def test_generate_raw_text_returns_content_when_not_truncated(monkeypatch):
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"proposed_file_changes": []}'}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    result = generate_raw_text(system_prompt="system", user_content="user", output_token_budget=512)
+    assert result == '{"proposed_file_changes": []}'
