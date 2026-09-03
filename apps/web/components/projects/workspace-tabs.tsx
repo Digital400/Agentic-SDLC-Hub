@@ -33,24 +33,9 @@ export function WorkspaceTabs({ projectId }: { projectId: string }) {
       active: pathname === `/projects/${projectId}/release-planning`,
     },
     {
-      label: "Implementation Plan",
-      href: `/projects/${projectId}/implementation-plan`,
-      active: pathname === `/projects/${projectId}/implementation-plan`,
-    },
-    {
       label: "Infrastructure",
       href: `/projects/${projectId}/infrastructure`,
       active: pathname === `/projects/${projectId}/infrastructure`,
-    },
-    {
-      label: "PR Review",
-      href: `/projects/${projectId}/pr-review`,
-      active: pathname === `/projects/${projectId}/pr-review`,
-    },
-    {
-      label: "Testing",
-      href: `/projects/${projectId}/testing`,
-      active: pathname === `/projects/${projectId}/testing`,
     },
     {
       label: "Maintenance",

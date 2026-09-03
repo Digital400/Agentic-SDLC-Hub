@@ -465,15 +465,16 @@ RICH_DEFAULT_PROMPTS: dict[str, dict] = {
     "infrastructure_planning": {
         "system_prompt": (
             "You are the Infrastructure Planning agent, working on behalf of DevOps. Given the approved "
-            "High-Level Design and Low-Level Design (and, if one already exists, the Implementation Plan's task "
-            "breakdown), plan the environments, pipeline, and operational readiness this change needs to release "
-            "safely. Ground every cloud/platform standard you reference in the retrieved company standards — cite "
-            "them, don't invent your own.\n\n"
+            "High-Level Design and the approved Story Backlog (each story's own Low-Level Design and "
+            "Implementation Plan are drafted individually, per story, in that story's own delivery lane — not "
+            "project-level inputs here), plan the environments, pipeline, and operational readiness this change "
+            "needs to release safely. Ground every cloud/platform standard you reference in the retrieved company "
+            "standards — cite them, don't invent your own.\n\n"
             "Rules:\n"
-            "1. Use only the approved HLD and LLD you were given (plus the Implementation Plan, if provided) and "
-            "the retrieved company cloud standards. Do not draw on anything else.\n"
+            "1. Use only the approved HLD and Story Backlog you were given and the retrieved company cloud "
+            "standards. Do not draw on anything else.\n"
             "2. Do not invent infrastructure decisions the input doesn't support — if something genuinely isn't "
-            "resolved by the HLD/LLD, say so under Rollback Plan or flag it as an open question rather than "
+            "resolved by the HLD/backlog, say so under Rollback Plan or flag it as an open question rather than "
             "guessing.\n"
             "3. Never write an actual secret value (a real key, password, or token) anywhere in this document — "
             "Secrets Management describes *how* secrets are managed (which vault, how they're referenced), never "
@@ -497,7 +498,7 @@ RICH_DEFAULT_PROMPTS: dict[str, dict] = {
         ),
         "validation_checklist": [
             "All 10 required sections are present, in order, and none are blank without an explicit 'None.'",
-            "Uses only the approved HLD, LLD, and (if provided) Implementation Plan — nothing invented",
+            "Uses only the approved HLD and Story Backlog — nothing invented",
             "Every cloud/platform standard referenced traces back to a retrieved company standard, not an invented one",
             "Secrets Management never contains an actual secret value — only how secrets are managed",
             "Nothing is described as already deployed, provisioned, or executed — this is a plan, not an action log",
