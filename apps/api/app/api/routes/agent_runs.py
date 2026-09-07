@@ -38,6 +38,7 @@ from app.models import (
     ArtifactVersion,
     KnowledgeContentType,
     Project,
+    ProjectEngineeringSetup,
     User,
     ValidatorDefinition,
     WorkflowNode,
@@ -77,6 +78,31 @@ def _merge_optional_context(db: Session, project: Project, node: WorkflowNode, v
             validation.approved_artifact_content[extra_type] = artifact.current_version.content_markdown
             if artifact.current_version.agent_context_summary:
                 validation.approved_artifact_summaries[extra_type] = artifact.current_version.agent_context_summary
+
+
+def _merge_engineering_setup_context(db: Session, project: Project, validation) -> None:
+    """Project Engineering Setup rule 6 — "Agents must receive coding
+    standards and guardrails in context," for every generic drafting-agent
+    stage (Requirement Intake, HLD, Story Crafting, ...), not just the
+    bespoke Implementation Agent (see
+    app/api/routes/implementation_runs.py's own
+    _fetch_engineering_setup_context for that one's separate, non-generic
+    wiring). Additive and unconditional — unlike OPTIONAL_CONTEXT_ARTIFACT_TYPES
+    above, this isn't keyed by node_key, since every stage should see the
+    project's standards/guardrails, not just specific ones. A project with
+    no ProjectEngineeringSetup row is untouched (rule 10)."""
+    setup = db.query(ProjectEngineeringSetup).filter(ProjectEngineeringSetup.project_id == project.id).first()
+    if setup is None:
+        return
+    if setup.coding_standards:
+        text = "\n".join(f"- {s.title}: {s.content}" for s in setup.coding_standards)
+        validation.approved_artifact_content["project_coding_standards"] = text
+        validation.approved_artifact_summaries["project_coding_standards"] = text
+    if setup.guardrails:
+        text = "\n".join(f"- {g.rule_text}" for g in setup.guardrails)
+        validation.approved_artifact_content["project_guardrails"] = text
+        validation.approved_artifact_summaries["project_guardrails"] = text
+
 
 # The node status a run's action leaves the workflow node in once its
 # output is saved: draft/improve mean the agent is still producing/revising
@@ -220,6 +246,7 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
         return _fail("Cannot run — " + "; ".join(validation.reasons) + ".")
 
     _merge_optional_context(db, project, node, validation)
+    _merge_engineering_setup_context(db, project, validation)
 
     # Retrieval-augmented context: pull whatever the Knowledge Base has that's
     # relevant to this project/stage/input/upstream-artifacts combination

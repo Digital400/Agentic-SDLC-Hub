@@ -19,6 +19,7 @@ from app.api.routes import (
     maintenance_runs,
     ops,
     pr_review_runs,
+    project_engineering_setup,
     projects,
     prompts,
     releases,
@@ -59,6 +60,7 @@ async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSON
 
 app.include_router(health.router, tags=["health"])
 app.include_router(projects.router)
+app.include_router(project_engineering_setup.router)
 app.include_router(artifacts.router)
 app.include_router(reviews.router)
 app.include_router(prompts.router)

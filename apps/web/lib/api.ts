@@ -182,6 +182,68 @@ export interface ApiGenerateImplementationPlanResponse {
   review: ApiReview;
 }
 
+// Project Engineering Setup — see
+// app/api/routes/project_engineering_setup.py and
+// app/schemas/project_engineering_setup.py.
+export type ApiGithubSetupOption = "CONNECT_EXISTING_REPO" | "CREATE_NEW_REPO" | "SKIP_FOR_NOW";
+export type ApiJiraSetupOption = "CONNECT_EXISTING_PROJECT" | "MAPPING_ONLY" | "SKIP_FOR_NOW";
+export type ApiDocumentationTarget = "INTERNAL_ONLY" | "CONFLUENCE" | "REPO_MARKDOWN" | "CONFLUENCE_AND_REPO";
+
+export interface ApiTechnologyStackInput {
+  application_type: string;
+  primary_language: string;
+  frontend_framework?: string | null;
+  backend_framework?: string | null;
+  database?: string | null;
+  cloud_provider?: string | null;
+}
+
+export interface ApiRepositorySetupInput {
+  option: ApiGithubSetupOption;
+  new_repo_name?: string | null;
+  branch_naming_pattern?: string;
+  target_branch?: string;
+}
+
+export interface ApiCodingStandardInput {
+  title: string;
+  content: string;
+}
+
+export interface ApiGuardrailInput {
+  rule_text: string;
+}
+
+export interface ApiCreateEngineeringSetupRequest {
+  created_by_id: string;
+  technology_stack: ApiTechnologyStackInput;
+  repository: ApiRepositorySetupInput;
+  jira: { option: ApiJiraSetupOption };
+  coding_standards: ApiCodingStandardInput[];
+  guardrails: ApiGuardrailInput[];
+  documentation: { target: ApiDocumentationTarget };
+  commands: { build_command?: string | null; test_commands: string[]; lint_command?: string | null };
+}
+
+export interface ApiEngineeringSetup {
+  id: string;
+  project_id: string;
+  application_type: string;
+  primary_language: string;
+  frontend_framework: string | null;
+  backend_framework: string | null;
+  database: string | null;
+  cloud_provider: string | null;
+  created_at: string;
+  updated_at: string;
+  repository_config: { id: string; option: ApiGithubSetupOption; repository_id: string | null; new_repo_name: string | null; branch_naming_pattern: string; target_branch: string } | null;
+  jira_config: { id: string; option: ApiJiraSetupOption; jira_project_link_id: string | null } | null;
+  coding_standards: { id: string; title: string; content: string; order_index: number }[];
+  guardrails: { id: string; rule_text: string; order_index: number }[];
+  documentation_config: { id: string; target: ApiDocumentationTarget } | null;
+  command_config: { id: string; build_command: string | null; test_commands: string[]; lint_command: string | null } | null;
+}
+
 // Implementation Agent execution — see app/services/implementation_agent.py
 // and app/models/implementation_run.py. Generating/reviewing a run never
 // writes to GitHub; only create_pull_request (once ACCEPTED) does — see
@@ -1498,6 +1560,18 @@ export const api = {
   implementationTasks: {
     updateRepository: (taskId: string, repositoryId: string | null) =>
       patch<ApiImplementationTask>(`/implementation-tasks/${taskId}/repository`, { repository_id: repositoryId }),
+  },
+
+  // Project Engineering Setup — the Create Project wizard's own data. See
+  // app/api/routes/project_engineering_setup.py.
+  engineeringSetup: {
+    create: (projectId: string, body: ApiCreateEngineeringSetupRequest) =>
+      post<ApiEngineeringSetup>(`/projects/${projectId}/engineering-setup`, body),
+    get: (projectId: string) => get<ApiEngineeringSetup | null>(`/projects/${projectId}/engineering-setup`),
+    linkRepository: (projectId: string, repositoryId: string) =>
+      post<ApiEngineeringSetup>(`/projects/${projectId}/engineering-setup/link-repository`, { repository_id: repositoryId }),
+    linkJiraProject: (projectId: string, jiraProjectLinkId: string) =>
+      post<ApiEngineeringSetup>(`/projects/${projectId}/engineering-setup/link-jira-project`, { jira_project_link_id: jiraProjectLinkId }),
   },
 
   // CodeRunnerService — the local-git alternative flow: apply an

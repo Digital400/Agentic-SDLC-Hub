@@ -544,3 +544,42 @@ class RepositoryFileEntryType(str, enum.Enum):
 
     FILE = "FILE"
     DIRECTORY = "DIRECTORY"
+
+
+# --- Project Engineering Setup (see app/models/project_engineering_setup.py) -------------
+
+
+class GithubSetupOption(str, enum.Enum):
+    """A project's declared intent for GitHub during setup — distinct from
+    Repository actually existing: CONNECT_EXISTING_REPO/CREATE_NEW_REPO
+    both still require a human to finish that connection afterward (see
+    app/api/routes/github_integration.py); this only records the choice
+    and gates Implementation from running until a real Repository exists
+    for anything other than SKIP_FOR_NOW."""
+
+    CONNECT_EXISTING_REPO = "CONNECT_EXISTING_REPO"
+    CREATE_NEW_REPO = "CREATE_NEW_REPO"
+    SKIP_FOR_NOW = "SKIP_FOR_NOW"
+
+
+class JiraSetupOption(str, enum.Enum):
+    """A project's declared intent for Jira during setup. MAPPING_ONLY
+    records field-mapping preferences (see
+    app/services/jira_push_preview.py) without an actual connected Jira
+    project yet — still blocks Jira Sync until a real JiraProjectLink
+    exists, same as SKIP_FOR_NOW."""
+
+    CONNECT_EXISTING_PROJECT = "CONNECT_EXISTING_PROJECT"
+    MAPPING_ONLY = "MAPPING_ONLY"
+    SKIP_FOR_NOW = "SKIP_FOR_NOW"
+
+
+class DocumentationTarget(str, enum.Enum):
+    """Where an approved artifact publishes to — see
+    app/services/story_confluence_publish.py (CONFLUENCE) and
+    app/services/github_export.py (REPO_MARKDOWN)."""
+
+    INTERNAL_ONLY = "INTERNAL_ONLY"
+    CONFLUENCE = "CONFLUENCE"
+    REPO_MARKDOWN = "REPO_MARKDOWN"
+    CONFLUENCE_AND_REPO = "CONFLUENCE_AND_REPO"

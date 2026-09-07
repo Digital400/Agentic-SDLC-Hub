@@ -48,6 +48,13 @@ from app.models import (
     IntegrationConnection,
     Project,
     ProjectMember,
+    ProjectCodingStandard,
+    ProjectCommandConfig,
+    ProjectDocumentationConfig,
+    ProjectEngineeringSetup,
+    ProjectGuardrail,
+    ProjectJiraConfig,
+    ProjectRepositoryConfig,
     Repository,
     RepositoryFileIndex,
     RepositorySnapshot,
@@ -115,6 +122,13 @@ TEST_TABLES = [
     RepositorySnapshot.__table__,
     RepositoryFileIndex.__table__,
     CodeRun.__table__,
+    ProjectEngineeringSetup.__table__,
+    ProjectRepositoryConfig.__table__,
+    ProjectJiraConfig.__table__,
+    ProjectCodingStandard.__table__,
+    ProjectGuardrail.__table__,
+    ProjectDocumentationConfig.__table__,
+    ProjectCommandConfig.__table__,
 ]
 
 

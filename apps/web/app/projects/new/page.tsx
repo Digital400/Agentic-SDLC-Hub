@@ -1,5 +1,5 @@
 import { PageHeader } from "@/components/layout/page-header";
-import { CreateProjectForm } from "@/components/projects/create-project-form";
+import { CreateProjectWizard } from "@/components/projects/create-project-wizard";
 import { api } from "@/lib/api";
 
 export default async function NewProjectPage() {
@@ -13,9 +13,9 @@ export default async function NewProjectPage() {
     <div>
       <PageHeader
         title="Create project"
-        description="Starts the project on the default SDLC workflow, at Requirement Intake."
+        description="Configure engineering setup — technology stack, GitHub/Jira, coding standards, guardrails, documentation, and build/test commands — before implementation agents can run."
       />
-      <CreateProjectForm createdById={defaultUserId} />
+      <CreateProjectWizard createdById={defaultUserId} />
     </div>
   );
 }

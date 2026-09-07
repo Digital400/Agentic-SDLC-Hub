@@ -40,6 +40,9 @@ from app.models.enums import (
     StoryTestExecutionStatus,
     StoryTestExecutionQaDecision,
     CodeRunStatus,
+    DocumentationTarget,
+    GithubSetupOption,
+    JiraSetupOption,
     PRReviewRecommendation,
     PRReviewRunStatus,
     ProjectRole,
@@ -88,6 +91,15 @@ from app.models.integration import Integration
 from app.models.integration_connection import IntegrationConnection
 from app.models.repository import Repository, RepositoryFileIndex, RepositorySnapshot
 from app.models.code_run import CodeRun
+from app.models.project_engineering_setup import (
+    ProjectCodingStandard,
+    ProjectCommandConfig,
+    ProjectDocumentationConfig,
+    ProjectEngineeringSetup,
+    ProjectGuardrail,
+    ProjectJiraConfig,
+    ProjectRepositoryConfig,
+)
 from app.models.audit import AuditLog
 
 __all__ = [
@@ -178,5 +190,15 @@ __all__ = [
     "Repository",
     "RepositorySnapshot",
     "RepositoryFileIndex",
+    "ProjectEngineeringSetup",
+    "ProjectRepositoryConfig",
+    "ProjectJiraConfig",
+    "ProjectCodingStandard",
+    "ProjectGuardrail",
+    "ProjectDocumentationConfig",
+    "ProjectCommandConfig",
+    "GithubSetupOption",
+    "JiraSetupOption",
+    "DocumentationTarget",
     "AuditLog",
 ]

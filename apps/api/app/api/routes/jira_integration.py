@@ -29,8 +29,10 @@ from app.models import (
     IntegrationStatus,
     JiraIssueLink,
     JiraProjectLink,
+    JiraSetupOption,
     JiraSourceType,
     Project,
+    ProjectEngineeringSetup,
     Story,
     StoryStatus,
     User,
@@ -95,6 +97,24 @@ def _get_jira_project_link_or_404(db: Session, project_id: uuid.UUID) -> JiraPro
     if link is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Project {project_id} has no configured Jira project yet.")
     return link
+
+
+def _check_jira_engineering_setup_allows_sync(db: Session, project_id: uuid.UUID) -> None:
+    """Project Engineering Setup rule 3 — "Jira Sync requires Jira
+    config." A project with no ProjectEngineeringSetup row is ungated
+    (rule 10); one that explicitly chose SKIP_FOR_NOW during setup is
+    blocked with a message pointing at *why*, ahead of
+    _get_jira_project_link_or_404's more generic 404 (which a real
+    JiraProjectLink might still technically satisfy in some edge case,
+    e.g. a setup skipped after a link already existed — SKIP_FOR_NOW
+    should still mean "don't sync," not just "wasn't configured yet")."""
+    setup = db.query(ProjectEngineeringSetup).filter(ProjectEngineeringSetup.project_id == project_id).first()
+    if setup is not None and setup.jira_config is not None and setup.jira_config.option == JiraSetupOption.SKIP_FOR_NOW:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Cannot sync to Jira — this project's engineering setup skipped Jira. Connect a Jira project "
+            "(Settings → Integrations → Jira, or update the engineering setup) before syncing.",
+        )
 
 
 def _get_story_or_404(db: Session, story_id: uuid.UUID) -> Story:
@@ -294,6 +314,7 @@ _TYPE_ORDER = [JiraSourceType.EPIC, JiraSourceType.STORY, JiraSourceType.IMPLEME
 @router.post("/push", response_model=JiraPushResponse)
 def push_to_jira(payload: JiraPushRequest, db: Session = Depends(get_db)) -> JiraPushResponse:
     project = _get_project_or_404(db, payload.project_id)
+    _check_jira_engineering_setup_allows_sync(db, project.id)
     jira_project_link = _get_jira_project_link_or_404(db, project.id)
     triggered_by = db.get(User, payload.triggered_by_user_id)
     if triggered_by is None:

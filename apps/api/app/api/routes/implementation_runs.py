@@ -26,6 +26,7 @@ from app.api.routes.github_integration import decrypt_repository_token
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.models import (
+    GithubSetupOption,
     ImplementationRun,
     ImplementationRunReviewStatus,
     ImplementationRunStatus,
@@ -33,6 +34,9 @@ from app.models import (
     ImplementationTaskStatus,
     KnowledgeContentType,
     Project,
+    ProjectCodingStandard,
+    ProjectEngineeringSetup,
+    ProjectGuardrail,
     PullRequestLink,
     Repository,
     RepositorySnapshot,
@@ -129,6 +133,22 @@ def _fetch_standards_chunks(db: Session, project: Project, task: ImplementationT
     except Exception:  # noqa: BLE001 — RAG input is additive, never blocks a run
         return []
 
+
+def _fetch_engineering_setup_context(db: Session, project: Project) -> tuple[list[str], list[str]]:
+    """Project Engineering Setup rule 6 — "Agents must receive coding
+    standards and guardrails in context." Distinct from
+    _fetch_standards_chunks' RAG-retrieved COMPANY_STANDARD content above:
+    these are the project's own persisted ProjectCodingStandard/
+    ProjectGuardrail rows (see app/models/project_engineering_setup.py),
+    always included in full rather than semantically retrieved — a
+    project with no ProjectEngineeringSetup row returns two empty lists,
+    same as before this feature existed (rule 10)."""
+    setup = db.query(ProjectEngineeringSetup).filter(ProjectEngineeringSetup.project_id == project.id).first()
+    if setup is None:
+        return [], []
+    standards = [f"{s.title}: {s.content}" for s in setup.coding_standards]
+    guardrails = [g.rule_text for g in setup.guardrails]
+    return standards, guardrails
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -293,6 +313,25 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
             f"{', '.join(sorted(a.value for a in SUPPORTED_AREAS))} are implemented.",
         )
 
+    # Project Engineering Setup rule 4 — "Code Implementation requires
+    # GitHub repo config." A project with no ProjectEngineeringSetup row
+    # at all is ungated here (rule 10 — every project created before this
+    # feature existed keeps working exactly as before); one that
+    # explicitly chose SKIP_FOR_NOW during setup is blocked with a message
+    # pointing at *why*, rather than the generic "no repository" message
+    # below, which doesn't explain that this was a deliberate choice.
+    engineering_setup = db.query(ProjectEngineeringSetup).filter(ProjectEngineeringSetup.project_id == project.id).first()
+    if (
+        engineering_setup is not None
+        and engineering_setup.repository_config is not None
+        and engineering_setup.repository_config.option == GithubSetupOption.SKIP_FOR_NOW
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Cannot start — this project's engineering setup skipped GitHub. Connect a repository "
+            "(Settings → Integrations → GitHub, or update the engineering setup) before running Implementation.",
+        )
+
     # Requirement 1, gate 3 — a GitHub repo snapshot exists. Not an
     # artifact type, so not part of required_inputs; resolved the same way
     # preview_repo_context already does.
@@ -355,10 +394,12 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
     try:
         repo_context = RepoContextBuilderService(db).build(task=task, snapshot=snapshot, github_token=github_token)
         standards_chunks = _fetch_standards_chunks(db, project, task)
+        project_coding_standards, project_guardrails = _fetch_engineering_setup_context(db, project)
         result = run_implementation_agent(
             task=task, repo_context=repo_context, story=story, lld_summary=lld_summary,
             standards_chunks=standards_chunks, jira_issue_key=jira_issue_key,
             implementation_plan_summary=implementation_plan_summary, test_scenarios_summary=test_scenarios_summary,
+            project_coding_standards=project_coding_standards, project_guardrails=project_guardrails,
         )
     except Exception as exc:  # noqa: BLE001 — anything unexpected fails this run cleanly, never a bare 500
         run.status = ImplementationRunStatus.FAILED
@@ -535,11 +576,31 @@ def create_pull_request(
         # degrade to "no token" — surface the failure plainly.
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot create a pull request — " + str(exc.detail)) from exc
 
-    base_branch = payload.base_branch or repository.default_branch
+    # Project Engineering Setup rule 8 — "PR creation requires branch
+    # naming pattern and target branch." When a repository_config exists
+    # (from the Create Project wizard's Step 3), its own pattern/target
+    # branch drive PR creation instead of the hardcoded default below —
+    # payload.base_branch still wins if the caller passed one explicitly,
+    # same precedence as before this feature. A project with no
+    # engineering setup (or a repository_config-less one) keeps today's
+    # exact behavior (rule 10).
+    engineering_setup = db.query(ProjectEngineeringSetup).filter(ProjectEngineeringSetup.project_id == project.id).first()
+    repo_config = engineering_setup.repository_config if engineering_setup is not None else None
+    branch_naming_pattern = repo_config.branch_naming_pattern if repo_config is not None else "agent/{task}-{run_id}"
+    configured_target_branch = repo_config.target_branch if repo_config is not None else None
+
+    base_branch = payload.base_branch or configured_target_branch or repository.default_branch
     if not base_branch:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No base_branch given and this repository has no known default branch.")
 
-    branch_name = f"agent/{_slugify(task.title)}-{str(run.id)[:8]}"
+    try:
+        branch_name = branch_naming_pattern.format(task=_slugify(task.title), run_id=str(run.id)[:8], story=_slugify(task.linked_story or ""))
+    except (KeyError, IndexError):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"This project's branch naming pattern ({branch_naming_pattern!r}) uses a placeholder other than "
+            "{task}, {run_id}, or {story} — fix it in the project's engineering setup before creating a pull request.",
+        )
     # RULE: never push to main — defense in depth; unreachable by
     # construction since branch_name always includes a run-id suffix, but
     # checked explicitly rather than trusted implicitly.

@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.api.routes.github_integration import decrypt_repository_token
 from app.core.database import get_db
-from app.models import CodeRun, ImplementationRun, PullRequestLink, Repository, Story, User
+from app.models import CodeRun, ImplementationRun, ProjectEngineeringSetup, PullRequestLink, Repository, Story, User
 from app.schemas.code_run import ApplyViaCodeRunnerRequest, CodeRunRead, CreatePrFromCodeRunRequest
 from app.schemas.implementation_run import PullRequestLinkRead
 from app.services.audit import record_audit_log
@@ -62,6 +62,25 @@ def apply_via_code_runner(payload: ApplyViaCodeRunnerRequest, db: Session = Depe
     if not base_branch:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No base_branch given and this repository has no known default branch.")
 
+    # Project Engineering Setup rule 5 — "CodeRunner requires build/test
+    # command config." A project with no ProjectEngineeringSetup (or one
+    # with a setup but no command_config, e.g. an older setup created
+    # before this field existed) is ungated (rule 10). Rule 7 ("CodeRunner
+    # can only run allowlisted commands") stays enforced independently and
+    # unconditionally by app/services/code_runner.py's own
+    # settings.CODE_RUNNER_ALLOWED_TEST_EXECUTABLES check, regardless of
+    # where test_commands came from.
+    engineering_setup = db.query(ProjectEngineeringSetup).filter(ProjectEngineeringSetup.project_id == run.project_id).first()
+    test_commands = payload.test_commands
+    if engineering_setup is not None:
+        if engineering_setup.command_config is None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Cannot apply — this project's engineering setup has no build/test command configuration yet.",
+            )
+        if not test_commands:
+            test_commands = engineering_setup.command_config.test_commands
+
     try:
         code_run = create_code_run(db, implementation_run=run, repository=repository, triggered_by=triggered_by)
     except StoryCodeImplementationError as exc:
@@ -75,7 +94,7 @@ def apply_via_code_runner(payload: ApplyViaCodeRunnerRequest, db: Session = Depe
 
     code_run = run_code_implementation_pipeline(
         db, code_run=code_run, implementation_run=run, repository=repository, story=story,
-        base_branch=base_branch, test_commands=payload.test_commands,
+        base_branch=base_branch, test_commands=test_commands,
     )
     db.commit()
     db.refresh(code_run)
