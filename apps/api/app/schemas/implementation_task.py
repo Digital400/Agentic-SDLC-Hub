@@ -16,6 +16,7 @@ class ImplementationTaskRead(BaseModel):
     workflow_node_id: uuid.UUID | None
     artifact_id: uuid.UUID | None
     artifact_version_id: uuid.UUID | None
+    repository_id: uuid.UUID | None
     title: str
     description: str
     linked_story: str | None
@@ -31,6 +32,18 @@ class ImplementationTaskRead(BaseModel):
     order_index: int
     created_at: datetime
     updated_at: datetime
+
+
+class UpdateImplementationTaskRepositoryRequest(BaseModel):
+    """Body for PATCH /implementation-tasks/{id}/repository — assigns which
+    of the project's (possibly several) connected repositories this task's
+    code changes target. `repository_id: null` resets it back to "use the
+    project's primary repository" (the default every task already had
+    before multi-repo support existed)."""
+
+    repository_id: uuid.UUID | None = Field(
+        default=None, description="One of the task's own project's Repository ids, or null to use the project's primary repository."
+    )
 
 
 class GenerateImplementationPlanRequest(BaseModel):

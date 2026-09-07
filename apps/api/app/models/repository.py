@@ -32,6 +32,15 @@ class Repository(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     html_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     is_private: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Multi-repo support — a project may now have more than one Repository
+    # row (e.g. a separate frontend/backend/infra repo). Exactly one repo
+    # per project is the implicit default a task uses when it doesn't name
+    # one explicitly (see ImplementationTask.repository_id); enforced in
+    # application code (set_primary_repository in app/api/routes/
+    # github_integration.py unsets every sibling before setting this one),
+    # not a DB constraint — same pattern this codebase already uses for
+    # other "exactly one active X" cases.
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     project: Mapped["Project"] = relationship("Project", back_populates="repositories")
     connection: Mapped["IntegrationConnection"] = relationship("IntegrationConnection")

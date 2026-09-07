@@ -322,11 +322,32 @@ def list_project_implementation_tasks(project_id: uuid.UUID, db: Session = Depen
 
 @router.get("/{project_id}/github-repository", response_model=RepositoryRead | None)
 def get_project_github_repository(project_id: uuid.UUID, db: Session = Depends(get_db)) -> Repository | None:
-    """See app/api/routes/github_integration.py for the read-only GitHub
-    actions (branches, tree, file, snapshots) against the repository this
-    returns."""
+    """The project's PRIMARY repository (see Repository.is_primary) — for
+    a project with multiple connected repositories, use
+    GET /{project_id}/github-repositories instead to see all of them. See
+    app/api/routes/github_integration.py for the read-only GitHub actions
+    (branches, tree, file, snapshots) against the repository this returns."""
     _get_project_or_404(db, project_id)
-    return db.query(Repository).filter(Repository.project_id == project_id).order_by(Repository.created_at.desc()).first()
+    return (
+        db.query(Repository)
+        .filter(Repository.project_id == project_id)
+        .order_by(Repository.is_primary.desc(), Repository.created_at.desc())
+        .first()
+    )
+
+
+@router.get("/{project_id}/github-repositories", response_model=list[RepositoryRead])
+def list_project_github_repositories(project_id: uuid.UUID, db: Session = Depends(get_db)) -> list[Repository]:
+    """Every repository connected to this project — multi-repo support
+    (a project may have a separate frontend/backend/infra repo, etc.),
+    primary first."""
+    _get_project_or_404(db, project_id)
+    return (
+        db.query(Repository)
+        .filter(Repository.project_id == project_id)
+        .order_by(Repository.is_primary.desc(), Repository.created_at.desc())
+        .all()
+    )
 
 
 # 5a. Get a project's configured Jira project, if any --------------------------------

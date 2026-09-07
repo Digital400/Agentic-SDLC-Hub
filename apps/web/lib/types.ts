@@ -120,6 +120,10 @@ export interface ImplementationTaskItem {
   workflowNodeId: string | null;
   artifactId: string | null;
   artifactVersionId: string | null;
+  /** Multi-repo support — which of the project's (possibly several)
+   * connected repositories this task's code changes target. Null means
+   * "use the project's primary repository" — see GithubRepositoryItem.isPrimary. */
+  repositoryId: string | null;
   title: string;
   description: string;
   linkedStory: string | null;
@@ -915,6 +919,10 @@ export interface GithubRepositoryItem {
   description: string | null;
   htmlUrl: string | null;
   isPrivate: boolean | null;
+  /** Multi-repo support — the repo a task uses by default when it doesn't
+   * explicitly target one of the project's (possibly several) other
+   * connected repositories. Exactly one per project. */
+  isPrimary: boolean;
   createdAt: string;
   updatedAt: string;
 }

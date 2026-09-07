@@ -18,8 +18,10 @@ from app.api.routes.github_integration import (
     create_repository_snapshot,
     disconnect_github,
     list_connection_repositories,
+    remove_repository,
+    set_primary_repository,
 )
-from app.models import AuditLog, Integration, IntegrationConnection, IntegrationProvider, IntegrationStatus, RepositoryFileIndex
+from app.models import AuditLog, Integration, IntegrationConnection, IntegrationProvider, IntegrationStatus, Repository, RepositoryFileIndex
 from app.schemas.github_integration import ConnectGitHubRequest, CreateRepositoryRequest, CreateSnapshotRequest
 from app.services import github_integration as github_api
 from app.services.github_integration import (
@@ -541,3 +543,62 @@ def test_pull_request_and_comment_methods_never_leak_the_token():
     with pytest.raises(GitHubIntegrationError) as exc_info:
         create_issue_comment(REAL_TOKEN, "octocat", "hello-world", 7, body="x", transport=_transport(handler))
     assert REAL_TOKEN not in str(exc_info.value)
+
+
+# --- Multi-repo support: is_primary, set_primary_repository, remove_repository ------------
+
+
+def _connect_and_create_repo(db, actor, project, monkeypatch, *, owner: str, name: str):
+    monkeypatch.setattr(github_api, "verify_token", lambda token, **kwargs: GitHubUser(login="octocat", scopes=["repo"]))
+    connection = connect_github(ConnectGitHubRequest(access_token=REAL_TOKEN, connected_by_id=actor.id), db)
+    monkeypatch.setattr(
+        github_api, "get_repository",
+        lambda token, o, r, **kwargs: GitHubRepo(default_branch="main", description=None, html_url="https://x", is_private=False),
+    )
+    return create_repository(CreateRepositoryRequest(project_id=project.id, connection_id=connection.id, owner=owner, name=name), db)
+
+
+def test_first_repository_connected_to_a_project_becomes_primary_automatically(db, project, actor, monkeypatch):
+    repo = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="backend")
+    assert repo.is_primary is True
+
+
+def test_second_repository_does_not_disturb_the_existing_primary(db, project, actor, monkeypatch):
+    first = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="backend")
+    second = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="frontend")
+
+    assert first.is_primary is True
+    assert second.is_primary is False
+
+
+def test_set_primary_repository_unsets_every_sibling_in_the_same_project(db, project, actor, monkeypatch):
+    first = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="backend")
+    second = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="frontend")
+
+    result = set_primary_repository(second.id, db)
+
+    assert result.is_primary is True
+    refreshed_first = db.get(Repository, first.id)
+    assert refreshed_first.is_primary is False
+
+
+def test_removing_the_primary_repository_promotes_the_most_recent_remaining_one(db, project, actor, monkeypatch):
+    first = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="backend")
+    second = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="frontend")
+    assert first.is_primary is True
+
+    remove_repository(first.id, db)
+
+    refreshed_second = db.get(Repository, second.id)
+    assert refreshed_second.is_primary is True
+    assert db.get(Repository, first.id) is None
+
+
+def test_removing_a_non_primary_repository_leaves_the_primary_untouched(db, project, actor, monkeypatch):
+    first = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="backend")
+    second = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="frontend")
+
+    remove_repository(second.id, db)
+
+    refreshed_first = db.get(Repository, first.id)
+    assert refreshed_first.is_primary is True

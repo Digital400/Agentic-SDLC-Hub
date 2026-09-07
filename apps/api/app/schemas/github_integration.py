@@ -85,6 +85,7 @@ class RepositoryRead(BaseModel):
     description: str | None
     html_url: str | None
     is_private: bool | None
+    is_primary: bool
     created_at: datetime
     updated_at: datetime
 

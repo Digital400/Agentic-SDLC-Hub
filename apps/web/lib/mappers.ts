@@ -224,6 +224,7 @@ export function toImplementationTask(t: ApiImplementationTask): ImplementationTa
     workflowNodeId: t.workflow_node_id,
     artifactId: t.artifact_id,
     artifactVersionId: t.artifact_version_id,
+    repositoryId: t.repository_id,
     title: t.title,
     description: t.description,
     linkedStory: t.linked_story,
@@ -766,6 +767,7 @@ export function toGithubRepositoryItem(r: ApiRepository): GithubRepositoryItem {
     description: r.description,
     htmlUrl: r.html_url,
     isPrivate: r.is_private,
+    isPrimary: r.is_primary,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };

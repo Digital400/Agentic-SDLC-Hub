@@ -66,6 +66,31 @@ from app.services.story_test_scenarios_agent import get_latest_story_test_scenar
 router = APIRouter(prefix="/implementation-runs", tags=["implementation-runs"])
 
 
+def _resolve_repository_for_task(db: Session, project: Project, task: ImplementationTask) -> Repository | None:
+    """Multi-repo support — a project may have more than one connected
+    Repository (see Repository.is_primary). A task that explicitly names
+    one (task.repository_id, set via PATCH /implementation-tasks/{id}/
+    repository) always uses that; otherwise falls back to the project's
+    primary repository. The final `.order_by(created_at.desc())` fallback
+    is only a defensive safety net for a project whose repositories all
+    somehow have is_primary=False (shouldn't happen — every repo-creation/
+    deletion path in github_integration.py keeps exactly one primary — but
+    this must never leave a single-repo project unable to resolve one)."""
+    if task.repository_id is not None:
+        repository = db.get(Repository, task.repository_id)
+        if repository is not None and repository.project_id == project.id:
+            return repository
+        # The task's chosen repository was removed from the project since
+        # it was assigned — fall through to the primary repo rather than
+        # failing the run outright.
+    return (
+        db.query(Repository)
+        .filter(Repository.project_id == project.id)
+        .order_by(Repository.is_primary.desc(), Repository.created_at.desc())
+        .first()
+    )
+
+
 def _get_run_or_404(db: Session, run_id: uuid.UUID) -> ImplementationRun:
     run = db.get(ImplementationRun, run_id)
     if run is None:
@@ -271,7 +296,7 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
     # Requirement 1, gate 3 — a GitHub repo snapshot exists. Not an
     # artifact type, so not part of required_inputs; resolved the same way
     # preview_repo_context already does.
-    repository = db.query(Repository).filter(Repository.project_id == project.id).order_by(Repository.created_at.desc()).first()
+    repository = _resolve_repository_for_task(db, project, task)
     if repository is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot start — connect a GitHub repository first.")
     snapshot = (
@@ -488,7 +513,18 @@ def create_pull_request(
     if _get_pull_request_link(db, run.id) is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, f"A pull request already exists for run {run_id}.")
 
-    repository = db.query(Repository).filter(Repository.project_id == project.id).order_by(Repository.created_at.desc()).first()
+    # MULTI-REPO CORRECTNESS: the PR must land in the exact repository the
+    # run's proposed changes were generated against — not "the project's
+    # current latest/primary repo," which can now be a different
+    # repository if a second one was connected (or the primary changed)
+    # after this run's snapshot was taken. run.repository_snapshot_id is
+    # always set at run creation (start_implementation_run requires a
+    # snapshot to exist), so this is authoritative; _resolve_repository_for_task
+    # is only a defensive fallback for the pathological case of a run
+    # whose snapshot was somehow deleted since.
+    repository = run.repository_snapshot.repository if run.repository_snapshot is not None else None
+    if repository is None:
+        repository = _resolve_repository_for_task(db, project, task)
     if repository is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot create a pull request — no GitHub repository is configured.")
 

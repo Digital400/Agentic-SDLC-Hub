@@ -12,6 +12,7 @@ from app.api.routes import (
     github_integration,
     health,
     implementation_runs,
+    implementation_tasks,
     integrations,
     jira_integration,
     knowledge,
@@ -69,6 +70,7 @@ app.include_router(github_integration.router)
 app.include_router(jira_integration.router)
 app.include_router(confluence_integration.router)
 app.include_router(implementation_runs.router)
+app.include_router(implementation_tasks.router)
 app.include_router(code_runs.router)
 app.include_router(test_runs.router)
 app.include_router(pr_review_runs.router)

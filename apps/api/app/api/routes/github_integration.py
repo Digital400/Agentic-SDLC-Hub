@@ -223,6 +223,14 @@ def create_repository(payload: CreateRepositoryRequest, db: Session = Depends(ge
     except GitHubIntegrationError as exc:
         raise _github_error_to_http(exc) from exc
 
+    # Multi-repo support — a project may already have other repositories
+    # connected. The FIRST one connected becomes primary automatically (the
+    # obvious default, and matches every existing single-repo project's
+    # behavior exactly); every subsequent one is added without disturbing
+    # whichever repo is already primary — a human picks the primary
+    # explicitly via set_primary_repository below.
+    has_existing_repo = db.query(Repository.id).filter(Repository.project_id == project.id).first() is not None
+
     repository = Repository(
         project=project,
         connection=connection,
@@ -232,6 +240,7 @@ def create_repository(payload: CreateRepositoryRequest, db: Session = Depends(ge
         description=github_repo.description,
         html_url=github_repo.html_url,
         is_private=github_repo.is_private,
+        is_primary=not has_existing_repo,
     )
     db.add(repository)
     db.flush()
@@ -242,7 +251,7 @@ def create_repository(payload: CreateRepositoryRequest, db: Session = Depends(ge
         action="repository.connected",
         entity_type="Repository",
         entity_id=repository.id,
-        extra_data={"owner": payload.owner, "name": payload.name, "default_branch": github_repo.default_branch},
+        extra_data={"owner": payload.owner, "name": payload.name, "default_branch": github_repo.default_branch, "is_primary": repository.is_primary},
     )
 
     db.commit()
@@ -253,6 +262,67 @@ def create_repository(payload: CreateRepositoryRequest, db: Session = Depends(ge
 @router.get("/repositories/{repository_id}", response_model=RepositoryRead)
 def get_repository(repository_id: uuid.UUID, db: Session = Depends(get_db)) -> RepositoryRead:
     return RepositoryRead.model_validate(_get_repository_or_404(db, repository_id))
+
+
+@router.post("/repositories/{repository_id}/set-primary", response_model=RepositoryRead)
+def set_primary_repository(repository_id: uuid.UUID, db: Session = Depends(get_db)) -> RepositoryRead:
+    """Makes this repository the one any task that doesn't explicitly name
+    a repository resolves to (see app/api/routes/implementation_runs.py's
+    _resolve_repository_for_task). Unsets every sibling repository's own
+    is_primary in the same project first — "exactly one primary per
+    project" is enforced here in application code, not a DB constraint,
+    same pattern as every other "exactly one active X" rule in this
+    codebase."""
+    repository = _get_repository_or_404(db, repository_id)
+    db.query(Repository).filter(Repository.project_id == repository.project_id, Repository.id != repository.id).update(
+        {"is_primary": False}
+    )
+    repository.is_primary = True
+    db.flush()
+
+    record_audit_log(
+        db, project_id=repository.project_id, action="repository.set_primary", entity_type="Repository", entity_id=repository.id,
+        extra_data={"owner": repository.owner, "name": repository.name},
+    )
+
+    db.commit()
+    db.refresh(repository)
+    return RepositoryRead.model_validate(repository)
+
+
+@router.delete("/repositories/{repository_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_repository(repository_id: uuid.UUID, db: Session = Depends(get_db)) -> None:
+    """Disconnects one repository from its project. Any ImplementationTask
+    that explicitly targeted this repository falls back to the project's
+    primary repository (repository_id -> NULL via the FK's ON DELETE SET
+    NULL — see ImplementationTask.repository_id's own docstring), not left
+    dangling or blocked. If the removed repository was itself primary and
+    other repositories remain for this project, the most-recently-created
+    of them is promoted so the project is never left without a primary
+    repository while it still has at least one connected."""
+    repository = _get_repository_or_404(db, repository_id)
+    project_id, was_primary = repository.project_id, repository.is_primary
+    owner, name = repository.owner, repository.name
+
+    db.delete(repository)
+    db.flush()
+
+    if was_primary:
+        successor = (
+            db.query(Repository)
+            .filter(Repository.project_id == project_id)
+            .order_by(Repository.created_at.desc())
+            .first()
+        )
+        if successor is not None:
+            successor.is_primary = True
+
+    record_audit_log(
+        db, project_id=project_id, action="repository.disconnected", entity_type="Repository", entity_id=repository_id,
+        extra_data={"owner": owner, "name": name},
+    )
+
+    db.commit()
 
 
 # 3. Read-only repository actions -----------------------------------------------------

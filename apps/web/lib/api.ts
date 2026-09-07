@@ -156,6 +156,7 @@ export interface ApiImplementationTask {
   workflow_node_id: string | null;
   artifact_id: string | null;
   artifact_version_id: string | null;
+  repository_id: string | null;
   title: string;
   description: string;
   linked_story: string | null;
@@ -1116,6 +1117,7 @@ export interface ApiRepository {
   description: string | null;
   html_url: string | null;
   is_private: boolean | null;
+  is_primary: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -1395,6 +1397,10 @@ export const api = {
     generateImplementationPlan: (id: string, body: { triggered_by_user_id: string; reviewer_id: string }) =>
       post<ApiGenerateImplementationPlanResponse>(`/projects/${id}/implementation-plan/generate`, body),
     githubRepository: (id: string) => get<ApiRepository | null>(`/projects/${id}/github-repository`),
+    // Multi-repo support — every repository connected to this project,
+    // primary first. githubRepository() above still returns just the
+    // primary one, for callers that only ever cared about "the" repo.
+    githubRepositories: (id: string) => get<ApiRepository[]>(`/projects/${id}/github-repositories`),
     jiraProject: (id: string) => get<ApiJiraProjectLink | null>(`/projects/${id}/jira-project`),
     confluenceSpace: (id: string) => get<ApiConfluenceSpaceLink | null>(`/projects/${id}/confluence-space`),
     // Repo Context Preview (rule 7) — see app/services/repo_context_builder.py.
@@ -1480,6 +1486,12 @@ export const api = {
     // the run is ACCEPTED. Never targets the repository's default branch.
     createPullRequest: (id: string, body: { triggered_by_user_id: string; base_branch?: string | null }) =>
       post<ApiImplementationRun>(`/implementation-runs/${id}/create-pull-request`, body),
+  },
+
+  // Multi-repo support — see app/api/routes/implementation_tasks.py.
+  implementationTasks: {
+    updateRepository: (taskId: string, repositoryId: string | null) =>
+      patch<ApiImplementationTask>(`/implementation-tasks/${taskId}/repository`, { repository_id: repositoryId }),
   },
 
   // CodeRunnerService — the local-git alternative flow: apply an
@@ -1568,6 +1580,8 @@ export const api = {
     listRepositoryOptions: (connectionId: string) => get<ApiGitHubRepoSummary[]>(`/github/connections/${connectionId}/repositories`),
     saveRepository: (body: ApiCreateRepositoryRequest) => post<ApiRepository>("/github/repositories", body),
     getRepository: (repositoryId: string) => get<ApiRepository>(`/github/repositories/${repositoryId}`),
+    setPrimaryRepository: (repositoryId: string) => post<ApiRepository>(`/github/repositories/${repositoryId}/set-primary`),
+    removeRepository: (repositoryId: string) => del(`/github/repositories/${repositoryId}`),
     listBranches: (repositoryId: string) => get<string[]>(`/github/repositories/${repositoryId}/branches`),
     getDefaultBranch: (repositoryId: string) => get<string>(`/github/repositories/${repositoryId}/default-branch`),
     getTree: (repositoryId: string, ref?: string) =>

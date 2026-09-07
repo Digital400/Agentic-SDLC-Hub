@@ -233,6 +233,56 @@ def test_no_github_token_ever_appears_in_the_run_or_its_audit_log(db, project, a
     assert "not-a-real-fernet-token" not in dump
 
 
+# --- Multi-repo support (Repository.is_primary / ImplementationTask.repository_id) --------
+
+
+def test_run_uses_the_projects_primary_repository_when_the_task_names_none(db, project, actor):
+    implementation, task = _chain(db, project, actor)
+    del implementation
+    # _add_repository builds rows directly (bypasses the create_repository
+    # route, which is what actually sets is_primary on connect) — set it
+    # explicitly here to exercise _resolve_repository_for_task itself.
+    first, _ = _add_repository(db, project)
+    first.is_primary = True
+    second, second_snapshot = _add_repository(db, project)
+    db.add(RepositoryFileIndex(snapshot=second_snapshot, path="apps/api/app/api/routes/auth.py", entry_type=RepositoryFileEntryType.FILE, size=1, sha="x"))
+    db.flush()
+
+    run = start_implementation_run(StartImplementationRunRequest(implementation_task_id=task.id, triggered_by_user_id=actor.id), db)
+
+    assert db.get(RepositorySnapshot, run.repository_snapshot_id).repository_id == first.id
+
+
+def test_run_uses_the_tasks_explicitly_assigned_repository_over_the_primary_one(db, project, actor):
+    implementation, task = _chain(db, project, actor)
+    del implementation
+    first, _ = _add_repository(db, project)
+    first.is_primary = True
+    second, second_snapshot = _add_repository(db, project)
+    db.add(RepositoryFileIndex(snapshot=second_snapshot, path="apps/api/app/api/routes/auth.py", entry_type=RepositoryFileEntryType.FILE, size=1, sha="x"))
+    task.repository_id = second.id
+    db.flush()
+
+    run = start_implementation_run(StartImplementationRunRequest(implementation_task_id=task.id, triggered_by_user_id=actor.id), db)
+
+    assert db.get(RepositorySnapshot, run.repository_snapshot_id).repository_id == second.id
+
+
+def test_run_falls_back_to_primary_when_the_tasks_assigned_repository_was_removed(db, project, actor):
+    implementation, task = _chain(db, project, actor)
+    del implementation
+    first, _ = _add_repository(db, project)
+    second, _ = _add_repository(db, project)
+    task.repository_id = second.id
+    db.flush()
+    db.delete(second)  # simulates the repository having been disconnected since assignment
+    db.flush()
+
+    run = start_implementation_run(StartImplementationRunRequest(implementation_task_id=task.id, triggered_by_user_id=actor.id), db)
+
+    assert db.get(RepositorySnapshot, run.repository_snapshot_id).repository_id == first.id
+
+
 # --- Review (requirement 6) -------------------------------------------------------------
 
 
