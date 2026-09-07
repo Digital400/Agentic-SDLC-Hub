@@ -303,6 +303,69 @@ def test_generate_raw_text_raises_instead_of_returning_truncated_json(monkeypatc
     assert "truncat" in str(exc_info.value).lower()
 
 
+# --- 429/503 retry (a free-tier hosted endpoint rate-limiting under -----------------
+# ordinary load is routine, not exceptional — see
+# _post_chat_completion_with_retry's own module-level docstring)
+
+
+def test_openrouter_retries_a_429_and_succeeds_on_the_next_attempt(monkeypatch):
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+    monkeypatch.setattr(ai_generation.time, "sleep", lambda seconds: None)  # don't actually wait in tests
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(429, json={"error": "rate limited"}, headers={"retry-after": "2"})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "{}\n---\nSecond attempt succeeded."}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+    result = _generate_with_openrouter("system", "user", 512)
+
+    assert len(calls) == 2
+    assert "Second attempt succeeded." in result.content_markdown
+
+
+def test_openrouter_gives_up_after_exhausting_retries_on_persistent_429(monkeypatch):
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+    monkeypatch.setattr(ai_generation.time, "sleep", lambda seconds: None)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(429, json={"error": "rate limited"})
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    with pytest.raises(AIGenerationError) as exc_info:
+        _generate_with_openrouter("system", "user", 512)
+    assert "429" in str(exc_info.value)
+    # Initial attempt + one retry per configured backoff step, no more.
+    assert len(calls) == 1 + len(ai_generation._RETRY_BACKOFF_SECONDS)
+
+
+def test_a_non_retryable_error_status_is_never_retried(monkeypatch):
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+    monkeypatch.setattr(ai_generation.time, "sleep", lambda seconds: (_ for _ in ()).throw(AssertionError("should not sleep/retry on a 401")))
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(401, json={"error": "invalid api key"})
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    with pytest.raises(AIGenerationError):
+        _generate_with_openrouter("system", "user", 512)
+    assert len(calls) == 1
+
+
 def test_generate_raw_text_returns_content_when_not_truncated(monkeypatch):
     monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
 

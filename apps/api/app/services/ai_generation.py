@@ -44,6 +44,7 @@ providers.
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -490,6 +491,36 @@ def _generate_with_anthropic(system_prompt: str, user_content: str, output_token
     )
 
 
+# A free-tier hosted endpoint (OpenRouter's/NVIDIA's own ":free" models)
+# rate-limiting a request under ordinary, expected load is routine, not
+# exceptional — a human hitting this in the UI would just wait a few
+# seconds and click Run Agent again. Retrying it here, bounded and only
+# for the specific transient statuses that mean "try again shortly," saves
+# that manual retry instead of failing the whole run over a delay
+# measured in seconds. Any other status (a bad key, a bad request) is
+# never retried — it fails immediately, exactly as before.
+_RETRYABLE_STATUS_CODES = {429, 503}
+_RETRY_BACKOFF_SECONDS = [1.0, 3.0, 7.0]  # <= ~11s of added latency, worst case
+
+
+def _post_chat_completion_with_retry(url: str, *, headers: dict[str, str], json: dict[str, Any], timeout: float) -> httpx.Response:
+    response = httpx.post(url, headers=headers, json=json, timeout=timeout)
+    for backoff_seconds in _RETRY_BACKOFF_SECONDS:
+        if response.status_code not in _RETRYABLE_STATUS_CODES:
+            return response
+        retry_after = response.headers.get("retry-after")
+        try:
+            wait_seconds = min(float(retry_after), 15.0) if retry_after else backoff_seconds
+        except ValueError:
+            wait_seconds = backoff_seconds
+        logger.warning(
+            "Provider returned %s (rate-limited/overloaded); retrying in %.1fs.", response.status_code, wait_seconds
+        )
+        time.sleep(wait_seconds)
+        response = httpx.post(url, headers=headers, json=json, timeout=timeout)
+    return response
+
+
 def _generate_with_openrouter(system_prompt: str, user_content: str, output_token_budget: int) -> AgentGenerationResult:
     """Generate via OpenRouter (https://openrouter.ai) — a single
     OpenAI-compatible /v1/chat/completions endpoint fronting many
@@ -500,7 +531,7 @@ def _generate_with_openrouter(system_prompt: str, user_content: str, output_toke
     settings = get_settings()
 
     try:
-        response = httpx.post(
+        response = _post_chat_completion_with_retry(
             f"{settings.OPENROUTER_BASE_URL}/chat/completions",
             headers={"Authorization": f"Bearer {settings.OPENROUTER_API_KEY}", "Accept": "application/json"},
             json={
@@ -518,7 +549,10 @@ def _generate_with_openrouter(system_prompt: str, user_content: str, output_toke
     except httpx.HTTPError as exc:
         # Covers both a network failure and a non-2xx response (via
         # raise_for_status) — never includes the Authorization header or
-        # API key, only httpx's own exception message.
+        # API key, only httpx's own exception message. A 429/503 reaches
+        # here only once _post_chat_completion_with_retry's own bounded
+        # retries are exhausted — still a real, reportable failure at that
+        # point, not swallowed.
         raise AIGenerationError(f"OpenRouter generation failed: {exc}") from exc
 
     data = response.json()
@@ -561,7 +595,7 @@ def _generate_with_nvidia(system_prompt: str, user_content: str, output_token_bu
     settings = get_settings()
 
     try:
-        response = httpx.post(
+        response = _post_chat_completion_with_retry(
             f"{settings.NVIDIA_BASE_URL}/chat/completions",
             headers={"Authorization": f"Bearer {settings.NVIDIA_API_KEY}", "Accept": "application/json"},
             json={
@@ -579,7 +613,10 @@ def _generate_with_nvidia(system_prompt: str, user_content: str, output_token_bu
     except httpx.HTTPError as exc:
         # Covers both a network failure and a non-2xx response (via
         # raise_for_status) — never includes the Authorization header or
-        # API key, only httpx's own exception message.
+        # API key, only httpx's own exception message. A 429/503 reaches
+        # here only once _post_chat_completion_with_retry's own bounded
+        # retries are exhausted — still a real, reportable failure at that
+        # point, not swallowed.
         raise AIGenerationError(f"NVIDIA generation failed: {exc}") from exc
 
     data = response.json()
