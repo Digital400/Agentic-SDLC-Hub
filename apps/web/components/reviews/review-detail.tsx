@@ -42,6 +42,13 @@ export function ReviewDetail({
   const [history, setHistory] = useState<ReviewDecisionHistoryEntry[]>(initial.history);
   const [decidedAt, setDecidedAt] = useState<string | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
+  // Locks the screen (see the overlay below) for the round-trip of a
+  // decision — ReviewDecisionPanel's confirm button used to close its
+  // confirmation box the instant it was clicked, with nothing telling the
+  // reviewer the actual approve/reject/request-changes call was still in
+  // flight, inviting a second click (or just looking broken) during a
+  // slow request.
+  const [submitting, setSubmitting] = useState(false);
   const [revisionRunning, setRevisionRunning] = useState(false);
   const [revisionResult, setRevisionResult] = useState<RevisionAgentRunResult | null>(null);
   const [revisionError, setRevisionError] = useState<string | null>(null);
@@ -54,6 +61,7 @@ export function ReviewDetail({
   }
 
   async function handleDecide(decision: Exclude<ReviewDecision, "NEEDS_CHANGES">, comment: string | null) {
+    setSubmitting(true);
     try {
       const decided = decision === "APPROVED"
         ? await api.reviews.approve(initial.id, comment ?? undefined)
@@ -79,11 +87,13 @@ export function ReviewDetail({
     } catch (err) {
       setBanner(err instanceof ApiError ? `Failed to record decision: ${err.message}` : "Failed to record decision.");
     } finally {
+      setSubmitting(false);
       window.setTimeout(() => setBanner(null), 4000);
     }
   }
 
   async function handleRequestChanges(structuredComments: StructuredComment[]) {
+    setSubmitting(true);
     try {
       const decided = await api.reviews.requestChanges(
         initial.id,
@@ -119,6 +129,7 @@ export function ReviewDetail({
     } catch (err) {
       setBanner(err instanceof ApiError ? `Failed to record decision: ${err.message}` : "Failed to record decision.");
     } finally {
+      setSubmitting(false);
       window.setTimeout(() => setBanner(null), 4000);
     }
   }
@@ -161,7 +172,18 @@ export function ReviewDetail({
   const canRunRevisionAgent = status === "NEEDS_CHANGES" && revisionResult === null;
 
   return (
-    <div>
+    <div className="relative">
+      {submitting ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-background/70 backdrop-blur-sm"
+        >
+          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+          <p className="text-sm font-medium text-foreground">Saving your decision…</p>
+        </div>
+      ) : null}
+
       {/* Header — makes the human-approval context unambiguous: who is
           reviewing, what, and its current state. */}
       <div className="mb-6 flex flex-col gap-2 border-b border-border pb-4 sm:flex-row sm:items-start sm:justify-between">
@@ -196,6 +218,7 @@ export function ReviewDetail({
             approveDisabled={!allChecked}
             approveDisabledReason="Check every item in the reviewer checklist before approving."
             sectionTitles={sectionTitles}
+            submitting={submitting}
             onDecide={handleDecide}
             onRequestChanges={handleRequestChanges}
           />
