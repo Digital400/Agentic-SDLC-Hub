@@ -11,7 +11,7 @@ import pytest
 
 from app.core.config import Settings
 from app.services import ai_generation
-from app.services.ai_generation import AIGenerationError, _generate_with_nvidia, _generate_with_openrouter, generate_raw_text
+from app.services.ai_generation import AIGenerationError, _generate_with_huggingface, _generate_with_nvidia, _generate_with_openrouter, generate_raw_text
 
 
 def _settings(**overrides) -> SimpleNamespace:
@@ -91,6 +91,82 @@ def test_falls_through_to_ollama_when_nvidia_is_unreachable(monkeypatch):
     monkeypatch.setattr(ai_generation, "_openai_compatible_endpoint_is_reachable", lambda base_url, api_key: False)
     _fake_ollama_client(monkeypatch)
     assert ai_generation.get_active_provider() == "ollama"
+
+
+def test_huggingface_key_wins_over_ollama_when_available_and_reachable_and_others_unset(monkeypatch):
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(ANTHROPIC_API_KEY=None, GEMINI_API_KEY=None, OPENROUTER_API_KEY=None, NVIDIA_API_KEY=None, HUGGINGFACE_API_KEY="hf_fake"),
+    )
+    monkeypatch.setattr(ai_generation, "_openai_compatible_endpoint_is_reachable", lambda base_url, api_key: True)
+    assert ai_generation.get_active_provider() == "huggingface"
+
+
+def test_nvidia_wins_over_huggingface_when_both_are_set_and_reachable(monkeypatch):
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(ANTHROPIC_API_KEY=None, GEMINI_API_KEY=None, OPENROUTER_API_KEY=None, NVIDIA_API_KEY="nvapi-fake", HUGGINGFACE_API_KEY="hf_fake"),
+    )
+    monkeypatch.setattr(ai_generation, "_openai_compatible_endpoint_is_reachable", lambda base_url, api_key: True)
+    assert ai_generation.get_active_provider() == "nvidia"
+
+
+def test_falls_through_to_ollama_when_huggingface_is_unreachable(monkeypatch):
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(ANTHROPIC_API_KEY=None, GEMINI_API_KEY=None, OPENROUTER_API_KEY=None, NVIDIA_API_KEY=None, HUGGINGFACE_API_KEY="hf_fake"),
+    )
+    monkeypatch.setattr(ai_generation, "_openai_compatible_endpoint_is_reachable", lambda base_url, api_key: False)
+    _fake_ollama_client(monkeypatch)
+    assert ai_generation.get_active_provider() == "ollama"
+
+
+# --- _generate_with_huggingface -----------------------------------------------------------
+
+
+def test_generate_with_huggingface_parses_content_and_usage(monkeypatch):
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(HUGGINGFACE_API_KEY="hf_realsecret", HUGGINGFACE_MODEL="Qwen/Qwen2.5-Coder-32B-Instruct", HUGGINGFACE_BASE_URL="https://router.huggingface.co/v1"),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == "https://router.huggingface.co/v1/chat/completions"
+        assert request.headers["authorization"] == "Bearer hf_realsecret"
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "{}\n---\nHello from Hugging Face."}}],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    result = _generate_with_huggingface("system", "user", 512)
+
+    assert "Hello from Hugging Face." in result.content_markdown
+    assert result.prompt_tokens == 8
+    assert result.completion_tokens == 4
+    assert result.total_tokens == 12
+    assert result.cost == 0.0
+    assert result.used_mock is False
+
+
+def test_generate_with_huggingface_raises_ai_generation_error_on_http_failure_and_never_leaks_the_key(monkeypatch):
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(HUGGINGFACE_API_KEY="hf_realsecret", HUGGINGFACE_MODEL="Qwen/Qwen2.5-Coder-32B-Instruct", HUGGINGFACE_BASE_URL="https://router.huggingface.co/v1"),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "invalid api key"})
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    with pytest.raises(AIGenerationError) as exc_info:
+        _generate_with_huggingface("system", "user", 512)
+    assert "hf_realsecret" not in str(exc_info.value)
 
 
 def test_reachability_check_never_blocks_on_a_hung_connection(monkeypatch):

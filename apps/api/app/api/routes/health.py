@@ -27,4 +27,5 @@ def provider_debug() -> dict[str, object]:
         "openrouter_key_set": bool(settings.OPENROUTER_API_KEY),
         "openrouter_key_len": len(settings.OPENROUTER_API_KEY or ""),
         "nvidia_key_set": bool(settings.NVIDIA_API_KEY),
+        "huggingface_key_set": bool(settings.HUGGINGFACE_API_KEY),
     }

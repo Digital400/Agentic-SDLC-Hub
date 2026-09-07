@@ -68,6 +68,17 @@ class Settings(BaseSettings):
     NVIDIA_API_KEY: str | None = None
     NVIDIA_MODEL: str = "moonshotai/kimi-k3"
     NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
+    # Hugging Face's "Inference Providers" router
+    # (https://huggingface.co/docs/inference-providers) — a single
+    # OpenAI-compatible endpoint that proxies to whichever backend
+    # (Together, Fireworks, HF's own serverless inference, ...) actually
+    # hosts the requested model, several with a free quota. Get a token
+    # from huggingface.co/settings/tokens (a plain read-scope token is
+    # enough); point HUGGINGFACE_MODEL at any "<repo>:<provider>" or bare
+    # "<repo>" slug from huggingface.co/models?inference_provider=...
+    HUGGINGFACE_API_KEY: str | None = None
+    HUGGINGFACE_MODEL: str = "Qwen/Qwen2.5-Coder-32B-Instruct"
+    HUGGINGFACE_BASE_URL: str = "https://router.huggingface.co/v1"
     # Ollama local inference (free, no API key needed). Runs at
     # http://localhost:11434 by default.
     OLLAMA_BASE_URL: str = "http://localhost:11434"

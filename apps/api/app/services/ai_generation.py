@@ -1,36 +1,50 @@
 """Real AI generation for agent runs, via the Anthropic API, Gemini API,
-OpenRouter, NVIDIA's hosted "Build" API, or Ollama.
+OpenRouter, NVIDIA's hosted "Build" API, Hugging Face's Inference
+Providers router, or Ollama.
 
 Falls back to app/services/mock_agent.py's deterministic placeholder when
 none of ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY,
-NVIDIA_API_KEY, or Ollama is configured (see apps/api/.env.example), so
-the system stays fully testable and demoable without any paid key.
-Priority order:
+NVIDIA_API_KEY, HUGGINGFACE_API_KEY, or Ollama is configured (see
+apps/api/.env.example), so the system stays fully testable and demoable
+without any paid key. Priority order:
   1. Anthropic (if ANTHROPIC_API_KEY is set)
   2. Gemini (if GEMINI_API_KEY is set)
   3. OpenRouter (if OPENROUTER_API_KEY is set and reachable)
   4. NVIDIA's hosted "Build" API (if NVIDIA_API_KEY is set and reachable)
-  5. Ollama (if running locally, no API key needed)
-  6. Mock (deterministic fallback)
+  5. Hugging Face's Inference Providers router (if HUGGINGFACE_API_KEY is set and reachable)
+  6. Ollama (if running locally, no API key needed)
+  7. Mock (deterministic fallback)
 
-Gemini, OpenRouter, and NVIDIA are all offered as free-tier-friendly
-alternatives for anyone who wants real generated output without Anthropic
-billing (Google AI Studio, openrouter.ai, and build.nvidia.com all issue
-free-tier API keys). OpenRouter and NVIDIA sit ahead of Ollama in priority
-specifically because they're fast hosted calls rather than local CPU
-inference — see `_generate_with_ollama`'s own module-docstring-adjacent
-note that CPU-only local inference can legitimately take minutes per
-call. Ollama is completely free and runs locally — install Ollama from
-https://ollama.ai and pull a model (e.g., 'ollama pull llama3.1:8b') to
-use it.
+Gemini, OpenRouter, NVIDIA, and Hugging Face are all offered as
+free-tier-friendly alternatives for anyone who wants real generated
+output without Anthropic billing (Google AI Studio, openrouter.ai,
+build.nvidia.com, and huggingface.co all issue free-tier API
+keys/tokens — see each provider's own Settings.*_API_KEY comment in
+app/core/config.py for where to get one). These four hosted providers sit
+ahead of Ollama in priority specifically because they're fast hosted
+calls rather than local CPU inference — see `_generate_with_ollama`'s own
+module-docstring-adjacent note that CPU-only local inference can
+legitimately take minutes per call. Ollama is completely free and runs
+locally — install Ollama from https://ollama.ai and pull a model (e.g.,
+'ollama pull llama3.1:8b') to use it.
 
-OpenRouter and NVIDIA are both only selected if a fast reachability check
-confirms the endpoint actually responds (see `_openai_compatible_endpoint_
-is_reachable`) — a hosted endpoint that accepts a connection and then
-simply never responds (observed in practice against NVIDIA's endpoint) is
-treated the same as the key being unset, falling through to the next
-provider, rather than every request committing to the full generation
-timeout below.
+OpenRouter, NVIDIA, and Hugging Face are all only selected if a fast
+reachability check confirms the endpoint actually responds (see
+`_openai_compatible_endpoint_is_reachable`) — a hosted endpoint that
+accepts a connection and then simply never responds (observed in
+practice against NVIDIA's endpoint) is treated the same as the key being
+unset, falling through to the next provider, rather than every request
+committing to the full generation timeout below.
+
+NOTE on free-tier daily caps: OpenRouter's free ":free"-suffixed models
+share one account-wide limit (50 requests/day on an unverified account,
+observed in practice — see the 429 body's own
+"Rate limit exceeded: free-models-per-day" message), separate from and
+much stingier than its per-minute rate limiting. Hugging Face's free
+quota is provider-dependent (whichever backend actually serves the
+requested model) but is a genuinely separate quota from OpenRouter's —
+useful as a fallback on a day OpenRouter's is already exhausted, not just
+theoretically.
 
 The model is instructed to respond in a fixed two-part format — a one-line
 JSON header (needs_clarification + questions) followed by "---" followed by
@@ -103,6 +117,7 @@ _OLLAMA_GENERATION_TIMEOUT_SECONDS = 180.0
 # hosted model without approaching "forever."
 _OPENROUTER_REQUEST_TIMEOUT_SECONDS = 300.0
 _NVIDIA_REQUEST_TIMEOUT_SECONDS = 300.0
+_HUGGINGFACE_REQUEST_TIMEOUT_SECONDS = 300.0
 # A fast, bounded reachability check — same reasoning as
 # _OLLAMA_CONNECTIVITY_TIMEOUT_SECONDS below: get_active_provider() runs on
 # the hot path of every single agent-run/Approve request, so it must fail
@@ -114,7 +129,7 @@ _NVIDIA_REQUEST_TIMEOUT_SECONDS = 300.0
 # above before ever falling through to the next provider.
 _OPENAI_COMPATIBLE_CONNECTIVITY_TIMEOUT_SECONDS = 5.0
 
-AIProvider = Literal["anthropic", "gemini", "openrouter", "nvidia", "ollama", "mock"]
+AIProvider = Literal["anthropic", "gemini", "openrouter", "nvidia", "huggingface", "ollama", "mock"]
 
 
 class AIGenerationError(Exception):
@@ -186,8 +201,9 @@ def get_active_provider() -> AIProvider:
     2. Gemini (if GEMINI_API_KEY is set)
     3. OpenRouter (if OPENROUTER_API_KEY is set and reachable)
     4. NVIDIA's hosted "Build" API (if NVIDIA_API_KEY is set and reachable)
-    5. Ollama (if running locally, no API key needed)
-    6. Mock (deterministic fallback)
+    5. Hugging Face's Inference Providers router (if HUGGINGFACE_API_KEY is set and reachable)
+    6. Ollama (if running locally, no API key needed)
+    7. Mock (deterministic fallback)
     """
     settings = get_settings()
     if settings.ANTHROPIC_API_KEY:
@@ -198,6 +214,8 @@ def get_active_provider() -> AIProvider:
         return "openrouter"
     if settings.NVIDIA_API_KEY and _openai_compatible_endpoint_is_reachable(settings.NVIDIA_BASE_URL, settings.NVIDIA_API_KEY):
         return "nvidia"
+    if settings.HUGGINGFACE_API_KEY and _openai_compatible_endpoint_is_reachable(settings.HUGGINGFACE_BASE_URL, settings.HUGGINGFACE_API_KEY):
+        return "huggingface"
     # Check if Ollama is available by attempting to connect
     try:
         client = ollama.Client(host=settings.OLLAMA_BASE_URL, timeout=_OLLAMA_CONNECTIVITY_TIMEOUT_SECONDS)
@@ -645,6 +663,65 @@ def _generate_with_nvidia(system_prompt: str, user_content: str, output_token_bu
     )
 
 
+def _generate_with_huggingface(system_prompt: str, user_content: str, output_token_budget: int) -> AgentGenerationResult:
+    """Generate via Hugging Face's Inference Providers router
+    (https://huggingface.co/docs/inference-providers) — a single
+    OpenAI-compatible /v1/chat/completions endpoint that proxies to
+    whichever backend actually serves HUGGINGFACE_MODEL. Same plain-httpx
+    treatment as OpenRouter/NVIDIA above, including the bounded 429/503
+    retry — a free-tier request landing on a momentarily busy backend is
+    exactly the transient case _post_chat_completion_with_retry exists
+    for."""
+    settings = get_settings()
+
+    try:
+        response = _post_chat_completion_with_retry(
+            f"{settings.HUGGINGFACE_BASE_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}", "Accept": "application/json"},
+            json={
+                "model": settings.HUGGINGFACE_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                "max_tokens": output_token_budget,
+                "stream": False,
+            },
+            timeout=_HUGGINGFACE_REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        # Covers both a network failure and a non-2xx response (via
+        # raise_for_status) — never includes the Authorization header or
+        # API key, only httpx's own exception message.
+        raise AIGenerationError(f"Hugging Face generation failed: {exc}") from exc
+
+    data = response.json()
+    choice = data["choices"][0]
+    raw_text = choice["message"]["content"] or ""
+    needs_clarification, questions, body = _parse_response(raw_text)
+    content_markdown = format_clarification_output(questions) if needs_clarification else body
+
+    usage = data.get("usage") or {}
+    prompt_tokens = usage.get("prompt_tokens", 0) or 0
+    completion_tokens = usage.get("completion_tokens", 0) or 0
+
+    return AgentGenerationResult(
+        content_markdown=content_markdown,
+        needs_clarification=needs_clarification,
+        clarification_questions=questions,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=usage.get("total_tokens", prompt_tokens + completion_tokens) or (prompt_tokens + completion_tokens),
+        # Whichever backend actually served this request bills Hugging
+        # Face, not this app directly — same "don't assume a rate that may
+        # not apply" framing as every other free-tier provider above.
+        cost=0.0,
+        used_mock=False,
+        truncated=choice.get("finish_reason") == "length",
+    )
+
+
 def _generate_with_gemini(system_prompt: str, user_content: str, output_token_budget: int) -> AgentGenerationResult:
     settings = get_settings()
     client = genai.Client(api_key=settings.GEMINI_API_KEY)
@@ -854,6 +931,8 @@ def generate(
         result = _generate_with_openrouter(system_prompt, user_content, output_token_budget)
     elif provider == "nvidia":
         result = _generate_with_nvidia(system_prompt, user_content, output_token_budget)
+    elif provider == "huggingface":
+        result = _generate_with_huggingface(system_prompt, user_content, output_token_budget)
     elif provider == "ollama":
         result = _generate_with_ollama(system_prompt, user_content, output_token_budget)
     else:
@@ -912,6 +991,8 @@ def generate_raw_text(*, system_prompt: str, user_content: str, output_token_bud
         result = _generate_with_openrouter(system_prompt, user_content, output_token_budget)
     elif provider == "nvidia":
         result = _generate_with_nvidia(system_prompt, user_content, output_token_budget)
+    elif provider == "huggingface":
+        result = _generate_with_huggingface(system_prompt, user_content, output_token_budget)
     elif provider == "ollama":
         result = _generate_with_ollama(system_prompt, user_content, output_token_budget)
     else:
