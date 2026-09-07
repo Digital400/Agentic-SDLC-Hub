@@ -62,7 +62,10 @@ def test_gemini_still_wins_over_openrouter_and_nvidia(monkeypatch):
 
 
 def test_falls_through_to_ollama_when_nothing_hosted_is_set(monkeypatch):
-    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(ANTHROPIC_API_KEY=None, GEMINI_API_KEY=None, OPENROUTER_API_KEY=None, NVIDIA_API_KEY=None))
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(ANTHROPIC_API_KEY=None, GEMINI_API_KEY=None, OPENROUTER_API_KEY=None, NVIDIA_API_KEY=None, HUGGINGFACE_API_KEY=None),
+    )
     _fake_ollama_client(monkeypatch)
     assert ai_generation.get_active_provider() == "ollama"
 
@@ -424,6 +427,58 @@ def test_openrouter_gives_up_after_exhausting_retries_on_persistent_429(monkeypa
     assert "429" in str(exc_info.value)
     # Initial attempt + one retry per configured backoff step, no more.
     assert len(calls) == 1 + len(ai_generation._RETRY_BACKOFF_SECONDS)
+
+
+def test_a_read_timeout_retries_once_and_succeeds_on_the_next_attempt(monkeypatch):
+    """Regression test: a genuine httpx.TimeoutException raises BEFORE any
+    response object exists, so a retry loop that only inspects
+    response.status_code (the 429/503 ladder above) never even sees it —
+    exactly the gap that let a real Hugging Face request time out and fail
+    a run on its very first attempt with no retry at all."""
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+    monkeypatch.setattr(ai_generation.time, "sleep", lambda seconds: None)
+    calls = []
+
+    def fake_post(url, *, headers, json, timeout):
+        calls.append(url)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("the read operation timed out")
+        request = httpx.Request("POST", url, headers=headers, json=json)
+        response = httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "{}\n---\nSucceeded after a timeout."}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+        )
+        response.request = request
+        return response
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    result = _generate_with_openrouter("system", "user", 512)
+
+    assert len(calls) == 2
+    assert "Succeeded after a timeout." in result.content_markdown
+
+
+def test_a_persistent_read_timeout_raises_after_one_retry(monkeypatch):
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+    monkeypatch.setattr(ai_generation.time, "sleep", lambda seconds: None)
+    calls = []
+
+    def fake_post(url, *, headers, json, timeout):
+        calls.append(url)
+        raise httpx.ReadTimeout("the read operation timed out")
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    with pytest.raises(AIGenerationError) as exc_info:
+        _generate_with_openrouter("system", "user", 512)
+    assert "timed out" in str(exc_info.value).lower()
+    # One initial attempt + exactly one retry for a timeout — not the full
+    # 429/503 backoff ladder, since each attempt can itself take the full
+    # request timeout.
+    assert len(calls) == 2
 
 
 def test_a_non_retryable_error_status_is_never_retried(monkeypatch):

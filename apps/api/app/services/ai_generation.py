@@ -521,8 +521,36 @@ _RETRYABLE_STATUS_CODES = {429, 503}
 _RETRY_BACKOFF_SECONDS = [1.0, 3.0, 7.0]  # <= ~11s of added latency, worst case
 
 
+def _post_once_or_timeout(url: str, *, headers: dict[str, str], json: dict[str, Any], timeout: float) -> httpx.Response | httpx.TimeoutException:
+    """httpx.post, but a timeout (ReadTimeout/ConnectTimeout/...) comes
+    back as a value instead of propagating — lets the retry loop below
+    treat "timed out" the same way it treats a 429/503 response, which it
+    otherwise never sees at all (a timeout raises before any response
+    object exists, so a loop that only inspects response.status_code
+    silently never retries it — the exact gap that let a genuine
+    free-tier-backend timeout fail a run on the very first attempt)."""
+    try:
+        return httpx.post(url, headers=headers, json=json, timeout=timeout)
+    except httpx.TimeoutException as exc:
+        return exc
+
+
 def _post_chat_completion_with_retry(url: str, *, headers: dict[str, str], json: dict[str, Any], timeout: float) -> httpx.Response:
-    response = httpx.post(url, headers=headers, json=json, timeout=timeout)
+    # A timeout retries at most once more (each attempt can itself take up
+    # to `timeout` seconds, so unlike the 429/503 ladder below, retrying it
+    # 3 more times could mean a ~20-minute wait for what's likely just a
+    # genuinely slow/overloaded free-tier backend, not a quick blip worth
+    # chasing that hard) — one retry catches a cold-start/transient stall
+    # without compounding into an unreasonable wait.
+    result = _post_once_or_timeout(url, headers=headers, json=json, timeout=timeout)
+    if isinstance(result, httpx.TimeoutException):
+        logger.warning("Provider request timed out after %.0fs; retrying once.", timeout)
+        time.sleep(2.0)
+        result = _post_once_or_timeout(url, headers=headers, json=json, timeout=timeout)
+    if isinstance(result, httpx.TimeoutException):
+        raise result
+    response = result
+
     for backoff_seconds in _RETRY_BACKOFF_SECONDS:
         if response.status_code not in _RETRYABLE_STATUS_CODES:
             return response
@@ -535,7 +563,10 @@ def _post_chat_completion_with_retry(url: str, *, headers: dict[str, str], json:
             "Provider returned %s (rate-limited/overloaded); retrying in %.1fs.", response.status_code, wait_seconds
         )
         time.sleep(wait_seconds)
-        response = httpx.post(url, headers=headers, json=json, timeout=timeout)
+        result = _post_once_or_timeout(url, headers=headers, json=json, timeout=timeout)
+        if isinstance(result, httpx.TimeoutException):
+            raise result
+        response = result
     return response
 
 
