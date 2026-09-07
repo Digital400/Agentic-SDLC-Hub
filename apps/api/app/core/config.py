@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # one (a reasoning model can spend the whole output-token budget on
     # hidden reasoning tokens before emitting any real content).
     OPENROUTER_API_KEY: str | None = None
-    OPENROUTER_MODEL: str = "minimax/minimax-m3:free"
+    OPENROUTER_MODEL: str = "liquid/lfm-2.5-2.6b:free"
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     # NVIDIA's hosted "Build" API (https://build.nvidia.com) — issues free
     # API keys for prototyping against a catalog of hosted models via a
