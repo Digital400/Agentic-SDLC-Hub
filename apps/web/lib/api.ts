@@ -77,6 +77,7 @@ export interface ApiProject {
   business_owner: string;
   current_stage: string;
   status: "ACTIVE" | "COMPLETED" | "ARCHIVED";
+  work_type: "NEW_PROJECT" | "EXISTING_PROJECT_FEATURE" | "BUG_FIX" | "TECHNICAL_IMPROVEMENT";
   workflow_template_id: string;
   workflow_template_version: string;
   created_by_id: string;
@@ -1366,8 +1367,13 @@ export const api = {
       return get<{ items: ApiProject[]; total: number }>(`/projects${qs}`);
     },
     get: (id: string) => get<ApiProject>(`/projects/${id}`),
-    create: (body: { name: string; business_owner: string; description?: string; created_by_id: string }) =>
-      post<ApiProject>("/projects", body),
+    create: (body: {
+      name: string;
+      business_owner: string;
+      description?: string;
+      created_by_id: string;
+      work_type?: "NEW_PROJECT" | "EXISTING_PROJECT_FEATURE" | "BUG_FIX" | "TECHNICAL_IMPROVEMENT";
+    }) => post<ApiProject>("/projects", body),
     update: (
       id: string,
       body: Partial<{ name: string; business_owner: string; description: string; current_stage: string }> & {

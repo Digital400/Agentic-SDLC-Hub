@@ -46,6 +46,26 @@ class ProjectStatus(str, enum.Enum):
     ARCHIVED = "ARCHIVED"
 
 
+class WorkType(str, enum.Enum):
+    """What kind of work a project represents — selected once, at creation,
+    and used only to pick which workflow template to generate the
+    project's graph from (see app/api/routes/projects.py's create_project
+    and workflows/existing-project-feature-workflow.json's own header
+    comment for why EXISTING_PROJECT_FEATURE/BUG_FIX/TECHNICAL_IMPROVEMENT
+    all share one template): a brand-new project needs the full SDLC
+    (Requirement Intake through HLD); a change to something already
+    running doesn't need to re-run Problem Discovery or a full HLD — it
+    needs to scan the existing system first and produce a scoped Impact
+    Analysis / HLD Delta instead. NOT a per-story or per-task field —
+    Story Crafting's own VERTICAL/HORIZONTAL split (StoryType) is a
+    separate, unrelated axis."""
+
+    NEW_PROJECT = "NEW_PROJECT"
+    EXISTING_PROJECT_FEATURE = "EXISTING_PROJECT_FEATURE"
+    BUG_FIX = "BUG_FIX"
+    TECHNICAL_IMPROVEMENT = "TECHNICAL_IMPROVEMENT"
+
+
 class ProjectRole(str, enum.Enum):
     """A user's role within a single project (not a global/system role)."""
 

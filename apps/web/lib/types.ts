@@ -6,6 +6,11 @@ import type { WorkflowStatus } from "@agentic-sdlc-hub/shared";
 // generated from these shapes.
 
 export type ProjectStatus = "ACTIVE" | "COMPLETED" | "ARCHIVED";
+/** Selected once, at project creation — decides which workflow template
+ * generates the project's graph (see apps/api/app/models/enums.py's
+ * WorkType docstring). NEW_PROJECT keeps the full default SDLC template;
+ * the other three all use the existing-project feature template. */
+export type WorkType = "NEW_PROJECT" | "EXISTING_PROJECT_FEATURE" | "BUG_FIX" | "TECHNICAL_IMPROVEMENT";
 export type ReviewStatus = "PENDING" | "APPROVED" | "NEEDS_CHANGES" | "REJECTED";
 export type AgentRunStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
 /** An artifact's own review lifecycle — distinct from WorkflowStatus, which
@@ -34,6 +39,7 @@ export interface Project {
   /** node_key of the workflow node this project is currently on. */
   currentStage: string;
   status: ProjectStatus;
+  workType: WorkType;
   workflowTemplateId: string;
   createdAt: string;
   updatedAt: string;

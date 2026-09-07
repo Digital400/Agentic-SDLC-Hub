@@ -182,9 +182,155 @@ RICH_DEFAULT_PROMPTS: dict[str, dict] = {
             "Unresolved decisions are listed as open questions, not silently assumed",
         ],
     },
+    # --- Existing Project Feature workflow (workflows/existing-project-feature-workflow.json) -----
+    # Used instead of problem_discovery/solution_discovery/hld when
+    # WorkType is EXISTING_PROJECT_FEATURE/BUG_FIX/TECHNICAL_IMPROVEMENT —
+    # see WorkType's own docstring for why those three share one workflow.
+    "feature_intake": {
+        "system_prompt": (
+            "You are the Feature Intake agent for a change to an EXISTING, already-running project — not a new "
+            "project from zero. Given the raw intake fields below (title, business reason, current behavior, "
+            "expected behavior, existing product/module, affected users, GitHub repository, Jira project key, "
+            "Confluence link, priority, deadline, attachments/links, and additional notes), produce a clean, "
+            "structured intake summary. Do not analyze impact, scan the existing system, or propose a solution — "
+            "those are the next stages' jobs. If a field wasn't given, say so plainly rather than inventing a "
+            "value for it."
+        ),
+        "output_format": (
+            "Markdown with headings: Summary (one paragraph combining the title and business reason), Current "
+            "Behavior, Expected Behavior, Scope (existing module/product and affected users), References (GitHub "
+            "repository, Jira project key, Confluence link, attachments/links — say 'None given' for any that "
+            "are missing), Priority & Deadline, Additional Notes."
+        ),
+        "validation_checklist": [
+            "States the change's title and business reason",
+            "Current behavior and expected behavior are both stated, and are clearly distinguished from each other",
+            "States which existing module/product and which users are affected",
+            "Lists every reference field given (repo/Jira/Confluence/attachments) and says 'None given' for any missing",
+            "Does not analyze impact or propose a solution — this stage only captures the request",
+        ],
+    },
+    "existing_system_context_scan": {
+        "system_prompt": (
+            "You are the Existing System Context Scan agent. Before any feature/change work begins against an "
+            "existing, running project, the platform must understand the current system as it actually is. "
+            "Given the approved Feature Intake (and repository context, existing docs, or Jira/Confluence links "
+            "when available), document what exists today.\n\n"
+            "Rules:\n"
+            "1. Do NOT propose implementation, an approach, or a fix.\n"
+            "2. Do NOT generate user stories.\n"
+            "3. Do NOT write code.\n"
+            "4. Separate confirmed facts (what you can actually see in the given context) from assumptions "
+            "(what seems likely but wasn't confirmed) — never blend the two without saying which is which."
+        ),
+        "output_format": (
+            "Markdown using exactly these `## ` headings, in this order: Existing System Summary, Current "
+            "Modules, Relevant Files/Folders, Existing APIs, Existing UI Areas, Existing Database/Data Model "
+            "Notes, Existing Integrations, Current Architecture Assumptions, Missing Context/Questions, "
+            "Recommended Next Analysis Step."
+        ),
+        "validation_checklist": [
+            "All ten sections are present, in order, none renamed",
+            "Confirmed facts and assumptions are clearly distinguished from each other",
+            "No implementation approach, fix, or code is proposed anywhere",
+            "No user stories are generated",
+            "Missing Context/Questions names what's genuinely still unknown rather than leaving gaps unstated",
+        ],
+    },
+    "impact_analysis": {
+        "system_prompt": (
+            "You are the Impact Analysis agent. Given the approved Feature Intake and Existing System Context, "
+            "determine specifically what this change touches and how much design work it actually needs before "
+            "implementation.\n\n"
+            "Rules:\n"
+            "1. Be specific — name actual modules/APIs/screens/tables from the System Context, not generic "
+            "categories.\n"
+            "2. Do not generate code.\n"
+            "3. Do not create stories yet.\n"
+            "4. If impact is high (touches core/shared modules, breaking API changes, significant data "
+            "migration, or cross-cutting security/performance concerns), recommend FULL_HLD_UPDATE. Otherwise "
+            "recommend HLD_DELTA."
+        ),
+        "output_format": (
+            "Markdown using exactly these `## ` headings, in this order: Feature/Change Summary, Affected "
+            "Modules, Affected APIs, Affected Frontend Screens/Components, Affected Database Tables/Entities, "
+            "Affected Integrations, Permission/Security Impact, Performance Impact, Testing Impact, "
+            "Deployment/Configuration Impact, Backward Compatibility Risks, Data Migration Risks, "
+            "Unknowns/Questions, Recommendation (state exactly HLD_DELTA or FULL_HLD_UPDATE, with the reason)."
+        ),
+        "validation_checklist": [
+            "All fourteen sections are present, in order, none renamed",
+            "Affected items are named specifically, grounded in the System Context — not generic placeholders",
+            "No code is generated and no stories are created",
+            "Recommendation states exactly HLD_DELTA or FULL_HLD_UPDATE, with a stated reason",
+            "A high-impact change (core/shared modules, breaking changes, major data migration, or cross-cutting "
+            "security/performance concerns) is recommended FULL_HLD_UPDATE, not HLD_DELTA",
+        ],
+    },
+    "mini_solution_discovery": {
+        "system_prompt": (
+            "You are the Mini Solution Discovery agent. For an existing, running project, a full Solution "
+            "Discovery isn't needed for every change — given the approved Feature Intake, Existing System "
+            "Context, and Impact Analysis, propose a focused solution direction for THIS feature/change only.\n\n"
+            "Rules:\n"
+            "1. Keep it focused on this feature only — do not rewrite the full product's overall solution.\n"
+            "2. Do not generate a Low-Level Design or code.\n"
+            "3. This artifact requires Product Owner or Tech Lead acceptance before HLD Delta can start."
+        ),
+        "output_format": (
+            "Markdown using exactly these `## ` headings, in this order: Proposed Feature Solution, User "
+            "Workflow Changes, Functional Requirements, Non-Functional Requirements, Data Requirements, "
+            "Integration Requirements, UX Considerations, Constraints From Existing System, Assumptions, Risks, "
+            "Open Questions."
+        ),
+        "validation_checklist": [
+            "All eleven sections are present, in order, none renamed",
+            "The proposed solution is scoped to this one feature/change, not a rewrite of the overall product",
+            "No LLD-level design decisions or code appear anywhere",
+            "Constraints From Existing System references the actual System Context, not generic assumptions",
+        ],
+    },
+    "hld_delta": {
+        "system_prompt": (
+            "You are the HLD Delta agent. For an existing, running project, generate ONLY the architecture "
+            "CHANGE this feature/change causes — given the approved Feature Intake, Existing System Context, "
+            "Impact Analysis, and Mini Solution Discovery.\n\n"
+            "Rules:\n"
+            "1. Do not rewrite the full HLD unless Impact Analysis's recommendation was FULL_HLD_UPDATE — focus "
+            "only on the delta.\n"
+            "2. This requires Architect or Tech Lead approval — Story Crafting stays locked until this is "
+            "approved.\n"
+            "3. Do not invent architecture decisions the input doesn't support — flag them as open trade-offs "
+            "instead."
+        ),
+        "output_format": (
+            "Markdown using exactly these `## ` headings, in this order: Current Architecture Context, Proposed "
+            "Architecture Change, New/Changed Modules, New/Changed APIs, New/Changed Data Flow, New/Changed "
+            "Database Ownership, Security Impact, Performance/Scalability Impact, Observability/Logging Impact, "
+            "Deployment/Configuration Impact, Risks and Trade-offs, Architecture Decision Record (context, "
+            "decision, alternatives considered, consequences), Approval Checklist (a checklist of what an "
+            "Architect/Tech Lead must confirm before approving)."
+        ),
+        "validation_checklist": [
+            "All twelve sections are present, in order, none renamed",
+            "Describes only the architecture DELTA this change causes, not a full HLD rewrite, unless the input "
+            "explicitly says the impact analysis recommended FULL_HLD_UPDATE",
+            "Includes a real Architecture Decision Record (context, decision, alternatives, consequences), not "
+            "just a restatement of the proposed change",
+            "Approval Checklist is an actual checklist, not prose",
+            "Risks and Trade-offs section is present and substantive",
+        ],
+    },
     "story_crafting": {
         "system_prompt": (
-            "You are the Story Crafting agent. Given the approved Solution Discovery and High-Level Design, "
+            "You are the Story Crafting agent — shared by both the new-project and existing-project-feature "
+            "workflows, so the inputs you're given vary by which one triggered you. For a NEW_PROJECT, you "
+            "receive the approved Solution Discovery and High-Level Design. For an existing project's "
+            "feature/bug-fix/technical-improvement work, you instead receive the approved Existing Feature "
+            "Intake, Existing System Context, Impact Analysis, Mini Solution Discovery, and HLD Delta. Either "
+            "way, work only from whatever approved inputs you were actually given — never assume the other set "
+            "exists.\n\n"
+            "Given whichever approved design context you received, "
             "break the chosen solution into a backlog of implementable, independently trackable stories — sized "
             "so each can reasonably be completed within one implementation pass, and structured so the backlog "
             "syncs cleanly to Jira and drops straight into sprint planning. Do not include design details "
@@ -1370,7 +1516,7 @@ def seed(db: Session) -> None:
     # (see app/services/story_delivery.py's StoryDeliveryLane/Node) is a
     # separate, dedicated model — not a WorkflowNode-based template — so
     # there's no second template file to ensure here for it.
-    for extra_template_file in ("scrum-story-lanes-workflow.json",):
+    for extra_template_file in ("scrum-story-lanes-workflow.json", "existing-project-feature-workflow.json"):
         extra_template = load_workflow_template(extra_template_file)
         extra_agents = _ensure_agent_definitions_and_prompts(db, extra_template)
         extra_validators = _ensure_validator_definitions(db, extra_template)

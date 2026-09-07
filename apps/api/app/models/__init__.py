@@ -52,6 +52,7 @@ from app.models.enums import (
     UserRole,
     WorkflowAction,
     WorkflowStatus,
+    WorkType,
 )
 from app.models.user import User
 from app.models.project import Project, ProjectMember
@@ -95,6 +96,7 @@ __all__ = [
     "WorkflowAction",
     "ProjectStatus",
     "ProjectRole",
+    "WorkType",
     "ReviewStatus",
     "ArtifactStatus",
     "AgentPromptRole",

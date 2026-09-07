@@ -3,7 +3,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import ProjectStatus
+from app.models.enums import ProjectStatus, WorkType
 from app.schemas.validators import NonBlankStr
 
 
@@ -12,9 +12,15 @@ class ProjectCreate(BaseModel):
     business_owner: NonBlankStr = Field(..., max_length=255, description="Required; whitespace-only is rejected.")
     description: str | None = None
     created_by_id: uuid.UUID = Field(..., description="Existing user id; becomes the project's OWNER member.")
+    # Decides which workflow template generates this project's graph when
+    # workflow_template_file isn't given explicitly (NEW_PROJECT -> the
+    # full default SDLC template; anything else -> the existing-project
+    # feature template — see create_project and WorkType's own docstring).
+    work_type: WorkType = WorkType.NEW_PROJECT
     # Optional override of which workflow template file (in WORKFLOWS_DIR)
-    # to generate the project's nodes/edges from. Defaults to
-    # settings.DEFAULT_WORKFLOW_FILE (sdlc-workflow.json) when omitted.
+    # to generate the project's nodes/edges from. Takes precedence over
+    # work_type's own default when given (e.g. the Scrum Story Lanes
+    # template is only ever reachable this way).
     workflow_template_file: str | None = None
 
 
@@ -45,6 +51,7 @@ class ProjectRead(BaseModel):
     business_owner: str
     current_stage: str
     status: ProjectStatus
+    work_type: WorkType
     workflow_template_id: str
     workflow_template_version: str
     created_by_id: uuid.UUID

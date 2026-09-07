@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api, ApiError } from "@/lib/api";
+import type { WorkType } from "@/lib/types";
 
 interface FormErrors {
   name?: string;
@@ -16,14 +17,43 @@ interface FormErrors {
   submit?: string;
 }
 
+const WORK_TYPE_OPTIONS: { value: WorkType; label: string; description: string }[] = [
+  {
+    value: "NEW_PROJECT",
+    label: "New Project",
+    description: "Building a full new software project from zero — the complete SDLC, from Requirement Intake through HLD.",
+  },
+  {
+    value: "EXISTING_PROJECT_FEATURE",
+    label: "Existing Project — Feature",
+    description: "Adding a new feature to something already running. Scans the existing system first, then Impact Analysis and an HLD Delta instead of a full HLD.",
+  },
+  {
+    value: "BUG_FIX",
+    label: "Bug Fix",
+    description: "Fixing a defect in something already running. Uses the same existing-project workflow as a feature.",
+  },
+  {
+    value: "TECHNICAL_IMPROVEMENT",
+    label: "Technical Improvement",
+    description: "A technical change (refactor, upgrade, tech debt) to something already running. Uses the same existing-project workflow as a feature.",
+  },
+];
+
 // Calls the real `POST /projects` (see apps/api/app/api/routes/projects.py)
 // — the workflow graph is generated server-side, with the first node
-// ("Requirement Intake") set READY and every other node LOCKED.
+// set READY and every other node LOCKED. Which template that graph comes
+// from depends entirely on workType (see WorkType's own docstring in
+// apps/api/app/models/enums.py) — a new project gets the full default
+// SDLC template; the other three all get the existing-project feature
+// template (Feature Intake -> Context Scan -> Impact Analysis -> Mini
+// Solution Discovery -> HLD Delta -> Story Crafting).
 export function CreateProjectForm({ createdById }: { createdById: string | null }) {
   const router = useRouter();
   const [name, setName] = useState("");
   const [businessOwner, setBusinessOwner] = useState("");
   const [description, setDescription] = useState("");
+  const [workType, setWorkType] = useState<WorkType>("NEW_PROJECT");
   const [errors, setErrors] = useState<FormErrors>({});
   const [submitting, setSubmitting] = useState(false);
 
@@ -44,6 +74,7 @@ export function CreateProjectForm({ createdById }: { createdById: string | null 
         business_owner: businessOwner.trim(),
         description: description.trim() || undefined,
         created_by_id: createdById as string,
+        work_type: workType,
       });
       router.push(`/projects/${project.id}`);
       router.refresh();
@@ -102,14 +133,18 @@ export function CreateProjectForm({ createdById }: { createdById: string | null 
           </div>
 
           <div>
-            <label htmlFor="workflowTemplate" className="mb-1 block text-sm font-medium">
-              Workflow template
+            <label htmlFor="workType" className="mb-1 block text-sm font-medium">
+              Work type <span className="text-destructive">*</span>
             </label>
-            <Select id="workflowTemplate" value="default-sdlc-workflow" disabled>
-              <option value="default-sdlc-workflow">Default SDLC Workflow (11 stages)</option>
+            <Select id="workType" value={workType} onChange={(e) => setWorkType(e.target.value as WorkType)}>
+              {WORK_TYPE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
             </Select>
             <p className="mt-1 text-xs text-muted-foreground">
-              Only one workflow template exists for now — every project starts at Requirement Intake.
+              {WORK_TYPE_OPTIONS.find((opt) => opt.value === workType)?.description}
             </p>
           </div>
 

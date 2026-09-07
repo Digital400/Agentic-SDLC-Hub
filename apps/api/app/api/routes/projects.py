@@ -37,6 +37,7 @@ from app.models import (
     WorkflowEdge,
     WorkflowNode,
     WorkflowStatus,
+    WorkType,
 )
 from app.schemas.agent_run import AgentRunRead
 from app.schemas.artifact import ArtifactRead
@@ -95,8 +96,19 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
     if creator is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"created_by_id {payload.created_by_id} does not match an existing user")
 
+    # work_type picks the template only when the caller didn't already
+    # name one explicitly (workflow_template_file) — e.g. the Scrum Story
+    # Lanes template is opt-in and only ever reachable that way, unrelated
+    # to work_type. NEW_PROJECT keeps today's default (sdlc-workflow.json,
+    # via load_workflow_template(None)); the other three work types all
+    # use the existing-project feature template — see WorkType's own
+    # docstring for why they share one.
+    template_file = payload.workflow_template_file
+    if template_file is None and payload.work_type != WorkType.NEW_PROJECT:
+        template_file = "existing-project-feature-workflow.json"
+
     try:
-        template = load_workflow_template(payload.workflow_template_file)
+        template = load_workflow_template(template_file)
     except WorkflowTemplateError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
@@ -104,6 +116,7 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
         name=payload.name,
         description=payload.description,
         business_owner=payload.business_owner,
+        work_type=payload.work_type,
         workflow_template_id=template["id"],
         workflow_template_version=template["version"],
         current_stage=template["startNode"],

@@ -147,6 +147,7 @@ export function toProject(p: ApiProject): Project {
     businessOwner: p.business_owner,
     currentStage: p.current_stage,
     status: p.status,
+    workType: p.work_type,
     workflowTemplateId: p.workflow_template_id,
     createdAt: p.created_at,
     updatedAt: p.updated_at,
