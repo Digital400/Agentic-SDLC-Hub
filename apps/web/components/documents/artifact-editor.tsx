@@ -77,8 +77,18 @@ export function ArtifactEditor({
   const [banner, setBanner] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const bannerTimeout = useRef<ReturnType<typeof setTimeout>>();
+  // One DOM node per rendered section (edit and preview modes both
+  // register into this same map, keyed by section id) — lets clicking a
+  // section in SectionNav actually scroll the content pane to it, instead
+  // of only updating which section Agent Actions targets.
+  const sectionElements = useRef<Record<string, HTMLElement | null>>({});
 
   useEffect(() => () => clearTimeout(bannerTimeout.current), []);
+
+  function selectSection(id: string) {
+    setActiveSectionId(id);
+    sectionElements.current[id]?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
   function flash(message: string) {
     setBanner(message);
@@ -417,7 +427,7 @@ export function ArtifactEditor({
           <SectionNav
             sections={sections}
             activeSectionId={activeSectionId}
-            onSelectSection={setActiveSectionId}
+            onSelectSection={selectSection}
             versions={versions}
             currentVersionNumber={currentVersionNumber}
           />
@@ -425,14 +435,29 @@ export function ArtifactEditor({
 
         <main className="min-w-0 flex-1 overflow-y-auto rounded-lg border border-border p-5">
           {viewMode === "preview" ? (
-            <div className="mx-auto max-w-2xl">
-              <MarkdownPreview markdown={joinSectionsIntoMarkdown(sections)} />
+            <div className="mx-auto flex max-w-2xl flex-col gap-6">
+              {sections.map((section) => (
+                <div
+                  key={section.id}
+                  ref={(el) => {
+                    sectionElements.current[section.id] = el;
+                  }}
+                  onClick={() => setActiveSectionId(section.id)}
+                  className="scroll-mt-4"
+                >
+                  {section.isSynthetic ? null : <h2 className="mb-2 text-sm font-semibold">{section.title}</h2>}
+                  <MarkdownPreview markdown={section.contentMarkdown} />
+                </div>
+              ))}
             </div>
           ) : (
             <div className="mx-auto flex max-w-2xl flex-col gap-6">
               {sections.map((section) => (
                 <section
                   key={section.id}
+                  ref={(el) => {
+                    sectionElements.current[section.id] = el;
+                  }}
                   onFocus={() => setActiveSectionId(section.id)}
                   className="scroll-mt-4"
                 >
