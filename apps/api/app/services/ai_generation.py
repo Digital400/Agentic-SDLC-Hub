@@ -360,7 +360,15 @@ def build_prioritized_context(
             "ONLY the section(s) affected by that feedback — copy every other section through "
             "unchanged, verbatim, in the same order and heading structure. Return the complete "
             "document (every section, in Markdown, using `## ` headings), not just the parts you "
-            "changed, per your Output Format instructions."
+            "changed, per your Output Format instructions.\n\n"
+            "If this document has an 'Open Questions' (or similarly named unresolved-decisions) "
+            "section, and the feedback below actually answers one of its listed questions: RESOLVE "
+            "it — incorporate the decision into the section it belongs in (e.g. Architecture, Data "
+            "Model, Scope), and remove that question from Open Questions entirely. Do not re-list, "
+            "rephrase, or re-ask a question the feedback already answered; only questions still "
+            "genuinely unresolved after this revision belong in that section. An 'improve' pass "
+            "whose feedback answers every open question should end with an empty or removed Open "
+            "Questions section, not the same-size list restated."
         )
     else:
         node_rules += (
