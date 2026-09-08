@@ -1278,6 +1278,25 @@ export interface ApiRepositoryFileIndexEntry {
   sha: string;
 }
 
+// Repository bootstrap — see app/api/routes/repo_bootstrap.py. Only ever
+// callable against a genuinely empty repository; the one write path that
+// commits directly to the default branch (there is no branch yet to PR
+// into) rather than through a feature branch like every other write.
+export interface ApiBootstrapRepositoryRequest {
+  triggered_by_user_id: string;
+}
+
+export interface ApiBootstrapCommit {
+  path: string;
+  commit_sha: string;
+}
+
+export interface ApiBootstrapRepositoryResponse {
+  repository_id: string;
+  branch: string;
+  commits: ApiBootstrapCommit[];
+}
+
 // Repo Context Builder — see apps/api/app/services/repo_context_builder.py.
 // A stateless preview of exactly what repo context would be sent to a
 // coding agent for one ImplementationTask; nothing here is persisted.
@@ -1678,6 +1697,8 @@ export const api = {
       post<ApiRepositorySnapshot>(`/github/repositories/${repositoryId}/snapshots`, body),
     listSnapshots: (repositoryId: string) => get<ApiRepositorySnapshot[]>(`/github/repositories/${repositoryId}/snapshots`),
     listSnapshotFiles: (snapshotId: string) => get<ApiRepositoryFileIndexEntry[]>(`/github/snapshots/${snapshotId}/files`),
+    bootstrapRepository: (projectId: string, body: ApiBootstrapRepositoryRequest) =>
+      post<ApiBootstrapRepositoryResponse>(`/projects/${projectId}/github/bootstrap-repository`, body),
   },
 
   // Real Jira integration — see app/api/routes/jira_integration.py.

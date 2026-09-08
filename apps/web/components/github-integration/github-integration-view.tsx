@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Camera, GitBranch, Loader2, Plus, Star, Trash2, Unplug } from "lucide-react";
+import { Camera, GitBranch, Loader2, Plus, Rocket, Star, Trash2, Unplug } from "lucide-react";
 
 import { IntegrationStatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
@@ -75,6 +75,10 @@ export function GithubIntegrationView({
   const [snapshots, setSnapshots] = useState<RepositorySnapshotItem[]>([]);
   const [creatingSnapshot, setCreatingSnapshot] = useState(false);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
+
+  const [bootstrapping, setBootstrapping] = useState(false);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [bootstrapResult, setBootstrapResult] = useState<{ branch: string; fileCount: number } | null>(null);
 
   const [files, setFiles] = useState<RepositoryFileIndexItem[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -275,6 +279,24 @@ export function GithubIntegrationView({
       setSnapshotError(err instanceof ApiError ? err.message : "Failed to create a snapshot.");
     } finally {
       setCreatingSnapshot(false);
+    }
+  }
+
+  async function handleBootstrapRepository() {
+    if (!selectedRepository || currentUserId === null) return;
+    setBootstrapping(true);
+    setBootstrapError(null);
+    setBootstrapResult(null);
+    try {
+      const result = await api.github.bootstrapRepository(projectId, { triggered_by_user_id: currentUserId });
+      setBootstrapResult({ branch: result.branch, fileCount: result.commits.length });
+      // The repo is no longer empty — clear the stale error and let the
+      // human confirm by scanning it for real, same as any other repo.
+      setSnapshotError(null);
+    } catch (err) {
+      setBootstrapError(err instanceof ApiError ? err.message : "Failed to bootstrap this repository.");
+    } finally {
+      setBootstrapping(false);
     }
   }
 
@@ -577,7 +599,34 @@ export function GithubIntegrationView({
                 ))}
               </div>
             ) : null}
-            {snapshotError ? <p className="text-xs text-destructive">{snapshotError}</p> : null}
+            {snapshotError ? (
+              <div className="flex flex-col gap-2 rounded-md border border-amber-400/60 bg-amber-50 p-3 dark:border-amber-900 dark:bg-amber-950/30">
+                <p className="text-xs text-destructive">{snapshotError}</p>
+                {/empty/i.test(snapshotError) ? (
+                  <>
+                    <p className="text-xs text-muted-foreground">
+                      This repository has no commits yet, so it can&apos;t be scanned. Bootstrap it with a real starter
+                      project generated from this project&apos;s Technology Stack and approved documents (HLD, Solution
+                      Discovery) — the one action that commits directly to {selectedRepository.owner}/
+                      {selectedRepository.name}&apos;s default branch, since there&apos;s no history yet to open a PR
+                      against.
+                    </p>
+                    <Button size="sm" className="w-fit" onClick={handleBootstrapRepository} disabled={bootstrapping}>
+                      {bootstrapping ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Rocket className="h-3.5 w-3.5" />}
+                      {bootstrapping ? "Bootstrapping…" : "Bootstrap repository"}
+                    </Button>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
+            {bootstrapError ? <p className="text-xs text-destructive">{bootstrapError}</p> : null}
+            {bootstrapResult ? (
+              <p className="text-xs text-emerald-600">
+                Bootstrapped {bootstrapResult.fileCount} file{bootstrapResult.fileCount === 1 ? "" : "s"} onto{" "}
+                <span className="font-mono">{bootstrapResult.branch}</span>. Click &ldquo;Create Snapshot&rdquo; above to
+                scan it.
+              </p>
+            ) : null}
 
             <div>
               <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Snapshot history</h3>

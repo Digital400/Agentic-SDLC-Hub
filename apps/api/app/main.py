@@ -23,6 +23,7 @@ from app.api.routes import (
     projects,
     prompts,
     releases,
+    repo_bootstrap,
     reviews,
     sprints,
     stories,
@@ -69,6 +70,7 @@ app.include_router(agent_definitions.router)
 app.include_router(knowledge.router)
 app.include_router(integrations.router)
 app.include_router(github_integration.router)
+app.include_router(repo_bootstrap.router)
 app.include_router(jira_integration.router)
 app.include_router(confluence_integration.router)
 app.include_router(implementation_runs.router)
