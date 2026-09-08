@@ -180,6 +180,12 @@ class UpdateLaneNodeStatusRequest(BaseModel):
 
 class DraftStoryLldRequest(BaseModel):
     triggered_by_user_id: uuid.UUID
+    # When the previous draft came back needing clarification (see
+    # DraftStoryLldResponse.needs_clarification), a human's answers to
+    # those questions — fed into the next attempt's freeform context so
+    # the agent isn't just asked the identical question again. Optional;
+    # omitted (or blank) on a first attempt.
+    clarification_answers: str | None = None
 
 
 class StoryArtifactRead(BaseModel):
@@ -206,6 +212,7 @@ class DraftStoryLldResponse(BaseModel):
 
 class DraftStoryImplementationPlanRequest(BaseModel):
     triggered_by_user_id: uuid.UUID
+    clarification_answers: str | None = None
 
 
 class DraftStoryImplementationPlanResponse(BaseModel):
@@ -216,6 +223,7 @@ class DraftStoryImplementationPlanResponse(BaseModel):
 
 class DraftStoryTestScenariosRequest(BaseModel):
     triggered_by_user_id: uuid.UUID
+    clarification_answers: str | None = None
 
 
 class DraftStoryTestScenariosResponse(BaseModel):

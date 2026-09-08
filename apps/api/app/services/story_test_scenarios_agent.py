@@ -112,7 +112,7 @@ def get_latest_story_test_scenarios(db: Session, story_id) -> StoryArtifact | No
 
 
 def run_story_test_scenarios_agent(
-    db: Session, *, node: StoryDeliveryNode, triggered_by: User
+    db: Session, *, node: StoryDeliveryNode, triggered_by: User, clarification_answers: str | None = None
 ) -> StoryTestScenariosResult:
     """Preconditions:
       1. story delivery lane exists — `node.lane` is always non-null by
@@ -182,6 +182,7 @@ def run_story_test_scenarios_agent(
             "user_story": story.user_story,
             "acceptance_criteria": "; ".join(story.acceptance_criteria) or "None stated.",
             "technical_areas": ", ".join(story.technical_areas) or "Not stated — infer UI/API relevance from the LLD.",
+            **({"clarification_answers": clarification_answers} if clarification_answers else {}),
         },
         context_token_budget=virtual_node.context_token_budget,
         output_token_budget=virtual_node.output_token_budget,

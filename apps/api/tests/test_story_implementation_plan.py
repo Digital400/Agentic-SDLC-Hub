@@ -173,6 +173,53 @@ def test_clarification_response_is_persisted_as_a_real_story_artifact(db, projec
     assert fetched.id == result.story_artifact.id
 
 
+def test_clarification_answers_are_passed_into_the_next_attempts_context(db, project, actor, monkeypatch):
+    """Regression test for a real gap: there was previously no way at all
+    to answer a clarification question — Regenerate just re-ran the exact
+    same call with the exact same inputs. clarification_answers must
+    actually reach the agent's freeform context on the next attempt."""
+    from app.services.ai_generation import AgentGenerationResult
+
+    story, lane, nodes, tech_lead = _lane_with_lld_approved(db, project, actor)
+    captured_kwargs = {}
+
+    def _fake_generate(**kwargs):
+        captured_kwargs.update(kwargs)
+        return AgentGenerationResult(content_markdown="# Implementation Plan\n\nReal plan.", needs_clarification=False)
+
+    import app.services.story_implementation_plan_agent as plan_agent_module
+
+    monkeypatch.setattr(plan_agent_module, "generate", _fake_generate)
+
+    draft_story_implementation_plan(
+        nodes["IMPLEMENTATION_PLAN"].id,
+        DraftStoryImplementationPlanRequest(triggered_by_user_id=actor.id, clarification_answers="Use PostgreSQL and JWT via System.IdentityModel.Tokens.Jwt."),
+        db,
+    )
+
+    assert "clarification_answers" in captured_kwargs["freeform_context"]
+    assert captured_kwargs["freeform_context"]["clarification_answers"] == "Use PostgreSQL and JWT via System.IdentityModel.Tokens.Jwt."
+
+
+def test_omitted_clarification_answers_are_not_added_to_context(db, project, actor, monkeypatch):
+    from app.services.ai_generation import AgentGenerationResult
+
+    story, lane, nodes, tech_lead = _lane_with_lld_approved(db, project, actor)
+    captured_kwargs = {}
+
+    def _fake_generate(**kwargs):
+        captured_kwargs.update(kwargs)
+        return AgentGenerationResult(content_markdown="# Implementation Plan\n\nReal plan.", needs_clarification=False)
+
+    import app.services.story_implementation_plan_agent as plan_agent_module
+
+    monkeypatch.setattr(plan_agent_module, "generate", _fake_generate)
+
+    draft_story_implementation_plan(nodes["IMPLEMENTATION_PLAN"].id, DraftStoryImplementationPlanRequest(triggered_by_user_id=actor.id), db)
+
+    assert "clarification_answers" not in captured_kwargs["freeform_context"]
+
+
 def test_implementation_stays_locked_after_drafting_alone(db, project, actor):
     story, lane, nodes, tech_lead = _lane_with_lld_approved(db, project, actor)
     draft_story_implementation_plan(nodes["IMPLEMENTATION_PLAN"].id, DraftStoryImplementationPlanRequest(triggered_by_user_id=actor.id), db)

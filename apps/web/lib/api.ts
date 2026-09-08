@@ -1858,20 +1858,20 @@ export const api = {
       nodeId: string,
       body: { status: string; actor_user_id: string; blocked_reason?: string; assigned_user_id?: string }
     ) => patch<ApiStoryDeliveryNode>(`/delivery-lane-nodes/${nodeId}`, body),
-    draftStoryLld: (nodeId: string, triggeredByUserId: string) =>
+    draftStoryLld: (nodeId: string, triggeredByUserId: string, clarificationAnswers?: string) =>
       post<{ needs_clarification: boolean; story_artifact: ApiStoryArtifact | null; node_status: string }>(
         `/delivery-lane-nodes/${nodeId}/draft-story-lld`,
-        { triggered_by_user_id: triggeredByUserId }
+        { triggered_by_user_id: triggeredByUserId, clarification_answers: clarificationAnswers || undefined }
       ),
-    draftImplementationPlan: (nodeId: string, triggeredByUserId: string) =>
+    draftImplementationPlan: (nodeId: string, triggeredByUserId: string, clarificationAnswers?: string) =>
       post<{ needs_clarification: boolean; story_artifact: ApiStoryArtifact | null; node_status: string }>(
         `/delivery-lane-nodes/${nodeId}/draft-implementation-plan`,
-        { triggered_by_user_id: triggeredByUserId }
+        { triggered_by_user_id: triggeredByUserId, clarification_answers: clarificationAnswers || undefined }
       ),
-    draftTestScenarios: (nodeId: string, triggeredByUserId: string) =>
+    draftTestScenarios: (nodeId: string, triggeredByUserId: string, clarificationAnswers?: string) =>
       post<{ needs_clarification: boolean; story_artifact: ApiStoryArtifact | null; node_status: string }>(
         `/delivery-lane-nodes/${nodeId}/draft-test-scenarios`,
-        { triggered_by_user_id: triggeredByUserId }
+        { triggered_by_user_id: triggeredByUserId, clarification_answers: clarificationAnswers || undefined }
       ),
   },
 

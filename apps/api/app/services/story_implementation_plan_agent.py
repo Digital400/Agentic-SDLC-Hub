@@ -99,7 +99,7 @@ def _get_approved_story_lld(db: Session, story: Story) -> StoryArtifact:
 
 
 def run_story_implementation_plan_agent(
-    db: Session, *, node: StoryDeliveryNode, triggered_by: User
+    db: Session, *, node: StoryDeliveryNode, triggered_by: User, clarification_answers: str | None = None
 ) -> StoryImplementationPlanResult:
     """Preconditions, checked in order:
       1. story delivery lane exists — `node.lane` is always non-null by
@@ -173,6 +173,7 @@ def run_story_implementation_plan_agent(
             "story_title": story.title,
             "user_story": story.user_story,
             "acceptance_criteria": "; ".join(story.acceptance_criteria) or "None stated.",
+            **({"clarification_answers": clarification_answers} if clarification_answers else {}),
         },
         context_token_budget=virtual_node.context_token_budget,
         output_token_budget=virtual_node.output_token_budget,

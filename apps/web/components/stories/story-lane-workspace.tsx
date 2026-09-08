@@ -32,6 +32,17 @@ import {
 
 type Tab = "lane" | "lld" | "implementation-plan" | "test-scenarios" | "implementation" | "pr-review" | "testing";
 
+// A drafted story artifact whose content is actually just the agent's
+// clarification questions (see ai_generation.py's
+// format_clarification_output, and the story_*_agent.py services that
+// now persist this instead of discarding it) — not a real draft. Used to
+// swap Accept/Request Changes for an "answer and regenerate" box instead,
+// since accepting clarification text as if it were a real
+// LLD/Plan/Test-Scenarios document doesn't make sense.
+function isClarificationContent(markdown: string | null | undefined): boolean {
+  return !!markdown && markdown.trim().startsWith("# Clarification Needed");
+}
+
 const TAB_LABELS: Record<Tab, string> = {
   lane: "Lane",
   lld: "LLD",
@@ -108,6 +119,12 @@ export function StoryLaneWorkspace({
   const [confluenceBusy, setConfluenceBusy] = useState(false);
   const [implementationPlan, setImplementationPlan] = useState(initialImplementationPlan);
   const [testScenarios, setTestScenarios] = useState(initialTestScenarios);
+  // Answers to a clarification request (see isClarificationContent below)
+  // — there was previously no way at all to answer one; Regenerate just
+  // re-ran the exact same call with the exact same inputs.
+  const [lldClarificationAnswer, setLldClarificationAnswer] = useState("");
+  const [implementationPlanClarificationAnswer, setImplementationPlanClarificationAnswer] = useState("");
+  const [testScenariosClarificationAnswer, setTestScenariosClarificationAnswer] = useState("");
   const [implementationTask, setImplementationTask] = useState(initialImplementationTask);
   const [implementationRuns, setImplementationRuns] = useState(initialImplementationRuns);
   const [testRuns, setTestRuns] = useState(initialTestRuns);
@@ -505,9 +522,11 @@ export function StoryLaneWorkspace({
     setBusyNodeId(storyLldNode.id);
     setError(null);
     try {
-      const result = await api.storyDelivery.draftStoryLld(storyLldNode.id, currentUserId);
+      const result = await api.storyDelivery.draftStoryLld(storyLldNode.id, currentUserId, lldClarificationAnswer.trim() || undefined);
       if (result.needs_clarification) {
         setError("The agent needs more information before it can draft this story's LLD — see the generated notes.");
+      } else {
+        setLldClarificationAnswer("");
       }
       await refresh();
     } catch (err) {
@@ -543,9 +562,13 @@ export function StoryLaneWorkspace({
     setBusyNodeId(implementationPlanNode.id);
     setError(null);
     try {
-      const result = await api.storyDelivery.draftImplementationPlan(implementationPlanNode.id, currentUserId);
+      const result = await api.storyDelivery.draftImplementationPlan(
+        implementationPlanNode.id, currentUserId, implementationPlanClarificationAnswer.trim() || undefined
+      );
       if (result.needs_clarification) {
         setError("The agent needs more information before it can draft this story's Implementation Plan — see the generated notes.");
+      } else {
+        setImplementationPlanClarificationAnswer("");
       }
       await refresh();
     } catch (err) {
@@ -591,9 +614,13 @@ export function StoryLaneWorkspace({
     setBusyNodeId(testScenariosNode.id);
     setError(null);
     try {
-      const result = await api.storyDelivery.draftTestScenarios(testScenariosNode.id, currentUserId);
+      const result = await api.storyDelivery.draftTestScenarios(
+        testScenariosNode.id, currentUserId, testScenariosClarificationAnswer.trim() || undefined
+      );
       if (result.needs_clarification) {
         setError("The agent needs more information before it can draft this story's Test Scenarios — see the generated notes.");
+      } else {
+        setTestScenariosClarificationAnswer("");
       }
       await refresh();
     } catch (err) {
@@ -746,6 +773,28 @@ export function StoryLaneWorkspace({
                   <MarkdownPreview markdown={lld.content_markdown} />
                 </div>
 
+                {isClarificationContent(lld.content_markdown) && (
+                  <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/40 p-3">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      Answer the questions above, then regenerate:
+                    </label>
+                    <Textarea
+                      value={lldClarificationAnswer}
+                      onChange={(e) => setLldClarificationAnswer(e.target.value)}
+                      placeholder="Answer the questions above, in any order or format…"
+                      rows={3}
+                    />
+                    <Button
+                      size="sm" onClick={handleDraftLld}
+                      disabled={busyNodeId === storyLldNode?.id || !lldClarificationAnswer.trim()}
+                      className="w-fit"
+                    >
+                      {busyNodeId === storyLldNode?.id ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
+                      Submit answers &amp; regenerate
+                    </Button>
+                  </div>
+                )}
+
                 <div className="flex flex-col gap-2 border-t pt-3">
                   <div className="flex items-center gap-2">
                     <Button
@@ -817,18 +866,40 @@ export function StoryLaneWorkspace({
                 <div className="max-h-[70vh] overflow-y-auto rounded-md border border-border bg-muted/30 p-4">
                   <MarkdownPreview markdown={implementationPlan.content_markdown} />
                 </div>
-                {implementationPlanNode && implementationPlanNode.status !== "COMPLETED" && (
-                  <div className="flex gap-2">
-                    <Button size="sm" onClick={handleAcceptImplementationPlan} disabled={busyNodeId === implementationPlanNode.id}>
-                      <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Accept
-                    </Button>
+                {isClarificationContent(implementationPlan.content_markdown) ? (
+                  <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/40 p-3">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      Answer the questions above, then regenerate:
+                    </label>
+                    <Textarea
+                      value={implementationPlanClarificationAnswer}
+                      onChange={(e) => setImplementationPlanClarificationAnswer(e.target.value)}
+                      placeholder="Answer the questions above, in any order or format…"
+                      rows={3}
+                    />
                     <Button
-                      size="sm" variant="outline" onClick={handleRequestChangesOnImplementationPlan}
-                      disabled={busyNodeId === implementationPlanNode.id}
+                      size="sm" onClick={handleDraftImplementationPlan}
+                      disabled={busyNodeId === implementationPlanNode?.id || !implementationPlanClarificationAnswer.trim()}
+                      className="w-fit"
                     >
-                      <XCircle className="mr-1 h-3.5 w-3.5" /> Request Changes
+                      {busyNodeId === implementationPlanNode?.id ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
+                      Submit answers &amp; regenerate
                     </Button>
                   </div>
+                ) : (
+                  implementationPlanNode && implementationPlanNode.status !== "COMPLETED" && (
+                    <div className="flex gap-2">
+                      <Button size="sm" onClick={handleAcceptImplementationPlan} disabled={busyNodeId === implementationPlanNode.id}>
+                        <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Accept
+                      </Button>
+                      <Button
+                        size="sm" variant="outline" onClick={handleRequestChangesOnImplementationPlan}
+                        disabled={busyNodeId === implementationPlanNode.id}
+                      >
+                        <XCircle className="mr-1 h-3.5 w-3.5" /> Request Changes
+                      </Button>
+                    </div>
+                  )
                 )}
                 {implementationPlanNode?.status === "COMPLETED" && <Badge variant="success">Accepted</Badge>}
                 {implementationPlanNode?.status === "BLOCKED" && implementationPlanNode.blocked_reason && (
@@ -878,18 +949,40 @@ export function StoryLaneWorkspace({
                 <div className="max-h-[70vh] overflow-y-auto rounded-md border border-border bg-muted/30 p-4">
                   <MarkdownPreview markdown={testScenarios.content_markdown} />
                 </div>
-                {testScenariosNode && testScenariosNode.status !== "COMPLETED" && (
-                  <div className="flex gap-2">
-                    <Button size="sm" onClick={handleApproveTestScenarios} disabled={busyNodeId === testScenariosNode.id}>
-                      <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Approve
-                    </Button>
+                {isClarificationContent(testScenarios.content_markdown) ? (
+                  <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/40 p-3">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      Answer the questions above, then regenerate:
+                    </label>
+                    <Textarea
+                      value={testScenariosClarificationAnswer}
+                      onChange={(e) => setTestScenariosClarificationAnswer(e.target.value)}
+                      placeholder="Answer the questions above, in any order or format…"
+                      rows={3}
+                    />
                     <Button
-                      size="sm" variant="outline" onClick={handleRequestChangesOnTestScenarios}
-                      disabled={busyNodeId === testScenariosNode.id}
+                      size="sm" onClick={handleDraftTestScenarios}
+                      disabled={busyNodeId === testScenariosNode?.id || !testScenariosClarificationAnswer.trim()}
+                      className="w-fit"
                     >
-                      <XCircle className="mr-1 h-3.5 w-3.5" /> Request Changes
+                      {busyNodeId === testScenariosNode?.id ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
+                      Submit answers &amp; regenerate
                     </Button>
                   </div>
+                ) : (
+                  testScenariosNode && testScenariosNode.status !== "COMPLETED" && (
+                    <div className="flex gap-2">
+                      <Button size="sm" onClick={handleApproveTestScenarios} disabled={busyNodeId === testScenariosNode.id}>
+                        <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Approve
+                      </Button>
+                      <Button
+                        size="sm" variant="outline" onClick={handleRequestChangesOnTestScenarios}
+                        disabled={busyNodeId === testScenariosNode.id}
+                      >
+                        <XCircle className="mr-1 h-3.5 w-3.5" /> Request Changes
+                      </Button>
+                    </div>
+                  )
                 )}
                 {testScenariosNode?.status === "COMPLETED" && <Badge variant="success">Approved</Badge>}
                 {testScenariosNode?.status === "BLOCKED" && testScenariosNode.blocked_reason && (

@@ -766,7 +766,7 @@ def draft_story_lld(node_id: uuid.UUID, payload: DraftStoryLldRequest, db: Sessi
     require_can_edit_stage(triggered_by, "story_lld")
 
     try:
-        result = run_story_lld_agent(db, node=node, triggered_by=triggered_by)
+        result = run_story_lld_agent(db, node=node, triggered_by=triggered_by, clarification_answers=payload.clarification_answers)
     except StoryLldError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
@@ -822,7 +822,7 @@ def draft_story_implementation_plan(
     require_can_edit_stage(triggered_by, "story_implementation_plan")
 
     try:
-        result = run_story_implementation_plan_agent(db, node=node, triggered_by=triggered_by)
+        result = run_story_implementation_plan_agent(db, node=node, triggered_by=triggered_by, clarification_answers=payload.clarification_answers)
     except StoryImplementationPlanError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
@@ -878,7 +878,7 @@ def draft_story_test_scenarios(
     require_can_edit_stage(triggered_by, "story_test_scenarios")
 
     try:
-        result = run_story_test_scenarios_agent(db, node=node, triggered_by=triggered_by)
+        result = run_story_test_scenarios_agent(db, node=node, triggered_by=triggered_by, clarification_answers=payload.clarification_answers)
     except StoryTestScenariosError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 

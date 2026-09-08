@@ -107,7 +107,9 @@ def _get_approved_hld(db: Session, project: Project) -> Artifact:
     return artifact
 
 
-def run_story_lld_agent(db: Session, *, node: StoryDeliveryNode, triggered_by: User) -> StoryLldResult:
+def run_story_lld_agent(
+    db: Session, *, node: StoryDeliveryNode, triggered_by: User, clarification_answers: str | None = None
+) -> StoryLldResult:
     """Requirement 3's three preconditions, checked in order, before
     anything else runs:
       1. story is approved — the story exists and has progressed past
@@ -178,6 +180,7 @@ def run_story_lld_agent(db: Session, *, node: StoryDeliveryNode, triggered_by: U
             "user_story": story.user_story,
             "business_value": story.business_value,
             "acceptance_criteria": "; ".join(story.acceptance_criteria) or "None stated.",
+            **({"clarification_answers": clarification_answers} if clarification_answers else {}),
         },
         context_token_budget=virtual_node.context_token_budget,
         output_token_budget=virtual_node.output_token_budget,
