@@ -53,6 +53,7 @@ from app.schemas.implementation_run import (
     ReviewImplementationRunRequest,
     StartImplementationRunRequest,
 )
+from app.services.agent_context_builder import EngineeringSetupContext, build_engineering_setup_context
 from app.services.audit import record_audit_log
 from app.services import github_integration as github_api
 from app.services.github_integration import GitHubIntegrationError
@@ -134,21 +135,16 @@ def _fetch_standards_chunks(db: Session, project: Project, task: ImplementationT
         return []
 
 
-def _fetch_engineering_setup_context(db: Session, project: Project) -> tuple[list[str], list[str]]:
-    """Project Engineering Setup rule 6 — "Agents must receive coding
-    standards and guardrails in context." Distinct from
-    _fetch_standards_chunks' RAG-retrieved COMPANY_STANDARD content above:
-    these are the project's own persisted ProjectCodingStandard/
-    ProjectGuardrail rows (see app/models/project_engineering_setup.py),
-    always included in full rather than semantically retrieved — a
-    project with no ProjectEngineeringSetup row returns two empty lists,
-    same as before this feature existed (rule 10)."""
-    setup = db.query(ProjectEngineeringSetup).filter(ProjectEngineeringSetup.project_id == project.id).first()
-    if setup is None:
-        return [], []
-    standards = [f"{s.title}: {s.content}" for s in setup.coding_standards]
-    guardrails = [g.rule_text for g in setup.guardrails]
-    return standards, guardrails
+def _fetch_engineering_setup_context(db: Session, project: Project) -> EngineeringSetupContext:
+    """Agent Context Builder, agent_type="implementation" — coding
+    standards, AI guardrails, GitHub repository config (branch naming
+    pattern, PR target branch), build/test commands, and Code Runner
+    restrictions (see app/services/agent_context_builder.py). Distinct
+    from _fetch_standards_chunks' RAG-retrieved COMPANY_STANDARD content
+    above, which stays semantically retrieved, not exhaustively included.
+    A project with no ProjectEngineeringSetup row returns an empty
+    context, same as before this feature existed (rule 10)."""
+    return build_engineering_setup_context(db, project=project, agent_type="implementation", output_token_budget=2000)
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -394,12 +390,14 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
     try:
         repo_context = RepoContextBuilderService(db).build(task=task, snapshot=snapshot, github_token=github_token)
         standards_chunks = _fetch_standards_chunks(db, project, task)
-        project_coding_standards, project_guardrails = _fetch_engineering_setup_context(db, project)
+        engineering_setup = _fetch_engineering_setup_context(db, project)
+        if engineering_setup.snapshot:
+            run.engineering_setup_context_snapshot = engineering_setup.snapshot
         result = run_implementation_agent(
             task=task, repo_context=repo_context, story=story, lld_summary=lld_summary,
             standards_chunks=standards_chunks, jira_issue_key=jira_issue_key,
             implementation_plan_summary=implementation_plan_summary, test_scenarios_summary=test_scenarios_summary,
-            project_coding_standards=project_coding_standards, project_guardrails=project_guardrails,
+            engineering_setup_context=engineering_setup.context_text,
         )
     except Exception as exc:  # noqa: BLE001 — anything unexpected fails this run cleanly, never a bare 500
         run.status = ImplementationRunStatus.FAILED

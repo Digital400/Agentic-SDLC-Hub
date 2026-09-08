@@ -35,7 +35,7 @@ from sqlalchemy import JSON, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from app.models.enums import DocumentationTarget, GithubSetupOption, JiraSetupOption
+from app.models.enums import CodingStandardCategory, DocumentationTarget, GithubSetupOption, JiraSetupOption
 
 
 class ProjectEngineeringSetup(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -125,14 +125,24 @@ class ProjectJiraConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class ProjectCodingStandard(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """Step 5: Company Coding Standards — one row per named standard
-    (naming conventions, error handling, formatting, ...), always injected
-    verbatim into agent context (rule 6) rather than retrieved via RAG."""
+    (naming conventions, error handling, formatting, ...), injected into
+    agent context (see app/services/agent_context_builder.py) rather than
+    retrieved via RAG — summarized there when long (Agent Context Builder
+    rule 4), never verbatim-only. `category` groups a standard under one
+    of the Agent Context Builder's named rule sections (architecture/
+    security/testing/git/documentation); GENERAL is the default for one
+    that isn't specifically any of those."""
 
     __tablename__ = "project_coding_standards"
 
     setup_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("project_engineering_setups.id", ondelete="CASCADE"), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[CodingStandardCategory] = mapped_column(
+        Enum(CodingStandardCategory, native_enum=False, length=20, validate_strings=True),
+        default=CodingStandardCategory.GENERAL,
+        nullable=False,
+    )
     order_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     setup: Mapped["ProjectEngineeringSetup"] = relationship("ProjectEngineeringSetup", back_populates="coding_standards")

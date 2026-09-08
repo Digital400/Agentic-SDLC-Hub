@@ -583,3 +583,19 @@ class DocumentationTarget(str, enum.Enum):
     CONFLUENCE = "CONFLUENCE"
     REPO_MARKDOWN = "REPO_MARKDOWN"
     CONFLUENCE_AND_REPO = "CONFLUENCE_AND_REPO"
+
+
+class CodingStandardCategory(str, enum.Enum):
+    """Which of the Agent Context Builder's named rule categories a
+    ProjectCodingStandard entry belongs to (see
+    app/services/agent_context_builder.py) — GENERAL is the default for a
+    standard that isn't specifically one of the other five; every category
+    is still labeled and injected into agent context the same way, this
+    just controls the section heading a standard is grouped under."""
+
+    GENERAL = "GENERAL"
+    ARCHITECTURE = "ARCHITECTURE"
+    SECURITY = "SECURITY"
+    TESTING = "TESTING"
+    GIT = "GIT"
+    DOCUMENTATION = "DOCUMENTATION"

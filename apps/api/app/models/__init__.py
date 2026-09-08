@@ -40,6 +40,7 @@ from app.models.enums import (
     StoryTestExecutionStatus,
     StoryTestExecutionQaDecision,
     CodeRunStatus,
+    CodingStandardCategory,
     DocumentationTarget,
     GithubSetupOption,
     JiraSetupOption,
@@ -200,5 +201,6 @@ __all__ = [
     "GithubSetupOption",
     "JiraSetupOption",
     "DocumentationTarget",
+    "CodingStandardCategory",
     "AuditLog",
 ]

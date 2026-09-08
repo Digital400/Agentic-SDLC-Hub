@@ -102,7 +102,11 @@ def create_engineering_setup(
     )
     db.add(ProjectJiraConfig(setup_id=setup.id, option=payload.jira.option))
     for index, standard in enumerate(payload.coding_standards):
-        db.add(ProjectCodingStandard(setup_id=setup.id, title=standard.title, content=standard.content, order_index=index))
+        db.add(
+            ProjectCodingStandard(
+                setup_id=setup.id, title=standard.title, content=standard.content, category=standard.category, order_index=index
+            )
+        )
     for index, guardrail in enumerate(payload.guardrails):
         db.add(ProjectGuardrail(setup_id=setup.id, rule_text=guardrail.rule_text, order_index=index))
     db.add(ProjectDocumentationConfig(setup_id=setup.id, target=payload.documentation.target))

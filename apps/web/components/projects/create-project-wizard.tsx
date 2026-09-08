@@ -10,7 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiCodingStandardCategory, ApiError } from "@/lib/api";
 import type { WorkType } from "@/lib/types";
 
 const STEPS = [
@@ -35,7 +35,17 @@ const WORK_TYPE_OPTIONS: { value: WorkType; label: string }[] = [
 interface CodingStandardDraft {
   title: string;
   content: string;
+  category: ApiCodingStandardCategory;
 }
+
+const CODING_STANDARD_CATEGORY_OPTIONS: { value: ApiCodingStandardCategory; label: string }[] = [
+  { value: "GENERAL", label: "General" },
+  { value: "ARCHITECTURE", label: "Architecture" },
+  { value: "SECURITY", label: "Security" },
+  { value: "TESTING", label: "Testing" },
+  { value: "GIT", label: "Git" },
+  { value: "DOCUMENTATION", label: "Documentation" },
+];
 
 // Users must configure engineering setup — GitHub/Jira intent, coding
 // standards, guardrails, documentation flow, and build/test commands —
@@ -113,7 +123,7 @@ export function CreateProjectWizard({ createdById }: { createdById: string | nul
   }
 
   function addCodingStandard() {
-    setCodingStandards((prev) => [...prev, { title: "", content: "" }]);
+    setCodingStandards((prev) => [...prev, { title: "", content: "", category: "GENERAL" }]);
   }
 
   function updateCodingStandard(index: number, patch: Partial<CodingStandardDraft>) {
@@ -177,7 +187,7 @@ export function CreateProjectWizard({ createdById }: { createdById: string | nul
           target_branch: targetBranch.trim() || "main",
         },
         jira: { option: jiraOption },
-        coding_standards: validStandards.map((s) => ({ title: s.title.trim(), content: s.content.trim() })),
+        coding_standards: validStandards.map((s) => ({ title: s.title.trim(), content: s.content.trim(), category: s.category })),
         guardrails: validGuardrails.map((rule_text) => ({ rule_text })),
         documentation: { target: documentationTarget },
         commands: { build_command: buildCommand.trim() || null, test_commands: testCommands, lint_command: lintCommand.trim() || null },
@@ -349,7 +359,9 @@ export function CreateProjectWizard({ createdById }: { createdById: string | nul
               <div className="flex flex-col gap-4">
                 <h2 className="text-sm font-semibold">Step 5: Coding Standards</h2>
                 <p className="text-xs text-muted-foreground">
-                  Always included in full in every agent&apos;s context — not just semantically retrieved.
+                  Injected into every agent&apos;s context (summarized automatically if long) — not just
+                  semantically retrieved. Categorize a standard to group it under the matching rule section
+                  (architecture, security, testing, Git, documentation) an agent sees.
                 </p>
                 {codingStandards.map((s, i) => (
                   <div key={i} className="flex flex-col gap-2 rounded-md border border-border p-3">
@@ -360,6 +372,17 @@ export function CreateProjectWizard({ createdById }: { createdById: string | nul
                         placeholder="e.g. Naming conventions"
                         className="flex-1"
                       />
+                      <Select
+                        value={s.category}
+                        onChange={(e) => updateCodingStandard(i, { category: e.target.value as ApiCodingStandardCategory })}
+                        className="w-40"
+                      >
+                        {CODING_STANDARD_CATEGORY_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </Select>
                       <Button type="button" variant="ghost" size="icon" onClick={() => removeCodingStandard(i)}>
                         <Trash2 className="h-3.5 w-3.5" />
                       </Button>

@@ -100,6 +100,12 @@ class ImplementationRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     used_mock: Mapped[bool] = mapped_column(default=True, nullable=False)
     token_usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Agent Context Builder rule 5 — same role as AgentRun's own
+    # engineering_setup_context_snapshot (see app/models/agent.py): exactly
+    # which Project Engineering Setup fields (repo config, build/test
+    # commands, coding standards, guardrails, ...) were actually included
+    # for this implementation run, for audit/debugging.
+    engineering_setup_context_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     cost: Mapped[float | None] = mapped_column(Float, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

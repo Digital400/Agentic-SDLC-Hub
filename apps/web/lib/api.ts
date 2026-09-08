@@ -205,9 +205,12 @@ export interface ApiRepositorySetupInput {
   target_branch?: string;
 }
 
+export type ApiCodingStandardCategory = "GENERAL" | "ARCHITECTURE" | "SECURITY" | "TESTING" | "GIT" | "DOCUMENTATION";
+
 export interface ApiCodingStandardInput {
   title: string;
   content: string;
+  category?: ApiCodingStandardCategory;
 }
 
 export interface ApiGuardrailInput {
@@ -238,7 +241,7 @@ export interface ApiEngineeringSetup {
   updated_at: string;
   repository_config: { id: string; option: ApiGithubSetupOption; repository_id: string | null; new_repo_name: string | null; branch_naming_pattern: string; target_branch: string } | null;
   jira_config: { id: string; option: ApiJiraSetupOption; jira_project_link_id: string | null } | null;
-  coding_standards: { id: string; title: string; content: string; order_index: number }[];
+  coding_standards: { id: string; title: string; content: string; category: ApiCodingStandardCategory; order_index: number }[];
   guardrails: { id: string; rule_text: string; order_index: number }[];
   documentation_config: { id: string; target: ApiDocumentationTarget } | null;
   command_config: { id: string; build_command: string | null; test_commands: string[]; lint_command: string | null } | null;

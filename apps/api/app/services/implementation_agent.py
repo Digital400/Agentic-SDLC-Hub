@@ -150,8 +150,7 @@ def _build_heuristic_result(
     jira_issue_key: str | None = None,
     implementation_plan_summary: str = "",
     test_scenarios_summary: str = "",
-    project_coding_standards: list[str] | None = None,
-    project_guardrails: list[str] | None = None,
+    engineering_setup_context: str = "",
 ) -> ImplementationAgentResult:
     paths = task.expected_paths or [f"(no expected path declared for '{task.title}')"]
     changes: list[ProposedFileChange] = []
@@ -183,10 +182,10 @@ def _build_heuristic_result(
         risks.append("No relevant repository files were found for this task — the repo snapshot may be stale or empty.")
     if not standards_chunks:
         risks.append("No coding-standards knowledge was retrieved — proceeding on repository context alone.")
-    if project_guardrails:
+    if engineering_setup_context:
         risks.append(
-            "This project has configured guardrails that a real implementation must follow (this scaffold does "
-            "not enforce them): " + "; ".join(project_guardrails)
+            "This project has configured engineering setup context (coding standards, guardrails, and/or repo "
+            "conventions) that a real implementation must follow — this scaffold does not enforce any of it."
         )
 
     explanation = (
@@ -197,7 +196,7 @@ def _build_heuristic_result(
         f"{'LLD context: ' + lld_summary[:200] + '. ' if lld_summary else ''}"
         f"{'Jira: ' + jira_issue_key + '. ' if jira_issue_key else ''}"
         f"{f'{len(standards_chunks)} coding-standards excerpt(s) available. ' if standards_chunks else ''}"
-        f"{f'{len(project_coding_standards)} project coding standard(s) configured. ' if project_coding_standards else ''}"
+        f"{'Project engineering setup context is available. ' if engineering_setup_context else ''}"
         f"{'An Implementation Plan is available. ' if implementation_plan_summary.strip() else ''}"
         f"{'Test Scenarios are available. ' if test_scenarios_summary.strip() else ''}"
         "No repository, branch, or file was written by generating this — review the diff below before anything else happens to it."
@@ -257,8 +256,7 @@ def _run_real_agent(
     jira_issue_key: str | None = None,
     implementation_plan_summary: str = "",
     test_scenarios_summary: str = "",
-    project_coding_standards: list[str] | None = None,
-    project_guardrails: list[str] | None = None,
+    engineering_setup_context: str = "",
 ) -> ImplementationAgentResult:
     file_context_parts = []
     for f in repo_context.relevant_files:
@@ -274,19 +272,12 @@ def _run_real_agent(
         else "(no related story found)"
     )
 
-    # Project Engineering Setup rule 6 — "Agents must receive coding
-    # standards and guardrails in context." These come from the project's
-    # own persisted ProjectCodingStandard/ProjectGuardrail rows (see
-    # app/api/routes/implementation_runs.py's _fetch_engineering_setup_context)
-    # — always included in full, distinct from standards_chunks above
-    # (RAG-retrieved COMPANY_STANDARD knowledge, semantically filtered).
-    standards_text = "\n\n".join(f"### {c.source_title}\n{c.content}" for c in standards_chunks) if standards_chunks else ""
-    if project_coding_standards:
-        standards_text = (standards_text + "\n\n" if standards_text else "") + "\n".join(f"- {s}" for s in project_coding_standards)
-    if not standards_text:
-        standards_text = "(none configured or retrieved)"
-
-    guardrails_text = "\n".join(f"- {g}" for g in project_guardrails) if project_guardrails else "(none configured)"
+    # RAG-retrieved COMPANY_STANDARD knowledge (semantically filtered) —
+    # distinct from engineering_setup_context below, which is the
+    # project's own persisted, always-included-in-full setup (coding
+    # standards, guardrails, repo/build conventions — see
+    # app/services/agent_context_builder.py).
+    standards_text = "\n\n".join(f"### {c.source_title}\n{c.content}" for c in standards_chunks) if standards_chunks else "(none retrieved)"
 
     user_content = (
         f"# Task\nTitle: {task.title}\nArea: {task.area.value}\nDescription: {task.description}\n"
@@ -300,8 +291,9 @@ def _run_real_agent(
         f"# Test Scenarios\n{test_scenarios_summary or '(not available)'}\n\n"
         f"# Related story\n{story_text}\n\n"
         f"# Jira issue key\n{jira_issue_key or '(not synced to Jira yet)'}\n\n"
-        f"# Coding standards\n{standards_text}\n\n"
-        f"# Project guardrails — rules you must follow, even if they narrow what you'd otherwise do\n{guardrails_text}\n\n"
+        f"# Coding standards (retrieved from the Knowledge Base)\n{standards_text}\n\n"
+        f"# Project Engineering Setup — coding standards, guardrails, GitHub/build conventions to follow\n"
+        f"{engineering_setup_context or '(no engineering setup configured for this project)'}\n\n"
         f"# Repository context\nArchitecture summary: {repo_context.architecture_summary}\n"
         f"Relevant folders: {', '.join(repo_context.relevant_folders) or '(none)'}\n"
         + "\n".join(file_context_parts)
@@ -366,8 +358,7 @@ def run_implementation_agent(
     jira_issue_key: str | None = None,
     implementation_plan_summary: str = "",
     test_scenarios_summary: str = "",
-    project_coding_standards: list[str] | None = None,
-    project_guardrails: list[str] | None = None,
+    engineering_setup_context: str = "",
 ) -> ImplementationAgentResult:
     """Real AI when configured; the deterministic heuristic otherwise, or if
     the real call errors or returns unparseable JSON (logged, not raised —
@@ -378,15 +369,17 @@ def run_implementation_agent(
     `jira_issue_key` are both additive context — story-level implementation
     workflow requirement 4 — never required for a run to proceed.
     `implementation_plan_summary`/`test_scenarios_summary` (Story Code
-    Implementation Agent) are likewise additive. `project_coding_standards`/
-    `project_guardrails` (Project Engineering Setup rule 6) are the
-    project's own persisted, always-included-in-full context — see
-    app/models/project_engineering_setup.py."""
+    Implementation Agent) are likewise additive. `engineering_setup_context`
+    (Agent Context Builder, agent_type="implementation" — see
+    app/services/agent_context_builder.py) is the project's own persisted
+    coding standards/guardrails/repo/build conventions, pre-assembled and
+    budget-fitted by the caller — this function just drops it into the
+    prompt verbatim."""
     kwargs = dict(
         task=task, repo_context=repo_context, story=story, lld_summary=lld_summary,
         standards_chunks=standards_chunks, jira_issue_key=jira_issue_key,
         implementation_plan_summary=implementation_plan_summary, test_scenarios_summary=test_scenarios_summary,
-        project_coding_standards=project_coding_standards, project_guardrails=project_guardrails,
+        engineering_setup_context=engineering_setup_context,
     )
     if get_active_provider() == "mock":
         return _build_heuristic_result(**kwargs)

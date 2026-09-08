@@ -217,20 +217,25 @@ def test_jira_sync_proceeds_when_a_real_jira_project_is_connected(db, project, a
 
 def test_merge_engineering_setup_context_includes_guardrails_and_standards(db, project, actor):
     create_engineering_setup(project.id, _full_setup_request(created_by_id=actor.id), db)
+    node = make_node(db, project, node_key="requirement_intake", order_index=0, output_artifact_type="intake_summary")
     validation = GraphValidationResult(can_run=True)
 
-    _merge_engineering_setup_context(db, project, validation)
+    snapshot = _merge_engineering_setup_context(db, project, node, validation)
 
-    assert "project_guardrails" in validation.approved_artifact_content
-    assert "Never touch payment code without human review." in validation.approved_artifact_content["project_guardrails"]
-    assert "project_coding_standards" in validation.approved_artifact_content
-    assert "Naming" in validation.approved_artifact_content["project_coding_standards"]
+    assert "project_engineering_setup" in validation.approved_artifact_content
+    context_text = validation.approved_artifact_content["project_engineering_setup"]
+    assert "Never touch payment code without human review." in context_text
+    assert "Naming" in context_text
+    assert snapshot["agent_type"] == "generic"
+    assert snapshot["guardrails"] == ["Never touch payment code without human review."]
 
 
 def test_merge_engineering_setup_context_is_a_no_op_with_no_setup(db, project):
+    node = make_node(db, project, node_key="requirement_intake", order_index=0, output_artifact_type="intake_summary")
     validation = GraphValidationResult(can_run=True)
-    _merge_engineering_setup_context(db, project, validation)
+    snapshot = _merge_engineering_setup_context(db, project, node, validation)
     assert validation.approved_artifact_content == {}
+    assert snapshot == {}
 
 
 # --- coding standards in implementation agent context (rule 6, bespoke agent) --------------
@@ -253,8 +258,10 @@ def test_implementation_agent_includes_project_coding_standards_and_guardrails_i
 
     implementation_agent.run_implementation_agent(
         task=task, repo_context=repo_context, story=None, lld_summary=SAMPLE_LLD,
-        project_coding_standards=["Naming: Use camelCase for variables."],
-        project_guardrails=["Never touch payment code without human review."],
+        engineering_setup_context=(
+            "## Coding Standards\n- Naming: Use camelCase for variables.\n\n"
+            "## AI Guardrails\n- Never touch payment code without human review."
+        ),
     )
 
     assert "Use camelCase for variables." in captured["user_content"]

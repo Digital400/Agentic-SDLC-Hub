@@ -3,7 +3,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import DocumentationTarget, GithubSetupOption, JiraSetupOption
+from app.models.enums import CodingStandardCategory, DocumentationTarget, GithubSetupOption, JiraSetupOption
 from app.schemas.validators import NonBlankStr
 
 
@@ -61,6 +61,10 @@ class JiraConfigRead(BaseModel):
 class CodingStandardInput(BaseModel):
     title: NonBlankStr = Field(..., max_length=255)
     content: NonBlankStr
+    # Which Agent Context Builder rule section this standard is grouped
+    # under (see app/services/agent_context_builder.py) — GENERAL for one
+    # that isn't specifically architecture/security/testing/git/docs.
+    category: CodingStandardCategory = CodingStandardCategory.GENERAL
 
 
 class CodingStandardRead(BaseModel):
@@ -69,6 +73,7 @@ class CodingStandardRead(BaseModel):
     id: uuid.UUID
     title: str
     content: str
+    category: CodingStandardCategory
     order_index: int
 
 

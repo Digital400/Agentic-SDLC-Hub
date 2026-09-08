@@ -38,13 +38,13 @@ from app.models import (
     ArtifactVersion,
     KnowledgeContentType,
     Project,
-    ProjectEngineeringSetup,
     User,
     ValidatorDefinition,
     WorkflowNode,
     WorkflowStatus,
 )
 from app.schemas.agent_run import AgentRunCreate, AgentRunLoopEventRead, AgentRunRead, SaveAgentOutputResponse
+from app.services.agent_context_builder import build_engineering_setup_context
 from app.services.ai_generation import CLARIFICATION_MARKER, AIGenerationError, generate
 from app.services.artifact_summary import apply_summaries_to_version
 from app.services.audit import record_audit_log
@@ -80,28 +80,40 @@ def _merge_optional_context(db: Session, project: Project, node: WorkflowNode, v
                 validation.approved_artifact_summaries[extra_type] = artifact.current_version.agent_context_summary
 
 
-def _merge_engineering_setup_context(db: Session, project: Project, validation) -> None:
+# node_key -> Agent Context Builder agent_type (see
+# app/services/agent_context_builder.py's own module docstring for what
+# each type actually includes). Anything not named here gets "generic" —
+# coding standards + guardrails only, no stack/GitHub/Jira specifics
+# (rules 1/2: don't send an agent context it has no use for).
+_AGENT_CONTEXT_TYPE_BY_NODE_KEY: dict[str, str] = {
+    "hld": "hld",
+    "story_crafting": "story_crafting",
+}
+
+
+def _merge_engineering_setup_context(db: Session, project: Project, node: WorkflowNode, validation) -> dict:
     """Project Engineering Setup rule 6 — "Agents must receive coding
-    standards and guardrails in context," for every generic drafting-agent
-    stage (Requirement Intake, HLD, Story Crafting, ...), not just the
-    bespoke Implementation Agent (see
-    app/api/routes/implementation_runs.py's own
-    _fetch_engineering_setup_context for that one's separate, non-generic
-    wiring). Additive and unconditional — unlike OPTIONAL_CONTEXT_ARTIFACT_TYPES
-    above, this isn't keyed by node_key, since every stage should see the
-    project's standards/guardrails, not just specific ones. A project with
-    no ProjectEngineeringSetup row is untouched (rule 10)."""
-    setup = db.query(ProjectEngineeringSetup).filter(ProjectEngineeringSetup.project_id == project.id).first()
-    if setup is None:
-        return
-    if setup.coding_standards:
-        text = "\n".join(f"- {s.title}: {s.content}" for s in setup.coding_standards)
-        validation.approved_artifact_content["project_coding_standards"] = text
-        validation.approved_artifact_summaries["project_coding_standards"] = text
-    if setup.guardrails:
-        text = "\n".join(f"- {g.rule_text}" for g in setup.guardrails)
-        validation.approved_artifact_content["project_guardrails"] = text
-        validation.approved_artifact_summaries["project_guardrails"] = text
+    standards and guardrails in context" (plus, per node type, the
+    stack/Jira/documentation specifics — see
+    app/services/agent_context_builder.py) — for every generic
+    drafting-agent stage (Requirement Intake, HLD, Story Crafting, ...),
+    not just the bespoke Implementation Agent (see
+    app/api/routes/implementation_runs.py's own separate wiring for that
+    one). A project with no ProjectEngineeringSetup row is untouched
+    (rule 10). Returns the context snapshot (rule 5) for the caller to
+    persist on this run — empty dict when there was nothing to include."""
+    agent_type = _AGENT_CONTEXT_TYPE_BY_NODE_KEY.get(node.node_key, "generic")
+    # Capped against a fraction of the node's own context budget, not the
+    # whole thing — this is one of several context blocks
+    # build_prioritized_context assembles (P0 instructions, P1 rules, P2
+    # approved-artifact summaries including this one, P3 RAG, ...), not
+    # the only thing competing for room in it.
+    budget = max(500, (node.context_token_budget or 8000) // 4)
+    result = build_engineering_setup_context(db, project=project, agent_type=agent_type, output_token_budget=budget)
+    if result.context_text:
+        validation.approved_artifact_content["project_engineering_setup"] = result.context_text
+        validation.approved_artifact_summaries["project_engineering_setup"] = result.context_text
+    return result.snapshot
 
 
 # The node status a run's action leaves the workflow node in once its
@@ -246,7 +258,9 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
         return _fail("Cannot run — " + "; ".join(validation.reasons) + ".")
 
     _merge_optional_context(db, project, node, validation)
-    _merge_engineering_setup_context(db, project, validation)
+    engineering_setup_snapshot = _merge_engineering_setup_context(db, project, node, validation)
+    if engineering_setup_snapshot:
+        run.engineering_setup_context_snapshot = engineering_setup_snapshot
 
     # Retrieval-augmented context: pull whatever the Knowledge Base has that's
     # relevant to this project/stage/input/upstream-artifacts combination

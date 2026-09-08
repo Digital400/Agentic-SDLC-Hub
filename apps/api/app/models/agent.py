@@ -148,6 +148,13 @@ class AgentRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # project context alone, per the "don't force irrelevant knowledge"
     # rule; null means retrieval didn't run at all (e.g. an older run).
     retrieved_sources: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    # Agent Context Builder rule 5 ("store context snapshot with AgentRun
+    # for audit/debugging") — exactly which Project Engineering Setup
+    # fields were actually included for this run (see
+    # app/services/agent_context_builder.py's EngineeringSetupContext.snapshot),
+    # not the whole setup — a project with no engineering setup, or a run
+    # predating this feature, leaves this null.
+    engineering_setup_context_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
