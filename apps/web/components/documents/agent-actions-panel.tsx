@@ -71,6 +71,11 @@ export function AgentActionsPanel({
   const [sectionImproveResult, setSectionImproveResult] = useState<
     { kind: "failed"; message: string } | { kind: "clarification"; message: string } | { kind: "applied" } | null
   >(null);
+  // Answer box for a section-level clarification round — see
+  // handleSubmitSectionClarification below for why this exists: without
+  // it, "Apply" just resubmitted the exact same instruction the agent had
+  // already said wasn't enough, with no way to actually answer it.
+  const [sectionClarificationAnswer, setSectionClarificationAnswer] = useState("");
 
   const documentActions = [
     { icon: MessageCircleQuestion, label: "Ask questions" },
@@ -83,28 +88,36 @@ export function AgentActionsPanel({
     setImprovingSection(false);
     setSectionInstruction("");
     setSectionImproveResult(null);
+    setSectionClarificationAnswer("");
   }, [activeSectionTitle]);
 
-  async function handleImproveSection() {
+  async function handleImproveSection(instructionOverride?: string) {
     if (triggeredByUserId === null) {
       setSectionImproveResult({ kind: "failed", message: "No users exist yet to attribute this run to." });
       return;
     }
-    if (!activeSectionTitle || !sectionInstruction.trim()) return;
+    const instructionToSend = (instructionOverride ?? sectionInstruction).trim();
+    if (!activeSectionTitle || !instructionToSend) return;
     setSectionImproveBusy(true);
     setSectionImproveResult(null);
     try {
       const response = await api.artifacts.improveSection(artifactId, {
         section_title: activeSectionTitle,
-        instruction: sectionInstruction.trim(),
+        instruction: instructionToSend,
         triggered_by_user_id: triggeredByUserId,
       });
       if (response.needs_clarification) {
+        // Keep the (possibly just-combined) instruction visible so a
+        // second clarification round, if needed, keeps compounding from
+        // what's actually been asked so far, rather than resetting to
+        // whatever was in the box before this call.
+        setSectionInstruction(instructionToSend);
         setSectionImproveResult({ kind: "clarification", message: response.agent_run.output_text ?? "The agent needs more information before it can revise this section." });
         return;
       }
       setSectionImproveResult({ kind: "applied" });
       setSectionInstruction("");
+      setSectionClarificationAnswer("");
       setImprovingSection(false);
       onApplied({ artifactStatus: response.artifact_status, workflowNodeStatus: response.workflow_node_status });
     } catch (err) {
@@ -112,6 +125,21 @@ export function AgentActionsPanel({
     } finally {
       setSectionImproveBusy(false);
     }
+  }
+
+  // "Improve section" has no separate clarification_answers channel like
+  // the document-level Draft/Improve flow does (see ClarificationPanel) —
+  // run_section_improve_agent takes one freeform `instruction` string, so
+  // answering is just folding the answer into that same instruction and
+  // re-running. Without this, clicking "Apply" again sent the identical
+  // instruction the agent had already said wasn't enough, producing the
+  // exact same clarification request every time — indistinguishable from
+  // "the document just doesn't improve."
+  async function handleSubmitSectionClarification() {
+    if (!sectionClarificationAnswer.trim()) return;
+    const combined = `${sectionInstruction.trim()}\n\nAdditional clarification:\n${sectionClarificationAnswer.trim()}`;
+    setSectionClarificationAnswer("");
+    await handleImproveSection(combined);
   }
 
   async function handleRun() {
@@ -220,14 +248,32 @@ export function AgentActionsPanel({
                 rows={3}
                 className="text-xs"
               />
-              <Button size="sm" onClick={handleImproveSection} disabled={sectionImproveBusy || !sectionInstruction.trim()}>
+              <Button size="sm" onClick={() => handleImproveSection()} disabled={sectionImproveBusy || !sectionInstruction.trim()}>
                 {sectionImproveBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
                 {sectionImproveBusy ? "Improving…" : "Apply"}
               </Button>
               {sectionImproveResult?.kind === "failed" ? (
                 <p className="text-xs text-destructive">{sectionImproveResult.message}</p>
               ) : sectionImproveResult?.kind === "clarification" ? (
-                <p className="text-xs text-muted-foreground">{sectionImproveResult.message}</p>
+                <div className="flex flex-col gap-2 rounded-md border border-amber-400/60 bg-amber-50 p-2 dark:border-amber-900 dark:bg-amber-950/30">
+                  <p className="text-xs">{sectionImproveResult.message}</p>
+                  <Textarea
+                    placeholder="Answer the question above…"
+                    value={sectionClarificationAnswer}
+                    onChange={(e) => setSectionClarificationAnswer(e.target.value)}
+                    rows={3}
+                    className="text-xs"
+                  />
+                  <Button
+                    size="sm"
+                    onClick={handleSubmitSectionClarification}
+                    disabled={sectionImproveBusy || !sectionClarificationAnswer.trim()}
+                    className="w-fit"
+                  >
+                    {sectionImproveBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                    {sectionImproveBusy ? "Submitting…" : "Submit answer & retry"}
+                  </Button>
+                </div>
               ) : null}
             </div>
           ) : null}
