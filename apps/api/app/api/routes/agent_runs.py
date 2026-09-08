@@ -299,6 +299,25 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
         for c in retrieved_chunks
     ]
     review_comments = fetch_recent_review_comments(db, node)
+    # IMPROVE/VALIDATE both need the artifact's own current text to act on
+    # (see ai_generation.generate's docstring: "IMPROVE — a human explicitly
+    # asked to revise this stage's own artifact"; "VALIDATE — a validator
+    # checking the full document") — without it, the model has nothing to
+    # revise/check and effectively just re-drafts from the same upstream
+    # inputs, which (absent fresh review_comments) tends to come back
+    # near-identical to what's already there. This mirrors the
+    # current_draft_content already passed by revision_agent.py and
+    # section_improve_agent.py for their own IMPROVE calls.
+    current_draft_content: str | None = None
+    if payload.action in (AgentPromptRole.IMPROVE, AgentPromptRole.VALIDATE):
+        current_artifact = (
+            db.query(Artifact)
+            .filter(Artifact.workflow_node_id == node.id, Artifact.artifact_type == node.output_artifact_type)
+            .order_by(Artifact.created_at.desc())
+            .first()
+        )
+        if current_artifact is not None and current_artifact.current_version is not None:
+            current_draft_content = current_artifact.current_version.content_markdown
     # One ValidatorDefinition per workflow stage (see
     # app/models/validator.py) — None is a normal outcome for a stage that
     # hasn't had one configured yet; run_validator falls back to a
@@ -366,6 +385,7 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
                 full_content_artifact_types=set(node.full_content_artifact_types),
                 retrieved_chunks=retrieved_chunks,
                 review_comments=review_comments,
+                current_draft_content=current_draft_content,
             )
             result_content = result.content_markdown
             result_needs_clarification = result.needs_clarification
