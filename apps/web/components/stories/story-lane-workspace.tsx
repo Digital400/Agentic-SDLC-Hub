@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { MarkdownPreview } from "@/components/documents/markdown-preview";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -742,7 +743,7 @@ export function StoryLaneWorkspace({
             ) : lld ? (
               <>
                 <div className="max-h-[70vh] overflow-y-auto rounded-md border border-border bg-muted/30 p-4">
-                  <pre className="whitespace-pre-wrap font-sans text-sm">{lld.content_markdown}</pre>
+                  <MarkdownPreview markdown={lld.content_markdown} />
                 </div>
 
                 <div className="flex flex-col gap-2 border-t pt-3">
@@ -814,7 +815,7 @@ export function StoryLaneWorkspace({
             ) : implementationPlan ? (
               <>
                 <div className="max-h-[70vh] overflow-y-auto rounded-md border border-border bg-muted/30 p-4">
-                  <pre className="whitespace-pre-wrap font-sans text-sm">{implementationPlan.content_markdown}</pre>
+                  <MarkdownPreview markdown={implementationPlan.content_markdown} />
                 </div>
                 {implementationPlanNode && implementationPlanNode.status !== "COMPLETED" && (
                   <div className="flex gap-2">
@@ -875,7 +876,7 @@ export function StoryLaneWorkspace({
             ) : testScenarios ? (
               <>
                 <div className="max-h-[70vh] overflow-y-auto rounded-md border border-border bg-muted/30 p-4">
-                  <pre className="whitespace-pre-wrap font-sans text-sm">{testScenarios.content_markdown}</pre>
+                  <MarkdownPreview markdown={testScenarios.content_markdown} />
                 </div>
                 {testScenariosNode && testScenariosNode.status !== "COMPLETED" && (
                   <div className="flex gap-2">
@@ -926,7 +927,7 @@ export function StoryLaneWorkspace({
             {implementationTask === null ? (
               <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
                 <FileText className="h-6 w-6" />
-                Not available yet — approve this story's LLD (LLD_REVIEW) first.
+                Not available yet — approve this story&apos;s LLD (LLD_REVIEW) first.
               </div>
             ) : (
               <>
@@ -992,7 +993,7 @@ export function StoryLaneWorkspace({
                         <div>
                           <p className="mb-1 text-xs font-medium text-muted-foreground">PR description</p>
                           <div className="rounded-md border border-border bg-muted/30 p-3">
-                            <pre className="whitespace-pre-wrap font-sans text-xs">{latestRun.pr_description || "(none)"}</pre>
+                            {latestRun.pr_description ? <MarkdownPreview markdown={latestRun.pr_description} /> : <p className="text-xs text-muted-foreground">(none)</p>}
                           </div>
                         </div>
 
@@ -1106,7 +1107,7 @@ export function StoryLaneWorkspace({
             {implementationTask === null ? (
               <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
                 <FileText className="h-6 w-6" />
-                Not available yet — approve this story's LLD first.
+                Not available yet — approve this story&apos;s LLD first.
               </div>
             ) : !latestRun?.pull_request ? (
               <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
@@ -1310,7 +1311,7 @@ export function StoryLaneWorkspace({
             {implementationTask === null ? (
               <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
                 <FileText className="h-6 w-6" />
-                Not available yet — approve this story's LLD first.
+                Not available yet — approve this story&apos;s LLD first.
               </div>
             ) : latestTestRun === null ? (
               <div className="flex flex-col items-center gap-2 py-8 text-center text-sm text-muted-foreground">
@@ -1384,7 +1385,7 @@ export function StoryLaneWorkspace({
                       <div>
                         <p className="mb-1 text-xs font-medium text-muted-foreground">Full test report</p>
                         <div className="max-h-64 overflow-y-auto rounded-md border border-border bg-muted/30 p-3">
-                          <pre className="whitespace-pre-wrap font-sans text-xs">{testReport.content_markdown}</pre>
+                          <MarkdownPreview markdown={testReport.content_markdown} />
                         </div>
                       </div>
                     )}
@@ -1411,7 +1412,7 @@ export function StoryLaneWorkspace({
             <div>
               <CardTitle className="text-base">Story Test Execution</CardTitle>
               <CardDescription>
-                Manual QA execution against this story's own Test Scenarios — requires Test Scenarios, a PR or diff, and no
+                Manual QA execution against this story&apos;s own Test Scenarios — requires Test Scenarios, a PR or diff, and no
                 unresolved PR-review critical findings.
               </CardDescription>
             </div>

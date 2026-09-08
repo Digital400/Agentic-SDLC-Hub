@@ -150,6 +150,37 @@ def test_drafts_successfully_once_implementation_completes_and_never_auto_approv
     assert fetched.id == result.story_artifact.id
 
 
+def test_clarification_response_is_persisted_as_a_real_story_artifact(db, project, actor, monkeypatch):
+    """Regression test for a real bug: needs_clarification used to return
+    story_artifact=None, discarding the model's actual clarification
+    questions (already formatted into result.content_markdown by
+    ai_generation.generate) — a human had nothing to read, and the UI's
+    "see the generated notes" message pointed at notes that were never
+    saved. The clarification content must now be persisted like any other
+    draft."""
+    from app.services.ai_generation import AgentGenerationResult
+
+    story, lane, nodes, tech_lead = _lane_ready_for_test_scenarios(db, project, actor)
+
+    canned = AgentGenerationResult(
+        content_markdown="# Clarification Needed\n\n- Which browsers must the UI tests cover?",
+        needs_clarification=True,
+        clarification_questions=["Which browsers must the UI tests cover?"],
+    )
+    import app.services.story_test_scenarios_agent as test_scenarios_agent_module
+
+    monkeypatch.setattr(test_scenarios_agent_module, "generate", lambda **kwargs: canned)
+
+    result = draft_story_test_scenarios(nodes["TEST_SCENARIOS"].id, DraftStoryTestScenariosRequest(triggered_by_user_id=actor.id), db)
+
+    assert result.needs_clarification is True
+    assert result.story_artifact is not None
+    assert "Which browsers must the UI tests cover?" in result.story_artifact.content_markdown
+
+    fetched = get_story_test_scenarios(story.id, db)
+    assert fetched.id == result.story_artifact.id
+
+
 def test_draft_is_based_on_story_lld_and_implementation_plan(db, project, actor, monkeypatch):
     """Rule 2 — content is built from the story, Story LLD, and
     Implementation Plan. Asserted at the input-assembly level (both

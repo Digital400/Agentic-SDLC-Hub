@@ -179,12 +179,16 @@ def run_story_implementation_plan_agent(
         full_content_artifact_types={"story_lld"},
     )
 
-    if result.needs_clarification:
-        db.flush()
-        return StoryImplementationPlanResult(
-            agent_run_used_mock=result.used_mock, needs_clarification=True, story_artifact=None, node_status=node.status
-        )
-
+    # BUG FIX: needs_clarification used to return story_artifact=None here
+    # — result.content_markdown already contains the model's actual
+    # clarification questions (see ai_generation.py's
+    # format_clarification_output), but discarding it meant a human had
+    # literally nothing to read: the UI's "see the generated notes"
+    # message pointed at notes that were never saved anywhere. Persisting
+    # it as a normal StoryArtifact version — same as a real draft — is
+    # what lets the UI actually show the questions and, once answered,
+    # regenerate against them (same mechanism generic drafting-agent
+    # stages already use).
     last_version = (
         db.query(StoryArtifact)
         .filter(StoryArtifact.node_id == node.id)
@@ -204,6 +208,11 @@ def run_story_implementation_plan_agent(
     )
     db.add(story_artifact)
     db.flush()
+
+    if result.needs_clarification:
+        return StoryImplementationPlanResult(
+            agent_run_used_mock=result.used_mock, needs_clarification=True, story_artifact=story_artifact, node_status=node.status
+        )
 
     # Deliberately NOT completing/advancing the node here — see module
     # docstring. Acceptance is its own explicit action

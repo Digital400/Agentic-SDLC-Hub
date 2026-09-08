@@ -131,6 +131,40 @@ def test_story_lld_drafts_successfully_once_all_preconditions_are_met(db, projec
     assert fetched.id == result.story_artifact.id
 
 
+def test_clarification_response_is_persisted_as_a_real_story_artifact(db, project, actor, monkeypatch):
+    """Regression test for a real bug: needs_clarification used to return
+    story_artifact=None, discarding the model's actual clarification
+    questions (already formatted into result.content_markdown by
+    ai_generation.generate) — a human had nothing to read, and the UI's
+    "see the generated notes" message pointed at notes that were never
+    saved. The clarification content must now be persisted like any other
+    draft."""
+    from app.services import ai_generation
+    from app.services.ai_generation import AgentGenerationResult
+
+    story, lane, nodes = _lane_for_new_story(db, project, actor, with_hld_approved=True)
+    _complete(db, nodes["STORY_READY"], actor)
+
+    canned = AgentGenerationResult(
+        content_markdown="# Clarification Needed\n\n- Which database should this use?",
+        needs_clarification=True,
+        clarification_questions=["Which database should this use?"],
+    )
+    import app.services.story_lld_agent as story_lld_agent_module
+
+    monkeypatch.setattr(story_lld_agent_module, "generate", lambda **kwargs: canned)
+
+    result = draft_story_lld(nodes["STORY_LLD"].id, DraftStoryLldRequest(triggered_by_user_id=actor.id), db)
+
+    assert result.needs_clarification is True
+    assert result.story_artifact is not None
+    assert "Which database should this use?" in result.story_artifact.content_markdown
+
+    fetched = get_story_lld(story.id, db)
+    assert fetched.id == result.story_artifact.id
+    assert "Which database should this use?" in fetched.content_markdown
+
+
 def test_draft_story_lld_rejects_a_non_story_lld_node(db, project, actor):
     story, lane, nodes = _lane_for_new_story(db, project, actor, with_hld_approved=True)
     with pytest.raises(HTTPException) as exc_info:

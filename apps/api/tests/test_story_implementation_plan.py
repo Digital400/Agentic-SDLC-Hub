@@ -142,6 +142,37 @@ def test_drafts_successfully_once_story_lld_is_approved_and_never_auto_completes
     assert fetched.id == result.story_artifact.id
 
 
+def test_clarification_response_is_persisted_as_a_real_story_artifact(db, project, actor, monkeypatch):
+    """Regression test for a real bug: needs_clarification used to return
+    story_artifact=None, discarding the model's actual clarification
+    questions (already formatted into result.content_markdown by
+    ai_generation.generate) — a human had nothing to read, and the UI's
+    "see the generated notes" message pointed at notes that were never
+    saved. The clarification content must now be persisted like any other
+    draft."""
+    from app.services.ai_generation import AgentGenerationResult
+
+    story, lane, nodes, tech_lead = _lane_with_lld_approved(db, project, actor)
+
+    canned = AgentGenerationResult(
+        content_markdown="# Clarification Needed\n\n- Which build tool should this project use?",
+        needs_clarification=True,
+        clarification_questions=["Which build tool should this project use?"],
+    )
+    import app.services.story_implementation_plan_agent as plan_agent_module
+
+    monkeypatch.setattr(plan_agent_module, "generate", lambda **kwargs: canned)
+
+    result = draft_story_implementation_plan(nodes["IMPLEMENTATION_PLAN"].id, DraftStoryImplementationPlanRequest(triggered_by_user_id=actor.id), db)
+
+    assert result.needs_clarification is True
+    assert result.story_artifact is not None
+    assert "Which build tool should this project use?" in result.story_artifact.content_markdown
+
+    fetched = get_story_implementation_plan(story.id, db)
+    assert fetched.id == result.story_artifact.id
+
+
 def test_implementation_stays_locked_after_drafting_alone(db, project, actor):
     story, lane, nodes, tech_lead = _lane_with_lld_approved(db, project, actor)
     draft_story_implementation_plan(nodes["IMPLEMENTATION_PLAN"].id, DraftStoryImplementationPlanRequest(triggered_by_user_id=actor.id), db)
