@@ -32,28 +32,43 @@ export interface ClarificationAppliedOutcome {
  * outcome — an agent may need a second pass once the first round's
  * answers raise new questions), this same panel simply reappears for the
  * next round.
+ *
+ * `freeformInputKeys` (e.g. "stakeholder_request" for Requirement Intake —
+ * see ArtifactDocument.freeformInputKeys) must be re-submitted here too:
+ * GraphEngineService.resolve_required_inputs requires every one of the
+ * stage's freeform inputs on *every* run, including this retry, and a
+ * clarification round is a brand new agent run — it doesn't inherit the
+ * original run's input_context server-side. Skipping these fields would
+ * fail with "required input '<key>' was not provided in input_context"
+ * even though the user already answered them once, further up the page.
  */
 export function ClarificationPanel({
   projectId,
   workflowNodeId,
+  freeformInputKeys,
   triggeredByUserId,
   onApplied,
 }: {
   projectId: string;
   workflowNodeId: string;
+  freeformInputKeys: string[];
   triggeredByUserId: string | null;
   onApplied: (outcome: ClarificationAppliedOutcome) => void;
 }) {
   const [answer, setAnswer] = useState("");
+  const [freeformValues, setFreeformValues] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const missingFreeformKeys = freeformInputKeys.filter((key) => !freeformValues[key]?.trim());
+  const canSubmit = answer.trim().length > 0 && missingFreeformKeys.length === 0;
 
   async function handleSubmit() {
     if (triggeredByUserId === null) {
       setError("No users exist yet to attribute this run to.");
       return;
     }
-    if (!answer.trim()) return;
+    if (!canSubmit) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -62,7 +77,10 @@ export function ClarificationPanel({
         workflowNodeId,
         action: "draft",
         triggeredByUserId,
-        inputContext: { clarification_answers: answer.trim() },
+        inputContext: {
+          ...Object.fromEntries(freeformInputKeys.map((key) => [key, freeformValues[key].trim()])),
+          clarification_answers: answer.trim(),
+        },
       });
       if (result.run.status !== "COMPLETED" || result.saved === null) {
         setError(result.run.error_message ?? "The run did not complete.");
@@ -87,6 +105,18 @@ export function ClarificationPanel({
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-2">
+        {freeformInputKeys.map((key) => (
+          <div key={key} className="flex flex-col gap-1">
+            <label className="text-xs font-medium capitalize">{key.replace(/_/g, " ")}</label>
+            <Textarea
+              placeholder={`Re-enter ${key.replace(/_/g, " ")}…`}
+              value={freeformValues[key] ?? ""}
+              onChange={(e) => setFreeformValues((prev) => ({ ...prev, [key]: e.target.value }))}
+              rows={3}
+              className="text-sm"
+            />
+          </div>
+        ))}
         <Textarea
           placeholder="Answer the questions above, in any order or format…"
           value={answer}
@@ -94,7 +124,7 @@ export function ClarificationPanel({
           rows={5}
           className="text-sm"
         />
-        <Button size="sm" onClick={handleSubmit} disabled={submitting || !answer.trim()} className="w-fit">
+        <Button size="sm" onClick={handleSubmit} disabled={submitting || !canSubmit} className="w-fit">
           {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MessageSquareReply className="h-3.5 w-3.5" />}
           {submitting ? "Submitting…" : "Submit answers & regenerate"}
         </Button>

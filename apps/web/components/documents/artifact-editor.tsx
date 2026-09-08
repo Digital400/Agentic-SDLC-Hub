@@ -403,6 +403,7 @@ export function ArtifactEditor({
           <ClarificationPanel
             projectId={doc.projectId}
             workflowNodeId={doc.workflowNodeId}
+            freeformInputKeys={doc.freeformInputKeys}
             triggeredByUserId={createdById}
             onApplied={handleAgentApplied}
           />
