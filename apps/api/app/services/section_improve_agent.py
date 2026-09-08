@@ -32,6 +32,7 @@ from app.models import (
     ArtifactVersion,
     User,
 )
+from app.services.agent_context_builder import build_engineering_setup_context, infer_agent_context_type
 from app.services.ai_generation import AIGenerationError, generate
 from app.services.audit import record_audit_log
 from app.services.graph_engine import GraphEngineService
@@ -158,6 +159,21 @@ def run_section_improve_agent(
         }
         for c in retrieved_chunks
     ]
+
+    # Project Engineering Setup rule 6, extended to this path too — an
+    # "Improve section" run is a real IMPROVE run, not a lesser one, and
+    # previously got no coding-standards/guardrails/stack context at all
+    # (only app/api/routes/agent_runs.py's generic Draft/Improve/Validate
+    # action wired this in). A project with no engineering setup is
+    # untouched (rule 10).
+    engineering_setup = build_engineering_setup_context(
+        db, project=project, agent_type=infer_agent_context_type(node.node_key),
+        output_token_budget=max(500, (node.context_token_budget or 8000) // 4),
+    )
+    if engineering_setup.context_text:
+        inputs.approved_artifact_content["project_engineering_setup"] = engineering_setup.context_text
+        inputs.approved_artifact_summaries["project_engineering_setup"] = engineering_setup.context_text
+        run.engineering_setup_context_snapshot = engineering_setup.snapshot
 
     graph_engine.mark_running(node)
 

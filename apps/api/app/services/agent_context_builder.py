@@ -232,6 +232,24 @@ def _implementation_sections(setup: ProjectEngineeringSetup, snapshot: dict[str,
     return sections
 
 
+# node_key -> agent_type — the one place this mapping lives, shared by
+# every call site that needs to turn a WorkflowNode into an AgentContextType
+# (app/api/routes/agent_runs.py's generic Draft/Improve/Validate action,
+# and the revision-style paths — app/services/revision_agent.py's
+# reviewer "Request changes" cycle and app/services/section_improve_agent.py's
+# "Improve section" — which otherwise had no engineering-setup context at
+# all despite being real IMPROVE runs). Anything not named here is
+# "generic": coding standards + guardrails only (rules 1/2).
+_AGENT_CONTEXT_TYPE_BY_NODE_KEY: dict[str, AgentContextType] = {
+    "hld": "hld",
+    "story_crafting": "story_crafting",
+}
+
+
+def infer_agent_context_type(node_key: str) -> AgentContextType:
+    return _AGENT_CONTEXT_TYPE_BY_NODE_KEY.get(node_key, "generic")
+
+
 def build_engineering_setup_context(
     db: Session, *, project: Project, agent_type: AgentContextType, output_token_budget: int = 1500
 ) -> EngineeringSetupContext:

@@ -44,7 +44,7 @@ from app.models import (
     WorkflowStatus,
 )
 from app.schemas.agent_run import AgentRunCreate, AgentRunLoopEventRead, AgentRunRead, SaveAgentOutputResponse
-from app.services.agent_context_builder import build_engineering_setup_context
+from app.services.agent_context_builder import build_engineering_setup_context, infer_agent_context_type
 from app.services.ai_generation import CLARIFICATION_MARKER, AIGenerationError, generate
 from app.services.artifact_summary import apply_summaries_to_version
 from app.services.audit import record_audit_log
@@ -80,17 +80,6 @@ def _merge_optional_context(db: Session, project: Project, node: WorkflowNode, v
                 validation.approved_artifact_summaries[extra_type] = artifact.current_version.agent_context_summary
 
 
-# node_key -> Agent Context Builder agent_type (see
-# app/services/agent_context_builder.py's own module docstring for what
-# each type actually includes). Anything not named here gets "generic" —
-# coding standards + guardrails only, no stack/GitHub/Jira specifics
-# (rules 1/2: don't send an agent context it has no use for).
-_AGENT_CONTEXT_TYPE_BY_NODE_KEY: dict[str, str] = {
-    "hld": "hld",
-    "story_crafting": "story_crafting",
-}
-
-
 def _merge_engineering_setup_context(db: Session, project: Project, node: WorkflowNode, validation) -> dict:
     """Project Engineering Setup rule 6 — "Agents must receive coding
     standards and guardrails in context" (plus, per node type, the
@@ -102,7 +91,7 @@ def _merge_engineering_setup_context(db: Session, project: Project, node: Workfl
     one). A project with no ProjectEngineeringSetup row is untouched
     (rule 10). Returns the context snapshot (rule 5) for the caller to
     persist on this run — empty dict when there was nothing to include."""
-    agent_type = _AGENT_CONTEXT_TYPE_BY_NODE_KEY.get(node.node_key, "generic")
+    agent_type = infer_agent_context_type(node.node_key)
     # Capped against a fraction of the node's own context budget, not the
     # whole thing — this is one of several context blocks
     # build_prioritized_context assembles (P0 instructions, P1 rules, P2

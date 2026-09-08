@@ -118,6 +118,39 @@ def test_full_cycle_only_updates_the_named_section(db, project, actor, monkeypat
     assert "Risks" in result.artifact_version.change_summary
 
 
+def test_improve_section_includes_engineering_setup_context(db, project, actor, monkeypatch):
+    """"Improve section" is a real IMPROVE run — it should get the same
+    Project Engineering Setup context (see
+    app/services/agent_context_builder.py) the generic Run Agent
+    Draft/Improve/Validate action already gets, not none at all."""
+    from app.models import ProjectCodingStandard, ProjectEngineeringSetup
+
+    setup = ProjectEngineeringSetup(
+        project_id=project.id, created_by_id=actor.id, application_type="Web Application", primary_language="Python",
+    )
+    db.add(setup)
+    db.flush()
+    db.add(ProjectCodingStandard(setup_id=setup.id, title="Naming", content="Use snake_case."))
+    db.flush()
+
+    node, artifact, version = _setup(db, project, actor)
+
+    captured_kwargs = {}
+
+    def fake_generate(**kwargs):
+        captured_kwargs.update(kwargs)
+        return _revised_result(ORIGINAL_DOC)
+
+    monkeypatch.setattr(section_improve_agent, "generate", fake_generate)
+    monkeypatch.setattr(section_improve_agent, "retrieve_relevant_chunks", lambda *a, **kw: [])
+
+    result = run_section_improve_agent(db, artifact=artifact, section_title="Risks", instruction="Add mitigations.", triggered_by=actor)
+
+    assert "Use snake_case." in captured_kwargs["approved_artifact_content"]["project_engineering_setup"]
+    assert result.agent_run.engineering_setup_context_snapshot is not None
+    assert result.agent_run.engineering_setup_context_snapshot["agent_type"] == "generic"
+
+
 def test_needs_clarification_saves_nothing(db, project, actor, monkeypatch):
     node, artifact, version = _setup(db, project, actor)
     _mock_generation(monkeypatch, "", needs_clarification=True)
