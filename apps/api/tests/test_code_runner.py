@@ -72,6 +72,18 @@ class _FakeCompletedProcess:
         self.stderr = stderr
 
 
+@pytest.fixture(autouse=True)
+def _no_executable_resolution(monkeypatch):
+    """_run_command resolves argv[0] through shutil.which (see its
+    Windows PATHEXT note) before ever calling subprocess.run. Left
+    unpatched, that resolution would depend on what's actually
+    installed on the machine running the tests, making every literal
+    ["git", ...] / ["pytest", ...] / ["npm", ...] assertion below flaky.
+    Default to "nothing resolves" here; the resolution behavior itself
+    is covered by test_run_command_resolves_windows_batch_scripts."""
+    monkeypatch.setattr(module.shutil, "which", lambda executable: None)
+
+
 # --- Branch naming ------------------------------------------------------------------------
 
 
@@ -169,6 +181,47 @@ def test_run_tests_executes_every_allowlisted_command(db, project, actor, tmp_pa
     assert [c[0] for c in calls] == ["pytest", "npm"]
     assert all(r.succeeded for r in results)
     assert run.status == CodeRunStatus.TESTING
+
+
+def test_run_command_resolves_windows_batch_scripts_through_shutil_which(db, project, actor, tmp_path, monkeypatch):
+    """The actual bug this guards against: on Windows, npm/yarn/pnpm are
+    .cmd batch files, and subprocess.run(["npm", ...], shell=False) fails
+    to start at all (WinError 2) even though "npm test" works fine in any
+    shell, because CreateProcess doesn't do the PATHEXT-extension search
+    cmd.exe does. shutil.which does that search; _run_command must use
+    its result as argv[0] instead of the bare name."""
+    story = _story(db, project, actor)
+    repository = _repository_with_connection(db, project)
+    run = _code_run(db, project, story, repository)
+    service = CodeRunnerService(db)
+    monkeypatch.setattr(service.settings, "CODE_RUNNER_WORKSPACE_ROOT", tmp_path)
+    workspace = service.create_workspace(run)
+    resolved_path = r"C:\Program Files\nodejs\npm.cmd"
+    monkeypatch.setattr(module.shutil, "which", lambda executable: resolved_path if executable == "npm" else None)
+    calls = []
+    monkeypatch.setattr(module.subprocess, "run", lambda command, **kwargs: calls.append(command) or _FakeCompletedProcess(returncode=0, stdout="ok"))
+
+    results = service.run_tests(run, workspace, ["npm test"])
+
+    assert calls[0] == [resolved_path, "test"]
+    assert results[0].succeeded
+    # Logs stay readable — the literal command, not the resolved path.
+    assert any("npm test" in e["message"] for e in run.logs)
+
+
+def test_run_command_falls_back_to_the_literal_name_when_unresolvable(db, project, actor, tmp_path, monkeypatch):
+    story = _story(db, project, actor)
+    repository = _repository_with_connection(db, project)
+    run = _code_run(db, project, story, repository)
+    service = CodeRunnerService(db)
+    monkeypatch.setattr(service.settings, "CODE_RUNNER_WORKSPACE_ROOT", tmp_path)
+    workspace = service.create_workspace(run)
+    calls = []
+    monkeypatch.setattr(module.subprocess, "run", lambda command, **kwargs: calls.append(command) or _FakeCompletedProcess(returncode=0))
+
+    service.run_tests(run, workspace, ["pytest -q"])
+
+    assert calls[0] == ["pytest", "-q"]
 
 
 def test_command_timeout_raises_coderunner_error(db, project, actor, tmp_path, monkeypatch):

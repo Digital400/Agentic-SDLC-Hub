@@ -45,6 +45,7 @@ from __future__ import annotations
 import logging
 import re
 import shlex
+import shutil
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -156,11 +157,25 @@ class CodeRunnerService:
     ) -> CommandResult:
         """The one place any process is ever started. `command` must
         already be a real argv list — this never parses or evaluates a
-        string as shell syntax (shell=False, always)."""
+        string as shell syntax (shell=False, always).
+
+        Windows note: CreateProcess (what subprocess uses under
+        shell=False) does not search PATHEXT the way cmd.exe does, so a
+        bare "npm"/"yarn"/etc. — actually an "npm.cmd" batch file on
+        Windows — fails to start with WinError 2 even though it's on
+        PATH and running the identical command in a shell works fine.
+        shutil.which() does that PATHEXT-aware resolution itself, so we
+        resolve just the executable (argv[0]) through it before handing
+        the argv list to subprocess.run — still shell=False, still a
+        plain argv list, no shell string ever gets interpreted. Falls
+        back to the literal name if it can't be resolved, so the
+        original (clearer) error still surfaces on a genuinely missing
+        executable."""
         display = _redact(" ".join(command), secret)
+        resolved = [shutil.which(command[0]) or command[0], *command[1:]]
         start = datetime.now(timezone.utc)
         try:
-            proc = subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, shell=False)
+            proc = subprocess.run(resolved, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, shell=False)
         except subprocess.TimeoutExpired as exc:
             self._log(run, "ERROR", f"Command timed out after {timeout}s: {display}", secret=secret)
             raise CodeRunnerError(f"Command timed out: {display}") from exc

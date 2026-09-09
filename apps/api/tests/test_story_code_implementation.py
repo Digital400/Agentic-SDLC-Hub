@@ -157,6 +157,11 @@ def _mock_git_success(monkeypatch, tmp_path):
 
     monkeypatch.setattr(get_settings(), "CODE_RUNNER_WORKSPACE_ROOT", tmp_path)
     monkeypatch.setattr(code_runner_module, "decrypt_secret", lambda ciphertext: "fake-token")
+    # CodeRunnerService._run_command resolves argv[0] through shutil.which
+    # (Windows PATHEXT support — see its docstring); keep that a no-op here
+    # so these assertions check the literal command regardless of what's
+    # actually on the machine running the tests.
+    monkeypatch.setattr(code_runner_module.shutil, "which", lambda executable: None)
     calls = []
 
     def _fake_run(command, **kwargs):
