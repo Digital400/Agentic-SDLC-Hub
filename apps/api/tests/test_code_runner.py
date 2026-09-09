@@ -183,6 +183,59 @@ def test_run_tests_executes_every_allowlisted_command(db, project, actor, tmp_pa
     assert run.status == CodeRunStatus.TESTING
 
 
+def test_run_tests_runs_npm_from_the_frontend_subdirectory_when_thats_where_package_json_is(db, project, actor, tmp_path, monkeypatch):
+    """A generated repo is commonly a monorepo (repo_bootstrap.py's own
+    frontend/backend layout) — the workspace root has no package.json at
+    all, only frontend/package.json. "npm test" must run from frontend/,
+    not fail with npm's own ENOENT-on-package.json at the workspace
+    root."""
+    story = _story(db, project, actor)
+    repository = _repository_with_connection(db, project)
+    run = _code_run(db, project, story, repository)
+    service = CodeRunnerService(db)
+    monkeypatch.setattr(service.settings, "CODE_RUNNER_WORKSPACE_ROOT", tmp_path)
+    workspace = service.create_workspace(run)
+    (workspace / "frontend").mkdir()
+    (workspace / "frontend" / "package.json").write_text("{}")
+
+    calls = []
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda command, **kwargs: calls.append((command, kwargs.get("cwd"))) or _FakeCompletedProcess(returncode=0, stdout="2 passed"),
+    )
+
+    results = service.run_tests(run, workspace, ["npm test"])
+
+    assert calls[0] == (["npm", "test"], str(workspace / "frontend"))
+    assert all(r.succeeded for r in results)
+    assert any("frontend" in e["message"] for e in run.logs)
+
+
+def test_run_tests_stays_at_the_workspace_root_when_the_marker_is_ambiguous_or_absent(db, project, actor, tmp_path, monkeypatch):
+    story = _story(db, project, actor)
+    repository = _repository_with_connection(db, project)
+    run = _code_run(db, project, story, repository)
+    service = CodeRunnerService(db)
+    monkeypatch.setattr(service.settings, "CODE_RUNNER_WORKSPACE_ROOT", tmp_path)
+    workspace = service.create_workspace(run)
+    # Two candidate subdirectories both have package.json — ambiguous,
+    # never guess between them.
+    (workspace / "frontend").mkdir()
+    (workspace / "frontend" / "package.json").write_text("{}")
+    (workspace / "admin-frontend").mkdir()
+    (workspace / "admin-frontend" / "package.json").write_text("{}")
+
+    calls = []
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda command, **kwargs: calls.append((command, kwargs.get("cwd"))) or _FakeCompletedProcess(returncode=0),
+    )
+
+    service.run_tests(run, workspace, ["npm test"])
+
+    assert calls[0] == (["npm", "test"], str(workspace))
+
+
 def test_run_command_resolves_windows_batch_scripts_through_shutil_which(db, project, actor, tmp_path, monkeypatch):
     """The actual bug this guards against: on Windows, npm/yarn/pnpm are
     .cmd batch files, and subprocess.run(["npm", ...], shell=False) fails

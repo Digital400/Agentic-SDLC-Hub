@@ -87,6 +87,42 @@ _ALLOWED_GIT_SUBCOMMANDS = {
     "clone", "checkout", "branch", "add", "commit", "push", "status", "rev-parse", "diff", "log", "init", "remote", "config",
 }
 
+# A generated repository is commonly a monorepo — repo_bootstrap.py's own
+# scaffolding puts a Next.js project under frontend/ and a FastAPI one
+# under backend/, each with their own package.json/requirements.txt, and
+# the workspace root has neither. Rather than hardcode those two names,
+# each test executable is mapped to the marker file(s) that identify
+# *its* project root, and _resolve_test_command_cwd below looks for one.
+_TEST_COMMAND_PROJECT_MARKERS: dict[str, tuple[str, ...]] = {
+    "npm": ("package.json",),
+    "yarn": ("package.json",),
+    "pnpm": ("package.json",),
+    "pytest": ("pyproject.toml", "requirements.txt", "setup.cfg", "pytest.ini"),
+    "go": ("go.mod",),
+    "mvn": ("pom.xml",),
+    "gradle": ("build.gradle", "build.gradle.kts"),
+}
+
+
+def _resolve_test_command_cwd(workspace: Path, executable: str) -> Path:
+    """Runs `executable` from the workspace root when that already has
+    (or the executable has no known marker), otherwise from the single
+    immediate subdirectory that has it — e.g. "npm" resolves to
+    workspace/frontend when frontend/package.json exists but there's no
+    package.json at the workspace root. Two or more matching
+    subdirectories is ambiguous, so this never guesses between them and
+    falls back to the workspace root (the original, disclosed
+    behavior) — a real "command failed" surfaces there instead of a
+    silent wrong pick."""
+    markers = _TEST_COMMAND_PROJECT_MARKERS.get(executable, ())
+    if not markers or any((workspace / marker).exists() for marker in markers):
+        return workspace
+    candidates = sorted(
+        child for child in workspace.iterdir()
+        if child.is_dir() and not child.name.startswith(".") and any((child / marker).exists() for marker in markers)
+    )
+    return candidates[0] if len(candidates) == 1 else workspace
+
 
 @dataclass
 class CommandResult:
@@ -280,7 +316,10 @@ class CodeRunnerService:
             argv = shlex.split(raw_command)
             if not argv or argv[0] not in self.settings.CODE_RUNNER_ALLOWED_TEST_EXECUTABLES:
                 raise CodeRunnerError(f"Refusing to run non-allowlisted test command: {raw_command!r}")
-            results.append(self._run_command(run, workspace, argv))
+            cwd = _resolve_test_command_cwd(workspace, argv[0])
+            if cwd != workspace:
+                self._log(run, "INFO", f"Running {argv[0]!r} from {cwd.relative_to(workspace)}/ (found its project marker there, not at the workspace root).")
+            results.append(self._run_command(run, cwd, argv))
         return results
 
     # --- 8. Create commit -------------------------------------------------------
