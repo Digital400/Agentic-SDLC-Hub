@@ -42,6 +42,11 @@ export function WorkspaceTabs({ projectId }: { projectId: string }) {
       href: `/projects/${projectId}/maintenance`,
       active: pathname === `/projects/${projectId}/maintenance`,
     },
+    {
+      label: "Setup",
+      href: `/projects/${projectId}/setup`,
+      active: pathname === `/projects/${projectId}/setup`,
+    },
     { label: "Documents", href: `/documents?project=${projectId}`, active: pathname === "/documents" && projectParam === projectId },
     { label: "Reviews", href: `/reviews?project=${projectId}`, active: pathname === "/reviews" && projectParam === projectId },
   ];

@@ -151,6 +151,7 @@ def _build_heuristic_result(
     implementation_plan_summary: str = "",
     test_scenarios_summary: str = "",
     engineering_setup_context: str = "",
+    prior_story_task_context: str = "",
 ) -> ImplementationAgentResult:
     paths = task.expected_paths or [f"(no expected path declared for '{task.title}')"]
     changes: list[ProposedFileChange] = []
@@ -199,6 +200,7 @@ def _build_heuristic_result(
         f"{'Project engineering setup context is available. ' if engineering_setup_context else ''}"
         f"{'An Implementation Plan is available. ' if implementation_plan_summary.strip() else ''}"
         f"{'Test Scenarios are available. ' if test_scenarios_summary.strip() else ''}"
+        f"{'This story has earlier, already-accepted task(s) this one builds on. ' if prior_story_task_context.strip() else ''}"
         "No repository, branch, or file was written by generating this — review the diff below before anything else happens to it."
     )
 
@@ -242,7 +244,13 @@ _SYSTEM_PROMPT = (
     "RULES: Do NOT claim the change has been applied, committed, or pushed anywhere — you have no ability to do so "
     "and must not imply otherwise. Never reference creating or pushing to a branch, and never reference the "
     "repository's default/main branch as a target. Use only the repository content given to you; do not invent "
-    "file contents you weren't shown."
+    "file contents you weren't shown. If a Technology Stack is given to you below (Project Engineering Setup "
+    "context), every path you propose and every line of content you write MUST match it exactly — the same "
+    "language and the same file extensions (a TypeScript backend gets .ts files, never .js; a JavaScript one gets "
+    ".js, never .ts), the same frontend/backend framework, and that framework's own idiomatic conventions. Never "
+    "silently fall back to a different language or framework than what's configured, even for a file you're "
+    "creating from scratch and even if an existing repository file you were shown uses a different one — the "
+    "configured stack is authoritative."
 )
 
 
@@ -257,6 +265,7 @@ def _run_real_agent(
     implementation_plan_summary: str = "",
     test_scenarios_summary: str = "",
     engineering_setup_context: str = "",
+    prior_story_task_context: str = "",
 ) -> ImplementationAgentResult:
     file_context_parts = []
     for f in repo_context.relevant_files:
@@ -289,6 +298,13 @@ def _run_real_agent(
         # older/project-level task), same as everything else here.
         f"# Implementation Plan\n{implementation_plan_summary or '(not available)'}\n\n"
         f"# Test Scenarios\n{test_scenarios_summary or '(not available)'}\n\n"
+        # Full-stack-per-story sequencing (see app/api/routes/stories.py's
+        # _ensure_story_implementation_tasks): this story may have earlier
+        # tasks (DATABASE before BACKEND before FRONTEND) whose code is
+        # ALREADY committed to this same feature branch — build on it
+        # (use the real column/endpoint/etc. it added), never redeclare or
+        # recreate it.
+        f"# Already-accepted earlier tasks for this same story\n{prior_story_task_context or '(none — this is the first/only task for this story)'}\n\n"
         f"# Related story\n{story_text}\n\n"
         f"# Jira issue key\n{jira_issue_key or '(not synced to Jira yet)'}\n\n"
         f"# Coding standards (retrieved from the Knowledge Base)\n{standards_text}\n\n"
@@ -359,6 +375,7 @@ def run_implementation_agent(
     implementation_plan_summary: str = "",
     test_scenarios_summary: str = "",
     engineering_setup_context: str = "",
+    prior_story_task_context: str = "",
 ) -> ImplementationAgentResult:
     """Real AI when configured; the deterministic heuristic otherwise, or if
     the real call errors or returns unparseable JSON (logged, not raised —
@@ -374,12 +391,15 @@ def run_implementation_agent(
     app/services/agent_context_builder.py) is the project's own persisted
     coding standards/guardrails/repo/build conventions, pre-assembled and
     budget-fitted by the caller — this function just drops it into the
-    prompt verbatim."""
+    prompt verbatim. `prior_story_task_context` (full-stack-per-story — see
+    app/api/routes/implementation_runs.py's _build_prior_story_task_context)
+    summarizes this story's earlier, already-accepted sibling task(s) —
+    empty for a single-area story or the first task in a sequence."""
     kwargs = dict(
         task=task, repo_context=repo_context, story=story, lld_summary=lld_summary,
         standards_chunks=standards_chunks, jira_issue_key=jira_issue_key,
         implementation_plan_summary=implementation_plan_summary, test_scenarios_summary=test_scenarios_summary,
-        engineering_setup_context=engineering_setup_context,
+        engineering_setup_context=engineering_setup_context, prior_story_task_context=prior_story_task_context,
     )
     if get_active_provider() == "mock":
         return _build_heuristic_result(**kwargs)

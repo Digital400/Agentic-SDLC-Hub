@@ -115,7 +115,15 @@ class Settings(BaseSettings):
     # — a configured test command whose first token isn't in this list is
     # refused outright, never executed. Extend this list, don't bypass it,
     # if a project needs a different test runner.
-    CODE_RUNNER_ALLOWED_TEST_EXECUTABLES: list[str] = ["pytest", "npm", "yarn", "pnpm", "go", "mvn", "gradle"]
+    #
+    # "npx" is here specifically so a project can configure a real
+    # Playwright E2E command (e.g. "npx playwright test") in its
+    # Engineering Setup's Build/Test Commands step — without it, that
+    # command's first token ("npx") would be refused outright before ever
+    # reaching the "is Playwright actually installed" question. "playwright"
+    # itself covers a project that instead calls its locally-installed CLI
+    # directly (e.g. via a package.json script resolved on PATH).
+    CODE_RUNNER_ALLOWED_TEST_EXECUTABLES: list[str] = ["pytest", "npm", "yarn", "pnpm", "npx", "playwright", "go", "mvn", "gradle"]
 
     class Config:
         # Absolute path, not the bare relative ".env" this used to be —

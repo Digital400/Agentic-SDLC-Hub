@@ -22,6 +22,7 @@ from app.models import (
     ArtifactStatus,
     ImplementationTask,
     ImplementationTaskArea,
+    ImplementationTaskStatus,
     JiraIssueLink,
     JiraSourceType,
     Project,
@@ -62,7 +63,7 @@ from app.schemas.story import (
     UpdateLaneNodeStatusRequest,
 )
 from app.services.audit import record_audit_log
-from app.services.implementation_planner import AREA_TO_AGENT_TYPE, _infer_area
+from app.services.implementation_planner import AREA_TO_AGENT_TYPE, _infer_area, infer_story_task_areas
 from app.services.markdown_sections import find_section
 from app.services.permissions import require_can_edit_stage
 from app.services.story_delivery import StoryDeliveryError, advance_lane, create_story_delivery_lane
@@ -421,39 +422,84 @@ def assign_story_owner(story_id: uuid.UUID, payload: AssignStoryOwnerRequest, db
     return _story_to_read(db, story)
 
 
-def _ensure_story_implementation_task(db: Session, *, story: Story, created_by: User) -> ImplementationTask:
-    """Story-level implementation workflow — this story's one
-    ImplementationTask (see app/models/implementation_task.py: rule "one
-    run is always exactly one story" holds structurally because this is
-    the only task ever created for this story, and ImplementationTask.story_id
-    is a single nullable FK, never a collection). Idempotent: called every
-    time IMPLEMENTATION unlocks, but only ever creates the row once.
+def _ensure_story_implementation_tasks(db: Session, *, story: Story, created_by: User) -> list[ImplementationTask]:
+    """Story-level implementation workflow — full-stack-per-story: one
+    ImplementationTask per area the story's own approved Implementation
+    Plan actually calls for (DATABASE/BACKEND/FRONTEND, in that order —
+    see infer_story_task_areas), not one best-guess area for the whole
+    story. Idempotent: called every time IMPLEMENTATION unlocks, but only
+    ever creates the row set once — a later call just returns the
+    existing ones, in order.
 
-    `workflow_node_id`/`artifact_id`/`artifact_version_id` are left null —
-    there is no project-level WorkflowNode/Artifact/ArtifactVersion for a
-    StoryDeliveryNode to link to; every consumer of those three either
-    null-checks (app/services/repo_context_builder.py) or doesn't touch
-    them for a story-scoped task."""
-    existing = db.query(ImplementationTask).filter(ImplementationTask.story_id == story.id).first()
-    if existing is not None:
+    Falls back to the single-heuristic-area task this used to always
+    create when the plan has no identifiable per-area section content
+    (e.g. it doesn't follow the expected heading structure, or hasn't
+    been drafted at all yet) — a story is never left with zero tasks.
+
+    `workflow_node_id`/`artifact_id`/`artifact_version_id` are left null
+    on every task — there is no project-level WorkflowNode/Artifact/
+    ArtifactVersion for a StoryDeliveryNode to link to; every consumer of
+    those three either null-checks (app/services/repo_context_builder.py)
+    or doesn't touch them for a story-scoped task."""
+    existing = db.query(ImplementationTask).filter(ImplementationTask.story_id == story.id).order_by(ImplementationTask.order_index).all()
+    if existing:
         return existing
 
-    area = ImplementationTaskArea(_infer_area(f"{story.feature} {story.title} {story.user_story}"))
-    task = ImplementationTask(
-        project_id=story.project_id,
-        story_id=story.id,
-        title=story.title,
-        description=story.user_story or story.description,
-        linked_story=story.title,
-        area=area,
-        acceptance_criteria=story.acceptance_criteria,
-        assigned_agent_type=AREA_TO_AGENT_TYPE.get(area.value, AREA_TO_AGENT_TYPE["BACKEND"]),
-        order_index=0,
+    plan_artifact = (
+        db.query(StoryArtifact)
+        .filter(StoryArtifact.story_id == story.id, StoryArtifact.artifact_type == STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE)
+        .order_by(StoryArtifact.version_number.desc())
+        .first()
     )
-    db.add(task)
+    areas = infer_story_task_areas(plan_artifact.content_markdown) if plan_artifact is not None else []
+    if not areas:
+        areas = [ImplementationTaskArea(_infer_area(f"{story.feature} {story.title} {story.user_story}"))]
+
+    tasks: list[ImplementationTask] = []
+    for index, area in enumerate(areas):
+        task = ImplementationTask(
+            project_id=story.project_id,
+            story_id=story.id,
+            # A single-area story keeps the plain story title (today's
+            # exact behavior, unchanged); a multi-area one gets the area
+            # appended so its several tasks are distinguishable at a
+            # glance everywhere a task title is shown.
+            title=story.title if len(areas) == 1 else f"{story.title} — {area.value.title()}",
+            description=story.user_story or story.description,
+            linked_story=story.title,
+            area=area,
+            acceptance_criteria=story.acceptance_criteria,
+            assigned_agent_type=AREA_TO_AGENT_TYPE.get(area.value, AREA_TO_AGENT_TYPE["BACKEND"]),
+            order_index=index,
+        )
+        db.add(task)
+        tasks.append(task)
     db.flush()
-    _log_story_activity(db, story=story, action="implementation_task.created", actor=created_by, details={"task_id": str(task.id)})
-    return task
+    _log_story_activity(
+        db, story=story, action="implementation_task.created", actor=created_by,
+        details={"task_ids": [str(t.id) for t in tasks], "areas": [a.value for a in areas]},
+    )
+    return tasks
+
+
+def _current_story_task(tasks: list[ImplementationTask]) -> ImplementationTask:
+    """Which of a story's (possibly several, sequential) ImplementationTasks
+    is "the" one to work on right now: the first not-yet-COMPLETED task in
+    order (see ImplementationTaskStatus — set COMPLETED once a run against
+    it is Accepted, in review_implementation_run), or the last task once
+    every one of them is done. This is what every existing single-task
+    UI/endpoint (the story lane's Implementation tab, PR Review, Testing)
+    keeps reading — a story with three sequential tasks walks a user
+    through DATABASE, then BACKEND, then FRONTEND automatically, with no
+    change needed to any of those three tabs: by the time all tasks are
+    COMPLETED, "the current task" naturally resolves to the last one,
+    whose accepted run's PR is the SAME shared PR every earlier task's
+    run already pushed onto (see implementation_runs.py's
+    _get_open_task_pull_request)."""
+    for task in tasks:
+        if task.status != ImplementationTaskStatus.COMPLETED:
+            return task
+    return tasks[-1]
 
 
 @router.post("/stories/{story_id}/lane", response_model=StoryRead, status_code=status.HTTP_201_CREATED)
@@ -720,11 +766,11 @@ def update_lane_node_status(
             )
             # Story-level implementation workflow — the moment
             # IMPLEMENTATION unlocks (i.e. Story LLD/LLD_REVIEW just
-            # approved), ensure this story has its one ImplementationTask
+            # approved), ensure this story has its full-stack task set
             # ready for POST /implementation-runs to act on. Idempotent:
-            # a story only ever gets exactly one.
+            # a story only ever gets this set created once.
             if unlocked.node_key == "IMPLEMENTATION":
-                _ensure_story_implementation_task(db, story=story, created_by=actor)
+                _ensure_story_implementation_tasks(db, story=story, created_by=actor)
         elif lane.status == StoryDeliveryLaneStatus.COMPLETED:
             # Final Done gate side effects — see app/services/story_done_gate.py.
             # "Update Story Lane status to DONE" is StoryDeliveryLaneStatus
@@ -916,14 +962,29 @@ def get_story_test_scenarios(story_id: uuid.UUID, db: Session = Depends(get_db))
 
 @router.get("/stories/{story_id}/implementation-task", response_model=ImplementationTaskRead)
 def get_story_implementation_task(story_id: uuid.UUID, db: Session = Depends(get_db)) -> ImplementationTask:
-    """Story-level implementation workflow, requirement 1 — this story's
-    one ImplementationTask (see _ensure_story_implementation_task, which
-    creates it the moment Story LLD/LLD_REVIEW is approved)."""
+    """The story's CURRENT implementation task — see _current_story_task.
+    A story can have several (full-stack-per-story — see
+    _ensure_story_implementation_tasks), sequential ones; this always
+    resolves to whichever one a human should be looking at right now, so
+    every existing single-task consumer (the story lane's Implementation
+    tab, PR Review, Testing) keeps working unmodified, walking through
+    DATABASE -> BACKEND -> FRONTEND automatically as each is Accepted.
+    Use GET .../implementation-tasks (plural) for the full ordered set."""
     story = _get_story_or_404(db, story_id)
-    task = db.query(ImplementationTask).filter(ImplementationTask.story_id == story.id).first()
-    if task is None:
+    tasks = db.query(ImplementationTask).filter(ImplementationTask.story_id == story.id).order_by(ImplementationTask.order_index).all()
+    if not tasks:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} has no implementation task yet.")
-    return task
+    return _current_story_task(tasks)
+
+
+@router.get("/stories/{story_id}/implementation-tasks", response_model=list[ImplementationTaskRead])
+def get_story_implementation_tasks(story_id: uuid.UUID, db: Session = Depends(get_db)) -> list[ImplementationTask]:
+    """Every one of this story's ImplementationTasks, in run order — the
+    full-stack breakdown behind the single "current task" pointer above
+    (e.g. DATABASE, BACKEND, FRONTEND) — for a UI that wants to show the
+    whole sequence's progress, not just what's current."""
+    story = _get_story_or_404(db, story_id)
+    return db.query(ImplementationTask).filter(ImplementationTask.story_id == story.id).order_by(ImplementationTask.order_index).all()
 
 
 @router.get("/stories/{story_id}/test-report", response_model=StoryArtifactRead)

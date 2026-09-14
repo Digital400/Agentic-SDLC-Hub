@@ -228,6 +228,20 @@ export interface ApiCreateEngineeringSetupRequest {
   commands: { build_command?: string | null; test_commands: string[]; lint_command?: string | null };
 }
 
+// PATCH /projects/{id}/engineering-setup — edits an already-created
+// setup; every section optional, only the ones given are changed. See
+// app/schemas/project_engineering_setup.py's UpdateEngineeringSetupRequest.
+export interface ApiUpdateEngineeringSetupRequest {
+  updated_by_id: string;
+  technology_stack?: ApiTechnologyStackInput;
+  repository?: ApiRepositorySetupInput;
+  jira?: { option: ApiJiraSetupOption };
+  coding_standards?: ApiCodingStandardInput[];
+  guardrails?: ApiGuardrailInput[];
+  documentation?: { target: ApiDocumentationTarget };
+  commands?: { build_command?: string | null; test_commands: string[]; lint_command?: string | null };
+}
+
 export interface ApiEngineeringSetup {
   id: string;
   project_id: string;
@@ -731,10 +745,11 @@ export interface ApiKnowledgeSource {
   id: string;
   title: string;
   category: string;
-  source_type: "PROJECT_ARTIFACT" | "UPLOADED_DOCUMENT" | "EXTERNAL_LINK";
+  source_type: "PROJECT_ARTIFACT" | "UPLOADED_DOCUMENT" | "EXTERNAL_LINK" | "MANUAL_ENTRY";
   file_url: string | null;
   status: "PENDING" | "PROCESSING" | "INDEXED" | "FAILED";
   uploaded_by_id: string;
+  project_id: string | null;
   created_at: string;
   updated_at: string;
   uploaded_by_name: string;
@@ -1297,6 +1312,30 @@ export interface ApiBootstrapRepositoryResponse {
   commits: ApiBootstrapCommit[];
 }
 
+// Repository file edit — see app/api/routes/repository_file_edit.py. The
+// second deliberate exception to github_integration.py's read-only
+// contract: a hand-edited file, committed on a new branch (never the
+// repository's default branch) with a real pull request opened
+// immediately, unless open_pull_request is explicitly set to false.
+export interface ApiCommitFileEditRequest {
+  triggered_by_user_id: string;
+  path: string;
+  content: string;
+  commit_message?: string | null;
+  base_branch?: string | null;
+  branch_name?: string | null;
+  open_pull_request?: boolean;
+  pr_title?: string | null;
+  pr_body?: string | null;
+}
+
+export interface ApiCommitFileEditResponse {
+  branch_name: string;
+  base_branch: string;
+  commit_sha: string;
+  pull_request_url: string | null;
+}
+
 // Repo Context Builder — see apps/api/app/services/repo_context_builder.py.
 // A stateless preview of exactly what repo context would be sent to a
 // coding agent for one ImplementationTask; nothing here is persisted.
@@ -1590,6 +1629,8 @@ export const api = {
     create: (projectId: string, body: ApiCreateEngineeringSetupRequest) =>
       post<ApiEngineeringSetup>(`/projects/${projectId}/engineering-setup`, body),
     get: (projectId: string) => get<ApiEngineeringSetup | null>(`/projects/${projectId}/engineering-setup`),
+    update: (projectId: string, body: ApiUpdateEngineeringSetupRequest) =>
+      patch<ApiEngineeringSetup>(`/projects/${projectId}/engineering-setup`, body),
     linkRepository: (projectId: string, repositoryId: string) =>
       post<ApiEngineeringSetup>(`/projects/${projectId}/engineering-setup/link-repository`, { repository_id: repositoryId }),
     linkJiraProject: (projectId: string, jiraProjectLinkId: string) =>
@@ -1699,6 +1740,12 @@ export const api = {
     listSnapshotFiles: (snapshotId: string) => get<ApiRepositoryFileIndexEntry[]>(`/github/snapshots/${snapshotId}/files`),
     bootstrapRepository: (projectId: string, body: ApiBootstrapRepositoryRequest) =>
       post<ApiBootstrapRepositoryResponse>(`/projects/${projectId}/github/bootstrap-repository`, body),
+    // Edit-and-commit a single file straight to the connected repository —
+    // see app/api/routes/repository_file_edit.py. Always lands on a new
+    // branch (never the repository's default branch) and opens a real PR
+    // unless body.open_pull_request is explicitly false.
+    commitFileEdit: (projectId: string, repositoryId: string, body: ApiCommitFileEditRequest) =>
+      post<ApiCommitFileEditResponse>(`/projects/${projectId}/github/repositories/${repositoryId}/commit-file`, body),
   },
 
   // Real Jira integration — see app/api/routes/jira_integration.py.
@@ -1764,16 +1811,28 @@ export const api = {
   },
 
   knowledgeSources: {
-    list: (params?: { category?: string; status?: string }) => {
+    list: (params?: { category?: string; status?: string; project_id?: string }) => {
       const qs = new URLSearchParams();
       if (params?.category) qs.set("category", params.category);
       if (params?.status) qs.set("status", params.status);
+      if (params?.project_id) qs.set("project_id", params.project_id);
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
       return get<ApiKnowledgeSource[]>(`/knowledge-sources${suffix}`);
     },
     get: (id: string) => get<ApiKnowledgeSource>(`/knowledge-sources/${id}`),
-    create: (body: { title: string; category: string; source_type: string; file_url?: string; uploaded_by_id: string }) =>
+    create: (body: { title: string; category: string; source_type: string; file_url?: string; uploaded_by_id: string; project_id?: string | null }) =>
       post<ApiKnowledgeSource>("/knowledge-sources", body),
+    // Pasted-content counterpart to upload() — no file, just text.
+    // Used by the Create Project wizard's Knowledge Base step.
+    createFromText: (body: {
+      title: string;
+      category: string;
+      content: string;
+      uploaded_by_id: string;
+      project_id?: string | null;
+      source_type?: string;
+      file_url?: string | null;
+    }) => post<ApiKnowledgeSource>("/knowledge-sources/from-text", body),
     upload: (formData: FormData) => postForm<ApiKnowledgeSource>("/knowledge-sources/upload", formData),
     chunks: (id: string) => get<ApiKnowledgeChunk[]>(`/knowledge-sources/${id}/chunks`),
     search: (query: string, params?: { limit?: number; category?: string }) => {
@@ -1869,8 +1928,14 @@ export const api = {
     // 404s when no Test Scenarios have been drafted yet.
     getTestScenarios: (storyId: string) => get<ApiStoryArtifact>(`/stories/${storyId}/test-scenarios`),
     // 404s until Story LLD/LLD_REVIEW is approved — see
-    // app/api/routes/stories.py's _ensure_story_implementation_task.
+    // app/api/routes/stories.py's _ensure_story_implementation_tasks.
+    // Full-stack-per-story: a story can have several sequential tasks
+    // (one per area); this always resolves to whichever one is current.
     getImplementationTask: (storyId: string) => get<ApiImplementationTask>(`/stories/${storyId}/implementation-task`),
+    // The full ordered set behind the single "current task" pointer above
+    // (e.g. DATABASE, BACKEND, FRONTEND) — for showing the whole
+    // sequence's progress, not just what's current.
+    getImplementationTasks: (storyId: string) => get<ApiImplementationTask[]>(`/stories/${storyId}/implementation-tasks`),
     // 404s until a test run has completed for this story — see
     // app/services/testing_agent.STORY_TEST_REPORT_ARTIFACT_TYPE.
     getTestReport: (storyId: string) => get<ApiStoryArtifact>(`/stories/${storyId}/test-report`),

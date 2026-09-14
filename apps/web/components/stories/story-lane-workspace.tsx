@@ -81,6 +81,7 @@ export function StoryLaneWorkspace({
   initialImplementationPlan,
   initialTestScenarios,
   initialImplementationTask,
+  initialImplementationTasks,
   initialImplementationRuns,
   initialTestRuns,
   initialPrReviewRuns,
@@ -99,6 +100,12 @@ export function StoryLaneWorkspace({
   initialImplementationPlan: ApiStoryArtifact | null;
   initialTestScenarios: ApiStoryArtifact | null;
   initialImplementationTask: ApiImplementationTask | null;
+  /** Full-stack-per-story: the whole ordered task sequence (e.g.
+   * DATABASE, BACKEND, FRONTEND) behind initialImplementationTask's
+   * single "current task" pointer — shown as a small progress strip;
+   * everything else on this tab still only ever acts on "the current
+   * task", so no other logic here needs to know about the rest. */
+  initialImplementationTasks: ApiImplementationTask[];
   initialImplementationRuns: ApiImplementationRun[];
   initialTestRuns: ApiTestRun[];
   initialPrReviewRuns: ApiPRReviewRun[];
@@ -126,6 +133,7 @@ export function StoryLaneWorkspace({
   const [implementationPlanClarificationAnswer, setImplementationPlanClarificationAnswer] = useState("");
   const [testScenariosClarificationAnswer, setTestScenariosClarificationAnswer] = useState("");
   const [implementationTask, setImplementationTask] = useState(initialImplementationTask);
+  const [implementationTasks, setImplementationTasks] = useState(initialImplementationTasks);
   const [implementationRuns, setImplementationRuns] = useState(initialImplementationRuns);
   const [testRuns, setTestRuns] = useState(initialTestRuns);
   const [prReviewRuns, setPrReviewRuns] = useState(initialPrReviewRuns);
@@ -205,12 +213,14 @@ export function StoryLaneWorkspace({
     try {
       const task = await api.stories.getImplementationTask(story.id);
       setImplementationTask(task);
+      setImplementationTasks(await api.stories.getImplementationTasks(story.id).catch(() => []));
       setImplementationRuns(await api.projects.implementationTaskRuns(projectId, task.id));
       setTestRuns(await api.projects.implementationTaskTestRuns(projectId, task.id));
       setPrReviewRuns(await api.projects.implementationTaskPrReviewRuns(projectId, task.id));
     } catch (err) {
       if (!(err instanceof ApiError && err.status === 404)) throw err;
       setImplementationTask(null);
+      setImplementationTasks([]);
       setImplementationRuns([]);
       setTestRuns([]);
       setPrReviewRuns([]);
@@ -1005,7 +1015,10 @@ export function StoryLaneWorkspace({
             <div>
               <CardTitle className="text-base">Implementation</CardTitle>
               <CardDescription>
-                One task, one story. Requires Story LLD (LLD_REVIEW) approval — created automatically once it happens.
+                {implementationTasks.length > 1
+                  ? "Full-stack: this story's approved plan calls for more than one area — each runs in order, all landing on one shared pull request."
+                  : "One task, one story."}{" "}
+                Requires Story LLD (LLD_REVIEW) approval — created automatically once it happens.
                 {implementationLaneNode && <> Node: {implementationLaneNode.status}.</>}
               </CardDescription>
             </div>
@@ -1024,6 +1037,23 @@ export function StoryLaneWorkspace({
               </div>
             ) : (
               <>
+                {implementationTasks.length > 1 && (
+                  <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                    {implementationTasks.map((t, i) => (
+                      <span key={t.id} className="flex items-center gap-1.5">
+                        <Badge
+                          variant={
+                            t.status === "COMPLETED" ? "success" : t.id === implementationTask.id ? "info" : "gray"
+                          }
+                        >
+                          {t.area}
+                          {t.id === implementationTask.id && t.status !== "COMPLETED" ? " (current)" : ""}
+                        </Badge>
+                        {i < implementationTasks.length - 1 && <span className="text-muted-foreground">→</span>}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <div className="text-xs text-muted-foreground">
                   {implementationTask.title} · {implementationTask.area} · {implementationTask.assigned_agent_type}
                 </div>
@@ -1188,6 +1218,16 @@ export function StoryLaneWorkspace({
                 {prReviewLaneNode && <> Node: {prReviewLaneNode.status}.</>}
                 {humanCodeReviewNode && <> Human Code Review: {humanCodeReviewNode.status} — the real GitHub PR review, external to this app.</>}
               </CardDescription>
+              {latestRun?.pull_request && (
+                <a
+                  href={latestRun.pull_request.pr_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                >
+                  <GitPullRequest className="h-3 w-3" /> PR #{latestRun.pull_request.pr_number} (branch {latestRun.pull_request.branch_name})
+                </a>
+              )}
             </div>
             {implementationTask && latestRun?.pull_request && (
               <Button size="sm" onClick={handleStartPrReview} disabled={prReviewBusy || currentUserId === null}>
@@ -1318,9 +1358,19 @@ export function StoryLaneWorkspace({
                               Post selected comments to GitHub
                             </Button>
                             {latestPrReviewRun.posted_comments.length > 0 && (
-                              <p className="text-xs text-muted-foreground">
-                                Already posted: {latestPrReviewRun.posted_comments.length} comment(s).
-                              </p>
+                              <div className="text-xs text-muted-foreground">
+                                <p className="mb-1">Already posted to GitHub:</p>
+                                <ul className="list-inside list-disc">
+                                  {latestPrReviewRun.posted_comments.map((c, i) => (
+                                    <li key={i}>
+                                      <span className="font-mono">{c.file}</span> —{" "}
+                                      <a href={c.github_comment_url} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                                        view on GitHub
+                                      </a>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
                             )}
                           </div>
                         );

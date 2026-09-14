@@ -46,6 +46,7 @@ import type {
   ApiRepoContextPreview,
   ApiGitHubRepoSummary,
   ApiRepository,
+  ApiCommitFileEditResponse,
   ApiRepositoryFileContent,
   ApiRepositoryFileIndexEntry,
   ApiRepositorySnapshot,
@@ -102,6 +103,7 @@ import type {
   ProjectWorkflowNode,
   RelevantFileItem,
   RepoContextPreviewItem,
+  CommitFileEditResult,
   RepositoryFileContentResult,
   RepositoryFileIndexItem,
   RepositorySnapshotItem,
@@ -802,6 +804,15 @@ export function toRepositoryFileContentResult(f: ApiRepositoryFileContent): Repo
     content: f.content,
     truncated: f.truncated,
     isBinary: f.is_binary,
+  };
+}
+
+export function toCommitFileEditResult(r: ApiCommitFileEditResponse): CommitFileEditResult {
+  return {
+    branchName: r.branch_name,
+    baseBranch: r.base_branch,
+    commitSha: r.commit_sha,
+    pullRequestUrl: r.pull_request_url,
   };
 }
 

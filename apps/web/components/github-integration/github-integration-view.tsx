@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Camera, GitBranch, Loader2, Plus, Rocket, Star, Trash2, Unplug } from "lucide-react";
+import { Camera, ExternalLink, GitBranch, GitPullRequest, Loader2, Pencil, Plus, Rocket, Star, Trash2, Unplug, X } from "lucide-react";
 
 import { IntegrationStatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
@@ -11,9 +11,11 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 import { api, ApiError } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/format";
 import {
+  toCommitFileEditResult,
   toGitHubRepoOption,
   toGithubConnectionItem,
   toGithubRepositoryItem,
@@ -22,6 +24,7 @@ import {
   toRepositorySnapshotItem,
 } from "@/lib/mappers";
 import type {
+  CommitFileEditResult,
   GitHubRepoOption,
   GithubConnectionItem,
   GithubRepositoryItem,
@@ -85,6 +88,15 @@ export function GithubIntegrationView({
   const [fileContent, setFileContent] = useState<RepositoryFileContentResult | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
 
+  // Edit-and-commit a single file straight to the connected repository — see
+  // app/api/routes/repository_file_edit.py. Always lands on a new branch
+  // (never the repo's default branch); a real PR opens immediately.
+  const [editing, setEditing] = useState(false);
+  const [editedContent, setEditedContent] = useState("");
+  const [committing, setCommitting] = useState(false);
+  const [commitError, setCommitError] = useState<string | null>(null);
+  const [commitResult, setCommitResult] = useState<CommitFileEditResult | null>(null);
+
   const connectedAccounts = connections.filter((c) => c.status === "CONNECTED");
   const selectedRepository = repositories.find((r) => r.id === selectedRepositoryId) ?? null;
 
@@ -124,6 +136,9 @@ export function GithubIntegrationView({
     setFiles([]);
     setSelectedPath(null);
     setFileContent(null);
+    setEditing(false);
+    setCommitError(null);
+    setCommitResult(null);
     if (!selectedRepository) {
       setSnapshots([]);
       return;
@@ -316,6 +331,9 @@ export function GithubIntegrationView({
     setSelectedPath(path);
     setFileLoading(true);
     setFileContent(null);
+    setEditing(false);
+    setCommitError(null);
+    setCommitResult(null);
     try {
       const content = await api.github.readFile(selectedRepository.id, path);
       setFileContent(toRepositoryFileContentResult(content));
@@ -326,6 +344,44 @@ export function GithubIntegrationView({
       setSnapshotError(err instanceof ApiError ? err.message : "Failed to read this file.");
     } finally {
       setFileLoading(false);
+    }
+  }
+
+  function handleStartEdit() {
+    if (!fileContent || fileContent.content === null) return;
+    setEditedContent(fileContent.content);
+    setCommitError(null);
+    setCommitResult(null);
+    setEditing(true);
+  }
+
+  function handleCancelEdit() {
+    setEditing(false);
+    setCommitError(null);
+  }
+
+  async function handleCommitFileEdit() {
+    if (!selectedRepository || !selectedPath || currentUserId === null) return;
+    setCommitting(true);
+    setCommitError(null);
+    setCommitResult(null);
+    try {
+      const result = await api.github.commitFileEdit(projectId, selectedRepository.id, {
+        triggered_by_user_id: currentUserId,
+        path: selectedPath,
+        content: editedContent,
+      });
+      const mapped = toCommitFileEditResult(result);
+      setCommitResult(mapped);
+      setEditing(false);
+      // Reflect the edit in the read-only preview right away — the repo's
+      // default branch is untouched, but the human is looking at what they
+      // just committed onto the new branch.
+      setFileContent((prev) => (prev ? { ...prev, content: editedContent } : prev));
+    } catch (err) {
+      setCommitError(err instanceof ApiError ? err.message : "Failed to commit this edit.");
+    } finally {
+      setCommitting(false);
     }
   }
 
@@ -445,6 +501,16 @@ export function GithubIntegrationView({
                           <p className="font-medium">
                             {repo.owner}/{repo.name}
                           </p>
+                          <a
+                            href={`https://github.com/${repo.owner}/${repo.name}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-muted-foreground hover:text-foreground"
+                            title="Open on GitHub"
+                          >
+                            <ExternalLink className="h-3.5 w-3.5" />
+                          </a>
                           {repo.isPrimary ? (
                             <Badge variant="default" className="gap-1">
                               <Star className="h-3 w-3" />
@@ -574,8 +640,17 @@ export function GithubIntegrationView({
           <CardHeader className="flex-row items-center justify-between space-y-0">
             <div>
               <CardTitle className="text-base">Read-only scan</CardTitle>
-              <CardDescription>
+              <CardDescription className="flex items-center gap-1.5">
                 {selectedRepository.owner}/{selectedRepository.name}
+                <a
+                  href={`https://github.com/${selectedRepository.owner}/${selectedRepository.name}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-muted-foreground hover:text-foreground"
+                  title="Open on GitHub"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                </a>
               </CardDescription>
             </div>
             <div className="flex gap-2">
@@ -688,7 +763,7 @@ export function GithubIntegrationView({
                       </button>
                     ))}
                 </div>
-                <div className="max-h-64 overflow-y-auto rounded-md border border-border p-2">
+                <div className="flex max-h-[28rem] flex-col overflow-y-auto rounded-md border border-border p-2">
                   {fileLoading ? (
                     <p className="text-xs text-muted-foreground">Loading…</p>
                   ) : fileContent ? (
@@ -696,12 +771,63 @@ export function GithubIntegrationView({
                       <p className="text-xs text-muted-foreground">File too large to preview.</p>
                     ) : fileContent.isBinary ? (
                       <p className="text-xs text-muted-foreground">Binary file — no text preview.</p>
+                    ) : editing ? (
+                      <div className="flex flex-col gap-2">
+                        <Textarea
+                          value={editedContent}
+                          onChange={(e) => setEditedContent(e.target.value)}
+                          spellCheck={false}
+                          className="min-h-64 font-mono text-[11px]"
+                        />
+                        <div className="flex items-center gap-2">
+                          <Button size="sm" onClick={handleCommitFileEdit} disabled={committing || editedContent === fileContent.content}>
+                            {committing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitPullRequest className="h-3.5 w-3.5" />}
+                            {committing ? "Committing…" : "Commit Fix"}
+                          </Button>
+                          <Button variant="ghost" size="sm" onClick={handleCancelEdit} disabled={committing}>
+                            <X className="h-3.5 w-3.5" />
+                            Cancel
+                          </Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Commits to a new branch off {selectedRepository.defaultBranch ?? "the default branch"} and
+                          opens a pull request — {selectedRepository.owner}/{selectedRepository.name}&apos;s default
+                          branch is never written to directly.
+                        </p>
+                        {commitError ? <p className="text-xs text-destructive">{commitError}</p> : null}
+                      </div>
                     ) : (
-                      <pre className="whitespace-pre-wrap font-mono text-[11px]">{fileContent.content}</pre>
+                      <>
+                        <div className="mb-2 flex justify-end">
+                          <Button variant="outline" size="sm" onClick={handleStartEdit}>
+                            <Pencil className="h-3.5 w-3.5" />
+                            Edit
+                          </Button>
+                        </div>
+                        <pre className="whitespace-pre-wrap font-mono text-[11px]">{fileContent.content}</pre>
+                      </>
                     )
                   ) : (
                     <p className="text-xs text-muted-foreground">Select a file to preview it (read-only).</p>
                   )}
+                  {!editing && commitResult ? (
+                    <div className="mt-2 flex flex-col gap-1 rounded-md border border-emerald-400/60 bg-emerald-50 p-2 dark:border-emerald-900 dark:bg-emerald-950/30">
+                      <p className="text-xs text-emerald-700 dark:text-emerald-400">
+                        Committed to <span className="font-mono">{commitResult.branchName}</span>.
+                      </p>
+                      {commitResult.pullRequestUrl ? (
+                        <a
+                          href={commitResult.pullRequestUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="flex w-fit items-center gap-1 text-xs text-emerald-700 underline hover:no-underline dark:text-emerald-400"
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                          View pull request
+                        </a>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               </div>
             ) : null}

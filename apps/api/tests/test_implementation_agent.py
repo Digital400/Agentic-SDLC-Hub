@@ -177,3 +177,44 @@ def test_real_ai_malformed_json_falls_back_to_heuristic(monkeypatch):
     result = run_implementation_agent(task=_FakeTask(), repo_context=_repo_context(), story=None, lld_summary="")
 
     assert result.used_mock is True
+
+
+# --- Technology stack grounding ----------------------------------------------------------
+#
+# Regression coverage for a real bug: the real-AI path produced a mix of
+# .js and .ts files for a project configured for a TypeScript-only
+# backend, because (a) the system prompt never told the model to match
+# the configured stack, and (b) app/services/agent_context_builder.py's
+# "implementation" agent type used to withhold the Technology Stack
+# section entirely (see test_agent_context_builder.py's
+# test_implementation_includes_repo_config_commands_and_the_technology_stack).
+# This file only covers (a) plus the plumbing that gets (b)'s text to the
+# model at all; (b) itself is covered where it's built.
+
+
+def test_system_prompt_requires_matching_the_configured_technology_stack():
+    assert "Technology Stack" in implementation_agent._SYSTEM_PROMPT
+    assert "file extensions" in implementation_agent._SYSTEM_PROMPT
+    assert "authoritative" in implementation_agent._SYSTEM_PROMPT
+
+
+def test_real_ai_path_forwards_engineering_setup_context_to_the_model(monkeypatch):
+    monkeypatch.setattr(implementation_agent, "get_active_provider", lambda: "anthropic")
+    canned = {
+        "proposed_file_changes": [{"path": "backend/src/index.ts", "change_type": "create", "summary": "Add entrypoint", "content": "export {};\n"}],
+        "explanation": "Adds the entrypoint.", "test_command": "npm test", "risks": [],
+    }
+    captured: dict = {}
+
+    def _fake_generate(**kwargs):
+        captured.update(kwargs)
+        return json.dumps(canned)
+
+    monkeypatch.setattr(implementation_agent, "generate_raw_text", _fake_generate)
+
+    run_implementation_agent(
+        task=_FakeTask(), repo_context=_repo_context(), story=None, lld_summary="",
+        engineering_setup_context="## Technology Stack — every file you create or modify MUST match this exactly\n- Primary language: TypeScript",
+    )
+
+    assert "Primary language: TypeScript" in captured["user_content"]

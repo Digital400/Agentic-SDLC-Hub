@@ -15,8 +15,9 @@ from fastapi import HTTPException
 from app.api.routes.agent_runs import _merge_engineering_setup_context
 from app.api.routes.implementation_runs import start_implementation_run
 from app.api.routes.jira_integration import push_to_jira
-from app.api.routes.project_engineering_setup import create_engineering_setup, get_engineering_setup
+from app.api.routes.project_engineering_setup import create_engineering_setup, get_engineering_setup, update_engineering_setup
 from app.models import (
+    DocumentationTarget,
     GithubSetupOption,
     Integration,
     IntegrationConnection,
@@ -40,6 +41,7 @@ from app.schemas.project_engineering_setup import (
     JiraSetupInput,
     RepositorySetupInput,
     TechnologyStackInput,
+    UpdateEngineeringSetupRequest,
 )
 from app.services import implementation_agent
 from app.services.graph_engine import GraphValidationResult
@@ -272,3 +274,127 @@ def _fake_repo_context():
     from app.services.repo_context_builder import RepoContextPreviewResult
 
     return RepoContextPreviewResult(architecture_summary="A simple app.", relevant_folders=[], relevant_files=[], suggested_edit_scope=[])
+
+
+# --- update (PATCH) an already-created setup ------------------------------------------------
+
+
+def test_update_engineering_setup_changes_only_the_given_sections(db, project, actor):
+    create_engineering_setup(project.id, _full_setup_request(created_by_id=actor.id), db)
+
+    result = update_engineering_setup(
+        project.id,
+        UpdateEngineeringSetupRequest(
+            updated_by_id=actor.id,
+            technology_stack=TechnologyStackInput(
+                application_type="Web Application", primary_language="Python",  # only this field actually changes
+                frontend_framework="Next.js", backend_framework="FastAPI", database="PostgreSQL", cloud_provider="AWS",
+            ),
+        ),
+        db,
+    )
+
+    assert result.primary_language == "Python"
+    # Untouched sections keep their original values.
+    assert result.repository_config.option == GithubSetupOption.CONNECT_EXISTING_REPO
+    assert len(result.coding_standards) == 1
+    assert result.coding_standards[0].title == "Naming"
+    assert result.command_config.build_command == "npm run build"
+
+
+def test_update_engineering_setup_replaces_coding_standards_and_guardrails(db, project, actor):
+    create_engineering_setup(project.id, _full_setup_request(created_by_id=actor.id), db)
+
+    result = update_engineering_setup(
+        project.id,
+        UpdateEngineeringSetupRequest(
+            updated_by_id=actor.id,
+            coding_standards=[
+                CodingStandardInput(title="Error handling", content="Always catch specific exceptions."),
+                CodingStandardInput(title="Formatting", content="Run the formatter before committing."),
+            ],
+            guardrails=[GuardrailInput(rule_text="Always add a test for a new endpoint.")],
+        ),
+        db,
+    )
+
+    assert [s.title for s in result.coding_standards] == ["Error handling", "Formatting"]
+    assert [g.rule_text for g in result.guardrails] == ["Always add a test for a new endpoint."]
+
+
+def test_update_engineering_setup_can_clear_coding_standards_and_guardrails(db, project, actor):
+    create_engineering_setup(project.id, _full_setup_request(created_by_id=actor.id), db)
+
+    result = update_engineering_setup(project.id, UpdateEngineeringSetupRequest(updated_by_id=actor.id, coding_standards=[], guardrails=[]), db)
+
+    assert result.coding_standards == []
+    assert result.guardrails == []
+
+
+def test_update_engineering_setup_updates_repository_intent_without_touching_the_linked_repository(db, project, actor):
+    create_engineering_setup(project.id, _full_setup_request(created_by_id=actor.id, github_option=GithubSetupOption.CONNECT_EXISTING_REPO), db)
+    repository, _snapshot = _add_repository(db, project)
+    setup = get_engineering_setup(project.id, db)
+    from app.api.routes.project_engineering_setup import link_repository
+    from app.schemas.project_engineering_setup import LinkRepositoryRequest
+
+    link_repository(project.id, LinkRepositoryRequest(repository_id=repository.id), db)
+    del setup
+
+    result = update_engineering_setup(
+        project.id,
+        UpdateEngineeringSetupRequest(
+            updated_by_id=actor.id,
+            repository=RepositorySetupInput(option=GithubSetupOption.CONNECT_EXISTING_REPO, branch_naming_pattern="feature/{task}", target_branch="develop"),
+        ),
+        db,
+    )
+
+    assert result.repository_config.branch_naming_pattern == "feature/{task}"
+    assert result.repository_config.target_branch == "develop"
+    # The actual linked repository is untouched — only link_repository can change it.
+    assert result.repository_config.repository_id == repository.id
+
+
+def test_update_engineering_setup_updates_commands_and_documentation_target(db, project, actor):
+    create_engineering_setup(project.id, _full_setup_request(created_by_id=actor.id), db)
+
+    result = update_engineering_setup(
+        project.id,
+        UpdateEngineeringSetupRequest(
+            updated_by_id=actor.id,
+            commands=CommandSetupInput(build_command="npm run build:prod", test_commands=["npm test", "npm run e2e"], lint_command=None),
+            documentation=DocumentationSetupInput(target=DocumentationTarget.CONFLUENCE),
+        ),
+        db,
+    )
+
+    assert result.command_config.build_command == "npm run build:prod"
+    assert result.command_config.test_commands == ["npm test", "npm run e2e"]
+    assert result.command_config.lint_command is None
+    assert result.documentation_config.target == DocumentationTarget.CONFLUENCE
+
+
+def test_update_engineering_setup_requires_an_existing_setup(db, project, actor):
+    with pytest.raises(HTTPException) as exc_info:
+        update_engineering_setup(project.id, UpdateEngineeringSetupRequest(updated_by_id=actor.id, guardrails=[]), db)
+    assert exc_info.value.status_code == 404
+
+
+def test_update_engineering_setup_rejects_an_unknown_actor(db, project, actor):
+    create_engineering_setup(project.id, _full_setup_request(created_by_id=actor.id), db)
+
+    with pytest.raises(HTTPException) as exc_info:
+        update_engineering_setup(project.id, UpdateEngineeringSetupRequest(updated_by_id=uuid.uuid4(), guardrails=[]), db)
+    assert exc_info.value.status_code == 400
+
+
+def test_update_engineering_setup_enforces_role_permissions(db, project, actor):
+    create_engineering_setup(project.id, _full_setup_request(created_by_id=actor.id), db)
+    viewer = User(email=f"{uuid.uuid4()}@example.com", full_name="Viewer", role=UserRole.VIEWER)
+    db.add(viewer)
+    db.flush()
+
+    with pytest.raises(HTTPException) as exc_info:
+        update_engineering_setup(project.id, UpdateEngineeringSetupRequest(updated_by_id=viewer.id, guardrails=[]), db)
+    assert exc_info.value.status_code == 403

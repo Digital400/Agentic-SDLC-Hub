@@ -19,6 +19,7 @@ const STEPS = [
   "GitHub Setup",
   "Jira Setup",
   "Coding Standards",
+  "Knowledge Base",
   "Agent Guardrails",
   "Documentation Flow",
   "Build/Test Commands",
@@ -36,6 +37,13 @@ interface CodingStandardDraft {
   title: string;
   content: string;
   category: ApiCodingStandardCategory;
+}
+
+interface KnowledgeItemDraft {
+  title: string;
+  category: string;
+  content: string;
+  sourceUrl: string;
 }
 
 const CODING_STANDARD_CATEGORY_OPTIONS: { value: ApiCodingStandardCategory; label: string }[] = [
@@ -86,7 +94,14 @@ export function CreateProjectWizard({ createdById }: { createdById: string | nul
   // Step 5
   const [codingStandards, setCodingStandards] = useState<CodingStandardDraft[]>([]);
 
-  // Step 6
+  // Step 6 — Knowledge Base: content is pasted directly here; sourceUrl
+  // (e.g. a Confluence link) is recorded purely as a citation label —
+  // nothing is fetched from it. Submitted after project creation via
+  // api.knowledgeSources.createFromText, scoped to the new project (see
+  // app/models/knowledge.py's KnowledgeSource.project_id).
+  const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeItemDraft[]>([]);
+
+  // Step 7
   const [guardrails, setGuardrails] = useState<string[]>([]);
 
   // Step 7
@@ -132,6 +147,18 @@ export function CreateProjectWizard({ createdById }: { createdById: string | nul
 
   function removeCodingStandard(index: number) {
     setCodingStandards((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function addKnowledgeItem() {
+    setKnowledgeItems((prev) => [...prev, { title: "", category: "", content: "", sourceUrl: "" }]);
+  }
+
+  function updateKnowledgeItem(index: number, patch: Partial<KnowledgeItemDraft>) {
+    setKnowledgeItems((prev) => prev.map((k, i) => (i === index ? { ...k, ...patch } : k)));
+  }
+
+  function removeKnowledgeItem(index: number) {
+    setKnowledgeItems((prev) => prev.filter((_, i) => i !== index));
   }
 
   function addGuardrail() {
@@ -192,6 +219,18 @@ export function CreateProjectWizard({ createdById }: { createdById: string | nul
         documentation: { target: documentationTarget },
         commands: { build_command: buildCommand.trim() || null, test_commands: testCommands, lint_command: lintCommand.trim() || null },
       });
+
+      const validKnowledgeItems = knowledgeItems.filter((k) => k.title.trim() && k.content.trim());
+      for (const item of validKnowledgeItems) {
+        await api.knowledgeSources.createFromText({
+          title: item.title.trim(),
+          category: item.category.trim() || "General",
+          content: item.content.trim(),
+          uploaded_by_id: createdById,
+          project_id: project.id,
+          file_url: item.sourceUrl.trim() || null,
+        });
+      }
 
       router.push(`/projects/${project.id}`);
       router.refresh();
@@ -404,7 +443,55 @@ export function CreateProjectWizard({ createdById }: { createdById: string | nul
 
             {step === 5 ? (
               <div className="flex flex-col gap-4">
-                <h2 className="text-sm font-semibold">Step 6: Agent Guardrails</h2>
+                <h2 className="text-sm font-semibold">Step 6: Knowledge Base</h2>
+                <p className="text-xs text-muted-foreground">
+                  Optional context for agents drafting this project&apos;s artifacts — pasted directly, scoped
+                  to just this project (on top of whatever&apos;s already shared org-wide). Note a source link
+                  (e.g. a Confluence page) if you want it cited as a reference — nothing is fetched from that
+                  link.
+                </p>
+                {knowledgeItems.map((k, i) => (
+                  <div key={i} className="flex flex-col gap-2 rounded-md border border-border p-3">
+                    <div className="flex items-center gap-2">
+                      <Input
+                        value={k.title}
+                        onChange={(e) => updateKnowledgeItem(i, { title: e.target.value })}
+                        placeholder="e.g. Habit streak calculation rules"
+                        className="flex-1"
+                      />
+                      <Input
+                        value={k.category}
+                        onChange={(e) => updateKnowledgeItem(i, { category: e.target.value })}
+                        placeholder="e.g. Product Domain"
+                        className="w-44"
+                      />
+                      <Button type="button" variant="ghost" size="icon" onClick={() => removeKnowledgeItem(i)}>
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                    <Textarea
+                      value={k.content}
+                      onChange={(e) => updateKnowledgeItem(i, { content: e.target.value })}
+                      placeholder="Paste the reference content here..."
+                      rows={3}
+                    />
+                    <Input
+                      value={k.sourceUrl}
+                      onChange={(e) => updateKnowledgeItem(i, { sourceUrl: e.target.value })}
+                      placeholder="Optional source link, e.g. a Confluence page URL"
+                    />
+                  </div>
+                ))}
+                <Button type="button" variant="outline" size="sm" className="w-fit" onClick={addKnowledgeItem}>
+                  <Plus className="h-3.5 w-3.5" />
+                  Add knowledge item
+                </Button>
+              </div>
+            ) : null}
+
+            {step === 6 ? (
+              <div className="flex flex-col gap-4">
+                <h2 className="text-sm font-semibold">Step 7: Agent Guardrails</h2>
                 <p className="text-xs text-muted-foreground">
                   Rules every agent must follow — e.g. &ldquo;never touch payment code without human review.&rdquo;
                 </p>
@@ -423,9 +510,9 @@ export function CreateProjectWizard({ createdById }: { createdById: string | nul
               </div>
             ) : null}
 
-            {step === 6 ? (
+            {step === 7 ? (
               <div className="flex flex-col gap-4">
-                <h2 className="text-sm font-semibold">Step 7: Documentation Flow</h2>
+                <h2 className="text-sm font-semibold">Step 8: Documentation Flow</h2>
                 <Select value={documentationTarget} onChange={(e) => setDocumentationTarget(e.target.value as typeof documentationTarget)}>
                   <option value="INTERNAL_ONLY">Internal only (this app)</option>
                   <option value="CONFLUENCE">Publish to Confluence</option>
@@ -435,9 +522,9 @@ export function CreateProjectWizard({ createdById }: { createdById: string | nul
               </div>
             ) : null}
 
-            {step === 7 ? (
+            {step === 8 ? (
               <div className="flex flex-col gap-4">
-                <h2 className="text-sm font-semibold">Step 8: Build/Test Commands</h2>
+                <h2 className="text-sm font-semibold">Step 9: Build/Test Commands</h2>
                 <p className="text-xs text-muted-foreground">
                   Required before CodeRunner can apply and test a patch. Each command is still checked against the
                   server&rsquo;s allowlisted executables when it actually runs.
@@ -457,9 +544,9 @@ export function CreateProjectWizard({ createdById }: { createdById: string | nul
               </div>
             ) : null}
 
-            {step === 8 ? (
+            {step === 9 ? (
               <div className="flex flex-col gap-4">
-                <h2 className="text-sm font-semibold">Step 9: Review & Create</h2>
+                <h2 className="text-sm font-semibold">Step 10: Review & Create</h2>
                 <dl className="grid grid-cols-1 gap-x-4 gap-y-2 text-xs sm:grid-cols-2">
                   <div>
                     <dt className="text-muted-foreground">Project</dt>
@@ -492,6 +579,18 @@ export function CreateProjectWizard({ createdById }: { createdById: string | nul
                     <dd className="flex flex-wrap gap-1">
                       {codingStandards.filter((s) => s.title.trim()).length > 0 ? (
                         codingStandards.filter((s) => s.title.trim()).map((s) => <Badge key={s.title} variant="outline">{s.title}</Badge>)
+                      ) : (
+                        <span className="text-muted-foreground">None</span>
+                      )}
+                    </dd>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <dt className="mb-1 text-muted-foreground">Knowledge base</dt>
+                    <dd className="flex flex-wrap gap-1">
+                      {knowledgeItems.filter((k) => k.title.trim() && k.content.trim()).length > 0 ? (
+                        knowledgeItems
+                          .filter((k) => k.title.trim() && k.content.trim())
+                          .map((k) => <Badge key={k.title} variant="outline">{k.title}</Badge>)
                       ) : (
                         <span className="text-muted-foreground">None</span>
                       )}

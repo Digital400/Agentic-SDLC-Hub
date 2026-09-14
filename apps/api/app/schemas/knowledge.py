@@ -14,6 +14,26 @@ class KnowledgeSourceCreate(BaseModel):
     source_type: KnowledgeSourceType
     file_url: str | None = Field(default=None, max_length=2048)
     uploaded_by_id: uuid.UUID = Field(..., description="Existing user id.")
+    project_id: uuid.UUID | None = Field(default=None, description="Scopes this source to one project; null = org-wide.")
+
+
+class KnowledgeSourceFromTextCreate(BaseModel):
+    """Creates a source and its one chunk from raw pasted text in a
+    single call — the "paste content" counterpart to POST
+    /knowledge-sources/upload (which does the same for an uploaded
+    file). Used by the Create Project wizard's Knowledge Base step,
+    and usable standalone for any project-scoped or org-wide note."""
+
+    title: NonBlankStr = Field(..., max_length=255)
+    category: NonBlankStr = Field(..., max_length=100)
+    content: NonBlankStr
+    uploaded_by_id: uuid.UUID = Field(..., description="Existing user id.")
+    project_id: uuid.UUID | None = Field(default=None, description="Scopes this source to one project; null = org-wide.")
+    source_type: KnowledgeSourceType = KnowledgeSourceType.MANUAL_ENTRY
+    file_url: str | None = Field(
+        default=None, max_length=2048,
+        description="Optional reference link (e.g. a Confluence page URL) recorded as a citation label — never fetched.",
+    )
 
 
 class KnowledgeSourceUpdate(BaseModel):
@@ -37,6 +57,7 @@ class KnowledgeSourceRead(BaseModel):
     file_url: str | None
     status: KnowledgeSourceStatus
     uploaded_by_id: uuid.UUID
+    project_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
 
@@ -54,6 +75,7 @@ class KnowledgeSourceRead(BaseModel):
             file_url=source.file_url,
             status=source.status,
             uploaded_by_id=source.uploaded_by_id,
+            project_id=source.project_id,
             created_at=source.created_at,
             updated_at=source.updated_at,
             uploaded_by_name=source.uploaded_by.full_name,

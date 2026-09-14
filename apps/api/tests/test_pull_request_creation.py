@@ -19,6 +19,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.routes.implementation_runs import create_pull_request, review_implementation_run, start_implementation_run
+from app.api.routes.projects import list_task_implementation_runs
 from app.models import (
     AuditLog,
     Integration,
@@ -113,6 +114,15 @@ def _accepted_run(db, project, actor):
     return task, run
 
 
+def _regenerate_and_accept(db, task, actor):
+    """A second (or third, ...) run against the SAME task — exactly what
+    the story lane's "Regenerate" button does (see
+    app/api/routes/implementation_runs.py's start_implementation_run:
+    nothing stops a second run against an already-run task)."""
+    run = start_implementation_run(StartImplementationRunRequest(implementation_task_id=task.id, triggered_by_user_id=actor.id), db)
+    return review_implementation_run(run.id, ReviewImplementationRunRequest(decision="ACCEPTED", reviewed_by_user_id=actor.id), db)
+
+
 def _mock_github(monkeypatch, *, record_calls: list | None = None):
     """Patches decrypt_repository_token (real decryption isn't the point
     of these tests) and every github_api write call with a deterministic,
@@ -139,15 +149,24 @@ def _mock_github(monkeypatch, *, record_calls: list | None = None):
         calls.append(("delete_file", path, branch, sha))
         return "commit-sha"
 
+    pr_counter = {"n": 6}
+
     def _create_pull_request(token, owner, repo, *, title, head, base, body, **kwargs):
+        pr_counter["n"] += 1
         calls.append(("create_pull_request", title, head, base))
-        return github_api.GitHubPullRequest(number=7, html_url="https://github.com/octocat/hello-world/pull/7", state="open")
+        n = pr_counter["n"]
+        return github_api.GitHubPullRequest(number=n, html_url=f"https://github.com/octocat/hello-world/pull/{n}", state="open")
+
+    def _create_issue_comment(token, owner, repo, pr_number, *, body, **kwargs):
+        calls.append(("create_issue_comment", pr_number))
+        return github_api.GitHubComment(id=1, html_url="https://github.com/octocat/hello-world/pull/7#issuecomment-1", body=body)
 
     monkeypatch.setattr(routes_module.github_api, "create_branch", _create_branch)
     monkeypatch.setattr(routes_module.github_api, "get_file_sha", _get_file_sha)
     monkeypatch.setattr(routes_module.github_api, "create_or_update_file", _create_or_update_file)
     monkeypatch.setattr(routes_module.github_api, "delete_file", _delete_file)
     monkeypatch.setattr(routes_module.github_api, "create_pull_request", _create_pull_request)
+    monkeypatch.setattr(routes_module.github_api, "create_issue_comment", _create_issue_comment)
     return calls
 
 
@@ -268,6 +287,107 @@ def test_pr_creation_requires_a_configured_repository(db, project, actor, monkey
     with pytest.raises(HTTPException) as exc_info:
         create_pull_request(run.id, CreatePullRequestRequest(triggered_by_user_id=actor.id), db)
     assert exc_info.value.status_code == 409
+
+
+# --- Regenerate updates the existing open PR, never opens a second one ------------------
+
+
+def test_regenerate_pushes_onto_the_existing_open_pr_instead_of_a_new_one(db, project, actor, monkeypatch):
+    task, run = _accepted_run(db, project, actor)
+    calls = _mock_github(monkeypatch)
+    first = create_pull_request(run.id, CreatePullRequestRequest(triggered_by_user_id=actor.id), db)
+    calls.clear()
+
+    second_run = _regenerate_and_accept(db, task, actor)
+    result = create_pull_request(second_run.id, CreatePullRequestRequest(triggered_by_user_id=actor.id), db)
+
+    # Still exactly one PullRequestLink row — the original one, now
+    # repointed at the new run — not a second row for a second PR.
+    assert db.query(PullRequestLink).count() == 1
+    link = db.query(PullRequestLink).first()
+    assert link.pr_number == first.pull_request.pr_number
+    assert link.pr_url == first.pull_request.pr_url
+    assert link.implementation_run_id == second_run.id
+    assert result.pull_request.pr_number == first.pull_request.pr_number
+
+    # No second create_branch/create_pull_request call — only more commits
+    # onto the same branch, plus a comment recording the regeneration.
+    assert not [c for c in calls if c[0] in ("create_branch", "create_pull_request")]
+    write_calls = [c for c in calls if c[0] in ("create_or_update_file", "delete_file")]
+    assert write_calls
+    for call in write_calls:
+        assert call[2] == link.branch_name
+    assert ("create_issue_comment", link.pr_number) in calls
+
+
+def test_regenerate_opens_a_new_pr_once_the_old_one_is_merged(db, project, actor, monkeypatch):
+    task, run = _accepted_run(db, project, actor)
+    calls = _mock_github(monkeypatch)
+    first = create_pull_request(run.id, CreatePullRequestRequest(triggered_by_user_id=actor.id), db)
+    first_link = db.query(PullRequestLink).filter(PullRequestLink.implementation_run_id == run.id).first()
+    first_link.status = PullRequestStatus.MERGED
+    db.flush()
+    calls.clear()
+
+    second_run = _regenerate_and_accept(db, task, actor)
+    result = create_pull_request(second_run.id, CreatePullRequestRequest(triggered_by_user_id=actor.id), db)
+
+    assert db.query(PullRequestLink).count() == 2
+    assert result.pull_request.pr_number != first.pull_request.pr_number
+    assert [c for c in calls if c[0] == "create_pull_request"]
+
+
+def test_regenerate_pr_update_records_no_secret_and_an_audit_log_entry(db, project, actor, monkeypatch):
+    task, run = _accepted_run(db, project, actor)
+    _mock_github(monkeypatch)
+    create_pull_request(run.id, CreatePullRequestRequest(triggered_by_user_id=actor.id), db)
+    second_run = _regenerate_and_accept(db, task, actor)
+    _mock_github(monkeypatch)
+
+    create_pull_request(second_run.id, CreatePullRequestRequest(triggered_by_user_id=actor.id), db)
+
+    audit_rows = db.query(AuditLog).filter(AuditLog.action == "implementation_run.pr_updated").all()
+    assert len(audit_rows) == 1
+    dump = json.dumps([row.extra_data for row in db.query(AuditLog).all()])
+    assert "fake-token" not in dump
+
+
+# --- Listing a task's run history includes each run's PR link (regression) --------------
+
+
+def test_list_task_implementation_runs_includes_the_pull_request_link(db, project, actor, monkeypatch):
+    """A real, confirmed bug: this list used to return raw ORM rows with
+    no `pull_request` attached at all (ImplementationRun has no such
+    relationship), so every consumer keyed off `latestRun.pull_request`
+    (the story lane's Implementation/PR Review/Testing tabs) would show
+    "create a pull request first" forever, even right after a real PR was
+    created — the very next refresh lost it."""
+    task, run = _accepted_run(db, project, actor)
+    _mock_github(monkeypatch)
+    created = create_pull_request(run.id, CreatePullRequestRequest(triggered_by_user_id=actor.id), db)
+
+    runs = list_task_implementation_runs(project.id, task.id, db)
+
+    assert len(runs) == 1
+    assert runs[0].id == run.id
+    assert runs[0].pull_request is not None
+    assert runs[0].pull_request.pr_number == created.pull_request.pr_number
+
+
+def test_list_task_implementation_runs_reflects_a_regenerate_update_too(db, project, actor, monkeypatch):
+    task, run = _accepted_run(db, project, actor)
+    calls = _mock_github(monkeypatch)
+    create_pull_request(run.id, CreatePullRequestRequest(triggered_by_user_id=actor.id), db)
+    calls.clear()
+    second_run = _regenerate_and_accept(db, task, actor)
+    create_pull_request(second_run.id, CreatePullRequestRequest(triggered_by_user_id=actor.id), db)
+
+    runs = {r.id: r for r in list_task_implementation_runs(project.id, task.id, db)}
+
+    # The newest run carries the (shared) PR; the superseded one no
+    # longer does — PullRequestLink.implementation_run_id was repointed.
+    assert runs[second_run.id].pull_request is not None
+    assert runs[run.id].pull_request is None
 
 
 # --- Security regression ---------------------------------------------------------------

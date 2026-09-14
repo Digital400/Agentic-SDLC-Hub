@@ -133,14 +133,15 @@ export function StoriesView({
     setStories((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
   }
 
-  async function handleSync() {
+  async function handleSync(syncMode: "VERTICAL" | "HORIZONTAL") {
     if (currentUserId === null) return;
+    setMode(syncMode);
     setSyncing(true);
     setError(null);
     setSyncNotice(null);
     try {
       const result = await api.stories.syncFromBacklog(projectId, {
-        story_type: mode,
+        story_type: syncMode,
         triggered_by_user_id: currentUserId,
       });
       // Always re-fetch the full list from the server rather than only
@@ -359,20 +360,27 @@ export function StoriesView({
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-2">
-          <div className="flex flex-wrap items-center gap-3">
-            <Select value={mode} onChange={(e) => setMode(e.target.value as "VERTICAL" | "HORIZONTAL")} className="w-56">
-              <option value="VERTICAL">Vertical Stories</option>
-              <option value="HORIZONTAL">Horizontal Stories</option>
-            </Select>
-            <Button onClick={handleSync} disabled={!storyCraftingApproved || syncing || currentUserId === null}>
-              {syncing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-              Sync from approved backlog
-            </Button>
-            {!storyCraftingApproved && (
-              <p className="text-xs text-muted-foreground">Story Crafting must be approved before syncing.</p>
-            )}
+          <div className="flex flex-wrap items-start gap-4">
+            <div className="flex flex-col gap-1">
+              <Button onClick={() => handleSync("VERTICAL")} disabled={!storyCraftingApproved || syncing || currentUserId === null}>
+                {syncing && mode === "VERTICAL" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                Sync Vertical Stories
+              </Button>
+              <p className="text-xs text-muted-foreground">{MODE_HELPER_TEXT.VERTICAL}</p>
+            </div>
+            <div className="flex flex-col gap-1">
+              <Button
+                variant="outline"
+                onClick={() => handleSync("HORIZONTAL")}
+                disabled={!storyCraftingApproved || syncing || currentUserId === null}
+              >
+                {syncing && mode === "HORIZONTAL" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                Sync Horizontal Stories
+              </Button>
+              <p className="text-xs text-muted-foreground">{MODE_HELPER_TEXT.HORIZONTAL}</p>
+            </div>
           </div>
-          <p className="text-xs text-muted-foreground">{MODE_HELPER_TEXT[mode]}</p>
+          {!storyCraftingApproved && <p className="text-xs text-muted-foreground">Story Crafting must be approved before syncing.</p>}
           {syncNotice && (
             <p className={cn("text-sm", syncNotice.tone === "warning" ? "text-amber-600 dark:text-amber-500" : "text-muted-foreground")}>
               {syncNotice.text}

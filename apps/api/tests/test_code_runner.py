@@ -236,6 +236,33 @@ def test_run_tests_stays_at_the_workspace_root_when_the_marker_is_ambiguous_or_a
     assert calls[0] == (["npm", "test"], str(workspace))
 
 
+def test_run_tests_allows_a_configured_playwright_command_from_its_own_project_root(db, project, actor, tmp_path, monkeypatch):
+    """"npx playwright test" is a real, supported E2E test command — it
+    must pass the allowlist (CODE_RUNNER_ALLOWED_TEST_EXECUTABLES
+    includes "npx"/"playwright" specifically for this) and run from the
+    Playwright project's own root (its playwright.config.*, or the same
+    package.json marker npm/yarn/pnpm use), not the workspace root."""
+    story = _story(db, project, actor)
+    repository = _repository_with_connection(db, project)
+    run = _code_run(db, project, story, repository)
+    service = CodeRunnerService(db)
+    monkeypatch.setattr(service.settings, "CODE_RUNNER_WORKSPACE_ROOT", tmp_path)
+    workspace = service.create_workspace(run)
+    (workspace / "frontend").mkdir()
+    (workspace / "frontend" / "playwright.config.ts").write_text("export default {};")
+
+    calls = []
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda command, **kwargs: calls.append((command, kwargs.get("cwd"))) or _FakeCompletedProcess(returncode=0, stdout="3 passed"),
+    )
+
+    results = service.run_tests(run, workspace, ["npx playwright test"])
+
+    assert calls[0] == (["npx", "playwright", "test"], str(workspace / "frontend"))
+    assert all(r.succeeded for r in results)
+
+
 def test_run_command_resolves_windows_batch_scripts_through_shutil_which(db, project, actor, tmp_path, monkeypatch):
     """The actual bug this guards against: on Windows, npm/yarn/pnpm are
     .cmd batch files, and subprocess.run(["npm", ...], shell=False) fails

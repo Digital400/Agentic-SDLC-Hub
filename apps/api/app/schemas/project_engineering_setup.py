@@ -186,6 +186,35 @@ class EngineeringSetupRead(BaseModel):
         )
 
 
+class UpdateEngineeringSetupRequest(BaseModel):
+    """Body for PATCH /projects/{id}/engineering-setup — edits an
+    already-created setup (the same data the Create Project wizard
+    collected, now viewable/editable afterward instead of write-once).
+    Every section is optional; a caller only passes the ones actually
+    being changed, same "only touch what's given" convention as
+    app/schemas/project.py's ProjectUpdate.
+
+    coding_standards/guardrails are a full replacement of that list when
+    passed — not a merge of individual items — the same shape the wizard
+    itself submits, and these rows have no independent identity a caller
+    could address one at a time from the edit form.
+
+    repository/jira here only ever touch the *intent* fields (option,
+    branch naming pattern, target branch) — repository_id/
+    jira_project_link_id stay controlled exclusively by
+    link_repository/link_jira_project below (an actual finished
+    connection, never something this edit form can set directly)."""
+
+    updated_by_id: uuid.UUID = Field(..., description="Existing user id.")
+    technology_stack: TechnologyStackInput | None = None
+    repository: RepositorySetupInput | None = None
+    jira: JiraSetupInput | None = None
+    coding_standards: list[CodingStandardInput] | None = None
+    guardrails: list[GuardrailInput] | None = None
+    documentation: DocumentationSetupInput | None = None
+    commands: CommandSetupInput | None = None
+
+
 class LinkRepositoryRequest(BaseModel):
     """Body for POST /projects/{id}/engineering-setup/link-repository —
     called once a human finishes actually connecting/creating the repo

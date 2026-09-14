@@ -27,6 +27,7 @@ from app.models import (
     ProjectMember,
     ProjectRole,
     ProjectStatus,
+    PullRequestLink,
     Repository,
     RepositorySnapshot,
     PRReviewRun,
@@ -655,17 +656,33 @@ def list_task_pr_review_runs(project_id: uuid.UUID, task_id: uuid.UUID, db: Sess
 
 
 @router.get("/{project_id}/implementation-tasks/{task_id}/implementation-runs", response_model=list[ImplementationRunRead])
-def list_task_implementation_runs(project_id: uuid.UUID, task_id: uuid.UUID, db: Session = Depends(get_db)) -> list[ImplementationRun]:
+def list_task_implementation_runs(project_id: uuid.UUID, task_id: uuid.UUID, db: Session = Depends(get_db)) -> list[ImplementationRunRead]:
+    """A real, confirmed bug this fixes: ImplementationRun has no
+    `pull_request` relationship at all, so returning raw ORM rows here
+    (as this used to) always serialized pull_request=None regardless of
+    whether one actually exists — every consumer of this list (the story
+    lane's Implementation/PR Review/Testing tabs, all keyed off
+    `latestRun.pull_request`) would show "create a pull request first"
+    forever, even immediately after a real one was created, on the very
+    next refresh. GET /implementation-runs/{id} (get_implementation_run)
+    already attached it correctly via ImplementationRunRead.from_orm_run
+    — this route just needed the same treatment, batched here (one query
+    for every run's PR link, not N) rather than one at a time."""
     _get_project_or_404(db, project_id)
     task = db.get(ImplementationTask, task_id)
     if task is None or task.project_id != project_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Implementation task {task_id} not found in project {project_id}")
-    return (
+    runs = (
         db.query(ImplementationRun)
         .filter(ImplementationRun.implementation_task_id == task_id)
         .order_by(ImplementationRun.created_at.desc())
         .all()
     )
+    links_by_run_id = {
+        link.implementation_run_id: link
+        for link in db.query(PullRequestLink).filter(PullRequestLink.implementation_run_id.in_([r.id for r in runs])).all()
+    } if runs else {}
+    return [ImplementationRunRead.from_orm_run(run, pull_request=links_by_run_id.get(run.id)) for run in runs]
 
 
 # 7. Update workflow node status ---------------------------------------------------

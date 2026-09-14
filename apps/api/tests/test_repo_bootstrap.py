@@ -23,12 +23,15 @@ from app.api.routes.repo_bootstrap import bootstrap_repository
 from app.models import (
     ArtifactStatus,
     AuditLog,
+    CodingStandardCategory,
     Integration,
     IntegrationConnection,
     IntegrationProvider,
     IntegrationStatus,
     Project,
+    ProjectCodingStandard,
     ProjectEngineeringSetup,
+    ProjectGuardrail,
     Repository,
     User,
 )
@@ -122,6 +125,132 @@ def test_no_docs_section_when_nothing_is_approved_yet(db, project, actor):
     paths = {f.path for f in files}
     assert "docs/HLD.md" not in paths
     assert "docs/SOLUTION_DISCOVERY.md" not in paths
+
+
+def test_coding_standards_and_guardrails_are_carried_into_the_repo_as_a_readable_doc(db, project, actor):
+    setup = _setup(db, project, actor)
+    db.add(
+        ProjectCodingStandard(
+            setup_id=setup.id, title="Error Handling", content="Always return typed errors, never raw exceptions.",
+            category=CodingStandardCategory.ARCHITECTURE, order_index=0,
+        )
+    )
+    db.add(ProjectGuardrail(setup_id=setup.id, rule_text="Never touch payment code without human review.", order_index=0))
+    db.flush()
+    db.refresh(setup)
+
+    files = generate_scaffold_files(db, project=project, setup=setup)
+    by_path = {f.path: f.content for f in files}
+
+    assert "docs/CODING_STANDARDS.md" in by_path
+    assert "Error Handling" in by_path["docs/CODING_STANDARDS.md"]
+    assert "Always return typed errors, never raw exceptions." in by_path["docs/CODING_STANDARDS.md"]
+    assert "Never touch payment code without human review." in by_path["docs/CODING_STANDARDS.md"]
+    assert "docs/CODING_STANDARDS.md" in by_path["README.md"]  # README links to it
+
+
+def test_no_coding_standards_doc_when_nothing_is_configured(db, project, actor):
+    setup = _setup(db, project, actor)
+    files = generate_scaffold_files(db, project=project, setup=setup)
+    paths = {f.path for f in files}
+    assert "docs/CODING_STANDARDS.md" not in paths
+
+
+def test_root_workspace_package_json_present_for_frontend_scaffold(db, project, actor):
+    setup = _setup(db, project, actor, frontend="Next.js", backend="FastAPI")
+    files = generate_scaffold_files(db, project=project, setup=setup)
+    paths = {f.path for f in files}
+
+    assert "package.json" in paths  # workspace root — distinct from frontend/package.json
+    assert "frontend/package.json" in paths
+    root_pkg = next(f.content for f in files if f.path == "package.json")
+    assert '"workspaces"' in root_pkg
+    assert '"frontend"' in root_pkg
+    assert '"backend"' not in root_pkg  # FastAPI isn't a JS workspace member
+
+
+def test_no_root_workspace_package_json_for_backend_only_scaffold(db, project, actor):
+    setup = _setup(db, project, actor, backend="FastAPI")
+    files = generate_scaffold_files(db, project=project, setup=setup)
+    paths = {f.path for f in files}
+
+    assert "package.json" not in paths
+    assert "backend/requirements.txt" in paths
+
+
+# --- Express backend template (registry-based, added alongside FastAPI) -----------------
+
+
+def test_express_backend_gets_real_typescript_boilerplate_when_primary_language_says_so(db, project, actor):
+    setup = _setup(db, project, actor, primary_language="TypeScript", frontend="Next.js", backend="Node.js (Express)")
+    files = generate_scaffold_files(db, project=project, setup=setup)
+    paths = {f.path for f in files}
+
+    assert "backend/package.json" in paths
+    assert "backend/src/index.ts" in paths
+    assert "backend/tsconfig.json" in paths
+    assert "backend/.env.example" in paths
+    assert "src/.gitkeep" not in paths  # Express is a recognized stack now, not the generic fallback
+
+    package_json = next(f.content for f in files if f.path == "backend/package.json")
+    assert '"express"' in package_json
+    assert '"typescript"' in package_json
+
+
+def test_express_backend_gets_plain_javascript_when_primary_language_is_not_typescript(db, project, actor):
+    setup = _setup(db, project, actor, primary_language="JavaScript", backend="Express")
+    files = generate_scaffold_files(db, project=project, setup=setup)
+    paths = {f.path for f in files}
+
+    assert "backend/src/index.js" in paths
+    assert "backend/tsconfig.json" not in paths
+    assert "backend/src/index.ts" not in paths
+
+
+def test_express_backend_joins_the_root_npm_workspace_alongside_frontend(db, project, actor):
+    setup = _setup(db, project, actor, frontend="Next.js", backend="Express")
+    files = generate_scaffold_files(db, project=project, setup=setup)
+    by_path = {f.path: f.content for f in files}
+
+    assert "package.json" in by_path  # a real single workspace tying both together
+    assert '"frontend"' in by_path["package.json"]
+    assert '"backend"' in by_path["package.json"]
+    assert "frontend/` and `backend/`" in by_path["README.md"] or (
+        "frontend/" in by_path["README.md"] and "backend/" in by_path["README.md"]
+    )
+
+
+def test_express_only_backend_gitignore_gets_a_node_section_not_a_python_one(db, project, actor):
+    setup = _setup(db, project, actor, backend="Express")
+    files = generate_scaffold_files(db, project=project, setup=setup)
+    gitignore = next(f.content for f in files if f.path == ".gitignore")
+
+    assert "node_modules/" in gitignore
+    assert "__pycache__/" not in gitignore
+
+
+def test_generated_package_json_files_all_have_a_working_test_script(db, project, actor):
+    """Regression test for a real failure: app/services/code_runner.py runs
+    a project's configured "npm test" from the workspace root whenever a
+    root package.json exists (see _resolve_test_command_cwd there) — so
+    every package.json this module writes must define a real "test"
+    script, or a freshly bootstrapped repo's default Build/Test Commands
+    fail immediately with npm's "Missing script: test" before a human
+    ever touches the code."""
+    import json
+
+    setup = _setup(db, project, actor, frontend="Next.js", backend="Node.js (Express)", primary_language="TypeScript")
+    files = generate_scaffold_files(db, project=project, setup=setup)
+    by_path = {f.path: f.content for f in files}
+
+    root_pkg = json.loads(by_path["package.json"])
+    frontend_pkg = json.loads(by_path["frontend/package.json"])
+    backend_pkg = json.loads(by_path["backend/package.json"])
+
+    assert "test" in root_pkg["scripts"] and root_pkg["scripts"]["test"]
+    assert "--workspaces" in root_pkg["scripts"]["test"] and "--if-present" in root_pkg["scripts"]["test"]
+    assert "test" in frontend_pkg["scripts"] and frontend_pkg["scripts"]["test"]
+    assert "test" in backend_pkg["scripts"] and backend_pkg["scripts"]["test"]
 
 
 # --- push_scaffold -----------------------------------------------------------------------

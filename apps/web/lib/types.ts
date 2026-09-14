@@ -995,6 +995,16 @@ export interface RepositoryFileIndexItem {
   sha: string;
 }
 
+// A hand-edited file committed directly through the repository file editor
+// (see apps/api/app/api/routes/repository_file_edit.py) — always on a new
+// branch, never the repository's default branch.
+export interface CommitFileEditResult {
+  branchName: string;
+  baseBranch: string;
+  commitSha: string;
+  pullRequestUrl: string | null;
+}
+
 // Repo Context Builder preview — see apps/api/app/services/repo_context_builder.py.
 export interface RelevantFileItem {
   path: string;

@@ -97,6 +97,14 @@ _TEST_COMMAND_PROJECT_MARKERS: dict[str, tuple[str, ...]] = {
     "npm": ("package.json",),
     "yarn": ("package.json",),
     "pnpm": ("package.json",),
+    # "npx playwright test" / a locally-installed "playwright" CLI both
+    # need to run from the Playwright *project* root — its own
+    # playwright.config.*, or (a project with no config file of its own
+    # yet, e.g. relying entirely on defaults) the same package.json
+    # marker npm/yarn/pnpm already use, since Playwright is a JS/TS
+    # project's own dependency, always installed alongside one.
+    "npx": ("playwright.config.ts", "playwright.config.js", "package.json"),
+    "playwright": ("playwright.config.ts", "playwright.config.js", "package.json"),
     "pytest": ("pyproject.toml", "requirements.txt", "setup.cfg", "pytest.ini"),
     "go": ("go.mod",),
     "mvn": ("pom.xml",),

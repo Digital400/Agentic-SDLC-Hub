@@ -100,6 +100,61 @@ def _infer_area(text: str) -> str:
     return "BACKEND"  # a reasonable default — most breakdown items skew backend/API work
 
 
+# Which of a Story Implementation Plan's own sections (see
+# app/services/story_implementation_plan_agent.py's
+# STORY_IMPLEMENTATION_PLAN_SECTIONS — that exact heading text) implies a
+# real ImplementationTask for a story, and in what order those tasks
+# should run: DATABASE before BACKEND before FRONTEND, so a later area's
+# agent can build against the earlier area's already-committed code
+# (a migration exists before the API queries the column it added; the
+# API endpoint exists before the UI calls it). Only areas with a real
+# working coding agent today (see app/services/implementation_agent.py's
+# SUPPORTED_AREAS) are considered here — TESTING/INFRA/DOCS tasks aren't
+# generated from the plan by this function.
+_PLAN_SECTION_TO_AREA: tuple[tuple[str, ImplementationTaskArea], ...] = (
+    ("Database/Migration Tasks", ImplementationTaskArea.DATABASE),
+    ("Backend Tasks", ImplementationTaskArea.BACKEND),
+    ("Frontend Tasks", ImplementationTaskArea.FRONTEND),
+)
+
+# A section that just says "None"/"N/A"/etc. is the agent honestly
+# reporting "this area needs no work" (see that agent's own prompt) —
+# not a real task to create. Matched against the section's full stripped
+# content (lowercased), not a substring, so a genuine one-line task that
+# happens to contain the word "none" is never mistaken for an empty one.
+_EMPTY_PLAN_SECTION_MARKERS = {
+    "none", "n/a", "na", "not applicable", "not needed", "not required",
+    "no changes needed", "no changes required", "no backend changes needed",
+    "no frontend changes needed", "no database changes needed", "-",
+}
+
+
+def _plan_section_has_real_work(content: str | None) -> bool:
+    if not content:
+        return False
+    stripped = content.strip().strip("-*•.! \n\t")
+    return bool(stripped) and stripped.lower() not in _EMPTY_PLAN_SECTION_MARKERS
+
+
+def infer_story_task_areas(plan_markdown: str) -> list[ImplementationTaskArea]:
+    """Full-stack-per-story: rather than guessing a single area for the
+    whole story (the old _infer_area heuristic, now only a fallback — see
+    its caller), read what the story's own, already-approved
+    Implementation Plan actually says is needed per area and generate one
+    ImplementationTask per area with real content, in DATABASE -> BACKEND
+    -> FRONTEND order. Returns an empty list if the plan has no
+    identifiable section content at all (e.g. it doesn't follow the
+    expected heading structure) — the caller falls back to the
+    single-heuristic-task behavior in that case, never leaving a story
+    with zero tasks."""
+    areas = []
+    for heading, area in _PLAN_SECTION_TO_AREA:
+        section = find_section(plan_markdown, heading)
+        if section is not None and _plan_section_has_real_work(section.get("content")):
+            areas.append(area)
+    return areas
+
+
 def _extract_bullet_lines(section_content: str) -> list[str]:
     lines: list[str] = []
     for raw_line in section_content.splitlines():

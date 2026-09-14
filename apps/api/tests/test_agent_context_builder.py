@@ -86,7 +86,14 @@ def test_story_crafting_includes_jira_and_documentation_but_not_stack(db, projec
     assert result.snapshot["documentation_target"] == "CONFLUENCE"
 
 
-def test_implementation_includes_repo_config_and_commands_but_not_stack(db, project, actor):
+def test_implementation_includes_repo_config_commands_and_the_technology_stack(db, project, actor):
+    """The real coding agent (app/services/implementation_agent.py) is the
+    one thing in this codebase actually writing file content — it must
+    know the project's configured language/framework, or it guesses (a
+    real bug: it produced a mix of .js and .ts files for a TypeScript-
+    only backend because this context used to withhold the stack from
+    "implementation", on the theory that only GitHub/build-command
+    specifics were relevant here). Includes both now."""
     setup = _setup(db, project, actor)
     db.add(
         ProjectRepositoryConfig(
@@ -104,10 +111,31 @@ def test_implementation_includes_repo_config_and_commands_but_not_stack(db, proj
     assert "npm run build" in result.context_text
     assert "npm test" in result.context_text
     assert "Code Runner Restrictions" in result.context_text
-    assert "TypeScript" not in result.context_text
+    assert "TypeScript" in result.context_text
+    assert "FastAPI" in result.context_text
     assert result.snapshot["repository_config"]["target_branch"] == "develop"
     assert result.snapshot["command_config"]["build_command"] == "npm run build"
+    assert result.snapshot["technology_stack"]["primary_language"] == "TypeScript"
     assert "code_runner_allowed_executables" in result.snapshot
+
+
+def test_implementation_with_no_stack_configured_omits_the_section_cleanly(db, project, actor):
+    """A project engineering setup with only repo/command config and no
+    technology-stack fields set shouldn't get an empty or malformed
+    Technology Stack section — `_stack_lines` returning nothing means the
+    whole section is skipped, same as `_hld_sections` already does."""
+    setup = _setup(
+        db, project, actor,
+        primary_language="", frontend_framework=None, backend_framework=None, database=None, cloud_provider=None,
+        application_type="",
+    )
+    db.add(ProjectRepositoryConfig(setup_id=setup.id, option=GithubSetupOption.CONNECT_EXISTING_REPO, target_branch="main"))
+    db.flush()
+
+    result = build_engineering_setup_context(db, project=project, agent_type="implementation")
+
+    assert "Technology Stack" not in result.context_text
+    assert "technology_stack" not in result.snapshot
 
 
 def test_coding_standards_are_grouped_by_category(db, project, actor):

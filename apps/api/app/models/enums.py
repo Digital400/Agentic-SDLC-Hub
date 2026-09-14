@@ -162,6 +162,10 @@ class KnowledgeSourceType(str, enum.Enum):
     PROJECT_ARTIFACT = "PROJECT_ARTIFACT"
     UPLOADED_DOCUMENT = "UPLOADED_DOCUMENT"
     EXTERNAL_LINK = "EXTERNAL_LINK"
+    # A human pasted this content directly (e.g. the Create Project
+    # wizard's Knowledge Base step) — not uploaded as a file, not a
+    # link, not derived from a project artifact.
+    MANUAL_ENTRY = "MANUAL_ENTRY"
 
 
 class IntegrationProvider(str, enum.Enum):

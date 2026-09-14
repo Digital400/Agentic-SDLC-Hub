@@ -166,6 +166,10 @@ def retrieve_relevant_chunks(
         # Stage-aware retrieval (see module docstring): eligible when the
         # chunk is stage-agnostic (null) or tagged for this exact stage.
         .filter((KnowledgeChunk.stage.is_(None)) | (KnowledgeChunk.stage == node.node_key))
+        # Project-scoped retrieval (see KnowledgeSource.project_id):
+        # eligible when the source is org-wide (null) or scoped to
+        # exactly this run's project — never another project's.
+        .filter((KnowledgeSource.project_id.is_(None)) | (KnowledgeSource.project_id == project.id))
     )
     if content_types:
         query = query.filter(KnowledgeChunk.content_type.in_(content_types))

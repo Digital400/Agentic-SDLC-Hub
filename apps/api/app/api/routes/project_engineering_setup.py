@@ -32,8 +32,10 @@ from app.schemas.project_engineering_setup import (
     EngineeringSetupRead,
     LinkJiraProjectRequest,
     LinkRepositoryRequest,
+    UpdateEngineeringSetupRequest,
 )
 from app.services.audit import record_audit_log
+from app.services.permissions import require_can_update_project
 
 router = APIRouter(prefix="/projects/{project_id}/engineering-setup", tags=["project-engineering-setup"])
 
@@ -141,6 +143,102 @@ def get_engineering_setup(project_id: uuid.UUID, db: Session = Depends(get_db)) 
     _get_project_or_404(db, project_id)
     setup = _get_setup_with_relations(db, project_id)
     return EngineeringSetupRead.from_orm_setup(setup) if setup is not None else None
+
+
+@router.patch("", response_model=EngineeringSetupRead)
+def update_engineering_setup(
+    project_id: uuid.UUID, payload: UpdateEngineeringSetupRequest, db: Session = Depends(get_db)
+) -> EngineeringSetupRead:
+    """Edits an already-created setup — every section optional, only the
+    ones actually given are changed. See UpdateEngineeringSetupRequest's
+    own docstring for why coding_standards/guardrails are a full-list
+    replace and why repository/jira here never touch the real connected
+    repository/Jira project."""
+    _get_project_or_404(db, project_id)
+    actor = db.get(User, payload.updated_by_id)
+    if actor is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"updated_by_id {payload.updated_by_id} does not match an existing user")
+    require_can_update_project(actor)
+
+    setup = db.query(ProjectEngineeringSetup).filter(ProjectEngineeringSetup.project_id == project_id).first()
+    if setup is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Project {project_id} has no engineering setup yet — use POST to create one.")
+
+    changes: dict[str, object] = {}
+
+    if payload.technology_stack is not None:
+        for field in ("application_type", "primary_language", "frontend_framework", "backend_framework", "database", "cloud_provider"):
+            new_value = getattr(payload.technology_stack, field)
+            old_value = getattr(setup, field)
+            if new_value != old_value:
+                changes[field] = {"from": old_value, "to": new_value}
+                setattr(setup, field, new_value)
+
+    if payload.repository is not None and setup.repository_config is not None:
+        rc, r = setup.repository_config, payload.repository
+        for field, new_value in (
+            ("option", r.option), ("new_repo_name", r.new_repo_name),
+            ("branch_naming_pattern", r.branch_naming_pattern), ("target_branch", r.target_branch),
+        ):
+            old_value = getattr(rc, field)
+            if new_value != old_value:
+                changes[f"repository.{field}"] = {
+                    "from": old_value.value if hasattr(old_value, "value") else old_value,
+                    "to": new_value.value if hasattr(new_value, "value") else new_value,
+                }
+                setattr(rc, field, new_value)
+
+    if payload.jira is not None and setup.jira_config is not None:
+        if payload.jira.option != setup.jira_config.option:
+            changes["jira.option"] = {"from": setup.jira_config.option.value, "to": payload.jira.option.value}
+            setup.jira_config.option = payload.jira.option
+
+    if payload.coding_standards is not None:
+        changes["coding_standards"] = {"from": len(setup.coding_standards), "to": len(payload.coding_standards)}
+        for existing in list(setup.coding_standards):
+            db.delete(existing)
+        db.flush()
+        for index, standard in enumerate(payload.coding_standards):
+            db.add(
+                ProjectCodingStandard(
+                    setup_id=setup.id, title=standard.title, content=standard.content, category=standard.category, order_index=index
+                )
+            )
+
+    if payload.guardrails is not None:
+        changes["guardrails"] = {"from": len(setup.guardrails), "to": len(payload.guardrails)}
+        for existing in list(setup.guardrails):
+            db.delete(existing)
+        db.flush()
+        for index, guardrail in enumerate(payload.guardrails):
+            db.add(ProjectGuardrail(setup_id=setup.id, rule_text=guardrail.rule_text, order_index=index))
+
+    if payload.documentation is not None and setup.documentation_config is not None:
+        if payload.documentation.target != setup.documentation_config.target:
+            changes["documentation.target"] = {"from": setup.documentation_config.target.value, "to": payload.documentation.target.value}
+            setup.documentation_config.target = payload.documentation.target
+
+    if payload.commands is not None and setup.command_config is not None:
+        cc, c = setup.command_config, payload.commands
+        for field, new_value in (
+            ("build_command", c.build_command), ("test_commands", c.test_commands), ("lint_command", c.lint_command),
+        ):
+            old_value = getattr(cc, field)
+            if new_value != old_value:
+                changes[f"commands.{field}"] = {"from": old_value, "to": new_value}
+                setattr(cc, field, new_value)
+
+    db.flush()
+
+    if changes:
+        record_audit_log(
+            db, project_id=project_id, actor_user_id=actor.id, action="project_engineering_setup.updated",
+            entity_type="ProjectEngineeringSetup", entity_id=setup.id, extra_data=changes,
+        )
+
+    db.commit()
+    setup = _get_setup_with_relations(db, project_id)
+    return EngineeringSetupRead.from_orm_setup(setup)
 
 
 @router.post("/link-repository", response_model=EngineeringSetupRead)

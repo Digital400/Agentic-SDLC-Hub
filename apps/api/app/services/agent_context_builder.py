@@ -21,9 +21,17 @@ everyone"):
   - "story_crafting"  — Jira configuration, documentation rules, story
                         format rules (i.e. coding standards generally —
                         this stage has no stack-specific need).
-  - "implementation"  — GitHub repository config (branch naming pattern,
-                        PR target branch), build/test commands, code
-                        runner restrictions.
+  - "implementation"  — technology stack (same as "hld" — a real coding
+                        agent proposing file content has to match the
+                        project's configured language/framework exactly,
+                        not guess file extensions; this used to be
+                        withheld here on the theory that "implementation"
+                        only needed GitHub/build-command specifics, but in
+                        practice that left the one agent actually writing
+                        code with zero grounding in what language to
+                        write it in), GitHub repository config (branch
+                        naming pattern, PR target branch), build/test
+                        commands, code runner restrictions.
   - anything else ("generic") — no stack/GitHub/Jira specifics; still
                         gets coding standards + guardrails, since those
                         are genuinely useful to any drafting agent.
@@ -151,27 +159,39 @@ def _coding_standards_and_guardrails_sections(setup: ProjectEngineeringSetup, sn
     return sections
 
 
-def _hld_sections(setup: ProjectEngineeringSetup, snapshot: dict[str, Any]) -> list[str]:
-    stack_lines = []
+def _stack_lines(setup: ProjectEngineeringSetup) -> list[str]:
+    """Shared by `_hld_sections` and `_implementation_sections` — both need
+    the exact same technology-stack facts; only the heading/framing text
+    around them differs per agent type (see each caller)."""
+    lines = []
     if setup.application_type:
-        stack_lines.append(f"Application type: {setup.application_type}")
+        lines.append(f"Application type: {setup.application_type}")
     if setup.primary_language:
-        stack_lines.append(f"Primary language: {setup.primary_language}")
+        lines.append(f"Primary language: {setup.primary_language}")
     if setup.frontend_framework:
-        stack_lines.append(f"Frontend framework: {setup.frontend_framework}")
+        lines.append(f"Frontend framework: {setup.frontend_framework}")
     if setup.backend_framework:
-        stack_lines.append(f"Backend framework: {setup.backend_framework}")
+        lines.append(f"Backend framework: {setup.backend_framework}")
     if setup.database:
-        stack_lines.append(f"Database: {setup.database}")
+        lines.append(f"Database: {setup.database}")
     if setup.cloud_provider:
-        stack_lines.append(f"Cloud provider: {setup.cloud_provider}")
-    if not stack_lines:
-        return []
-    snapshot["technology_stack"] = {
+        lines.append(f"Cloud provider: {setup.cloud_provider}")
+    return lines
+
+
+def _stack_snapshot(setup: ProjectEngineeringSetup) -> dict[str, str | None]:
+    return {
         "application_type": setup.application_type, "primary_language": setup.primary_language,
         "frontend_framework": setup.frontend_framework, "backend_framework": setup.backend_framework,
         "database": setup.database, "cloud_provider": setup.cloud_provider,
     }
+
+
+def _hld_sections(setup: ProjectEngineeringSetup, snapshot: dict[str, Any]) -> list[str]:
+    stack_lines = _stack_lines(setup)
+    if not stack_lines:
+        return []
+    snapshot["technology_stack"] = _stack_snapshot(setup)
     return ["## Technology Stack — use this, don't invent a different one\n" + "\n".join(f"- {l}" for l in stack_lines)]
 
 
@@ -198,6 +218,15 @@ def _story_crafting_sections(setup: ProjectEngineeringSetup, snapshot: dict[str,
 
 def _implementation_sections(setup: ProjectEngineeringSetup, snapshot: dict[str, Any]) -> list[str]:
     sections: list[str] = []
+    stack_lines = _stack_lines(setup)
+    if stack_lines:
+        snapshot["technology_stack"] = _stack_snapshot(setup)
+        sections.append(
+            "## Technology Stack — every file you create or modify MUST match this exactly: same language, same "
+            "file extensions (e.g. .ts/.tsx, not .js/.jsx, when Primary language is TypeScript), and the same "
+            "framework/library conventions. Never introduce a different language, runtime, or framework than what's "
+            "configured here, even for a brand-new file\n" + "\n".join(f"- {l}" for l in stack_lines)
+        )
     if setup.repository_config is not None:
         rc = setup.repository_config
         sections.append(

@@ -80,6 +80,14 @@ PROMPT_UPDATE_ROLES: set[UserRole] = set()  # inferred default: Admin only (via 
 # reasoning as prompt updates.
 WORKFLOW_NODE_OVERRIDE_ROLES: set[UserRole] = set()
 
+# Committing a hand-edited file straight to a connected repository (see
+# app/api/routes/repository_file_edit.py) is the same domain as
+# "implementation" — writing code — so it borrows that stage's edit
+# roles rather than inventing a new, unspecified policy. Not itself tied
+# to any one workflow stage (a fix can land at any point in a project's
+# life), so it gets a flat role set like PROJECT_UPDATE_ROLES above.
+REPOSITORY_FILE_EDIT_ROLES: set[UserRole] = STAGE_EDIT_ROLES["implementation"]
+
 
 def _require_role(user: User, allowed_roles: set[UserRole], action: str) -> None:
     """ADMIN always passes — see UserRole's docstring. VIEWER never appears
@@ -117,3 +125,11 @@ def require_can_update_prompt(user: User) -> None:
 
 def require_can_override_node(user: User) -> None:
     _require_role(user, WORKFLOW_NODE_OVERRIDE_ROLES, "manually override a workflow node's status")
+
+
+def require_can_edit_repository_file(user: User) -> None:
+    """Commit a hand-edited file directly to a connected repository (see
+    app/api/routes/repository_file_edit.py) — bypasses the normal
+    AI-agent-diff review flow, so it's gated the same as writing code
+    directly."""
+    _require_role(user, REPOSITORY_FILE_EDIT_ROLES, "commit a file edit directly to a connected repository")
