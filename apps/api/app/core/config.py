@@ -217,6 +217,18 @@ class Settings(BaseSettings):
     # any real OpenCode session can run. Defaults False.
     OPENCODE_RUNTIME_ENABLED: bool = False
 
+    # Phase 10's strangler flag: gates POST /implementation-runs/{id}/
+    # create-pull-request-v2 (app/services/story_git_pr_flow.py) — a real,
+    # additive alternative to create_pull_request's existing one-commit-
+    # per-file GitHub Contents API writes, using the Git Data API instead
+    # for one real atomic commit, plus an idempotent "update the existing
+    # open PR" check create_pull_request doesn't have. The existing
+    # endpoint is completely untouched and stays the default regardless of
+    # this flag. Defaults False until the v2 path has real usage evidence
+    # (Phase 18's own evaluation/canary-rollout requirement) to retire the
+    # old path on.
+    STORY_GIT_PR_FLOW_V2_ENABLED: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
