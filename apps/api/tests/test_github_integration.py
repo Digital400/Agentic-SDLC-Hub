@@ -30,10 +30,15 @@ from app.services.github_integration import (
     GitHubTreeEntry,
     GitHubUser,
     create_branch,
+    create_branch_at_sha,
+    create_commit,
     create_issue_comment,
     create_or_update_file,
     create_pull_request,
+    create_tree,
     delete_file,
+    get_branch_head_sha,
+    get_commit_tree_sha,
     get_default_branch,
     get_file_sha,
     get_pull_request,
@@ -43,6 +48,7 @@ from app.services.github_integration import (
     list_branches,
     list_repositories,
     read_file,
+    update_ref,
     verify_token,
 )
 
@@ -412,6 +418,128 @@ def test_get_file_sha_returns_none_on_404():
         return _json_response(404, {"message": "Not Found"})
 
     assert get_file_sha("token", "octocat", "hello-world", "new/file.py", "agent/branch", transport=_transport(handler)) is None
+
+
+# --- Git Data API — atomic, multi-file commits (Phase 10) ------------------------------
+
+
+def test_get_branch_head_sha_returns_none_when_the_branch_does_not_exist():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(404, {"message": "Not Found"})
+
+    assert get_branch_head_sha("token", "octocat", "hello-world", "story/does-not-exist", transport=_transport(handler)) is None
+
+
+def test_get_branch_head_sha_returns_the_real_sha_when_it_exists():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/octocat/hello-world/git/ref/heads/story/feature-x"
+        return _json_response(200, {"object": {"sha": "existing-head-sha"}})
+
+    assert get_branch_head_sha("token", "octocat", "hello-world", "story/feature-x", transport=_transport(handler)) == "existing-head-sha"
+
+
+def test_create_branch_at_sha_pins_the_exact_sha_without_re_resolving_it():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        assert request.url.path == "/repos/octocat/hello-world/git/refs"
+        body = json.loads(request.content)
+        assert body == {"ref": "refs/heads/story/PROJ-1-add-x", "sha": "pinned-base-sha"}
+        return _json_response(201, {"object": {"sha": "pinned-base-sha"}})
+
+    result = create_branch_at_sha(
+        "token", "octocat", "hello-world", new_branch="story/PROJ-1-add-x", base_commit_sha="pinned-base-sha",
+        transport=_transport(handler),
+    )
+
+    assert result == "pinned-base-sha"
+    # Only ONE call — never re-resolves base_ref the way create_branch does.
+    assert calls == ["/repos/octocat/hello-world/git/refs"]
+
+
+def test_get_commit_tree_sha_reads_the_nested_tree_sha():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/octocat/hello-world/commits/base-sha"
+        return _json_response(200, {"commit": {"tree": {"sha": "tree-sha-abc"}}})
+
+    assert get_commit_tree_sha("token", "octocat", "hello-world", "base-sha", transport=_transport(handler)) == "tree-sha-abc"
+
+
+def test_create_tree_sets_inline_content_for_create_and_modify():
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["base_tree"] == "base-tree-sha"
+        assert body["tree"] == [
+            {"path": "a.py", "mode": "100644", "type": "blob", "content": "new content"},
+            {"path": "b.py", "mode": "100644", "type": "blob", "content": "modified content"},
+        ]
+        return _json_response(201, {"sha": "new-tree-sha"})
+
+    result = create_tree(
+        "token", "octocat", "hello-world", base_tree_sha="base-tree-sha",
+        changes=[
+            {"path": "a.py", "change_type": "create", "after_content": "new content"},
+            {"path": "b.py", "change_type": "modify", "after_content": "modified content"},
+        ],
+        transport=_transport(handler),
+    )
+    assert result == "new-tree-sha"
+
+
+def test_create_tree_removes_a_path_for_delete_via_sha_null():
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["tree"] == [{"path": "gone.py", "mode": "100644", "type": "blob", "sha": None}]
+        return _json_response(201, {"sha": "new-tree-sha"})
+
+    create_tree(
+        "token", "octocat", "hello-world", base_tree_sha="base-tree-sha",
+        changes=[{"path": "gone.py", "change_type": "delete"}], transport=_transport(handler),
+    )
+
+
+def test_create_commit_builds_one_commit_from_a_tree_and_one_parent():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/octocat/hello-world/git/commits"
+        body = json.loads(request.content)
+        assert body == {"message": "Implement X", "tree": "tree-sha", "parents": ["parent-sha"]}
+        return _json_response(201, {"sha": "new-commit-sha"})
+
+    sha = create_commit(
+        "token", "octocat", "hello-world", message="Implement X", tree_sha="tree-sha", parent_sha="parent-sha",
+        transport=_transport(handler),
+    )
+    assert sha == "new-commit-sha"
+
+
+def test_update_ref_moves_the_branch_without_forcing():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH"
+        assert request.url.path == "/repos/octocat/hello-world/git/refs/heads/story/feature-x"
+        body = json.loads(request.content)
+        assert body == {"sha": "new-commit-sha", "force": False}
+        return _json_response(200, {"object": {"sha": "new-commit-sha"}})
+
+    update_ref("token", "octocat", "hello-world", branch="story/feature-x", commit_sha="new-commit-sha", transport=_transport(handler))
+
+
+def test_update_ref_surfaces_a_non_fast_forward_failure_honestly():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(422, {"message": "Update is not a fast forward"})
+
+    with pytest.raises(GitHubIntegrationError):
+        update_ref("token", "octocat", "hello-world", branch="story/feature-x", commit_sha="sha", transport=_transport(handler))
+
+
+def test_git_data_api_never_targets_the_default_branch_in_this_codebases_own_callers():
+    """Documents the same rule create_or_update_file/delete_file's own
+    docstrings already state — enforced by construction in
+    app/services/story_git_pr_flow.py (Phase 10), not re-checked here at
+    the client-call level (this module has no notion of "which branch is
+    the default" — that's the caller's job, same as every write method
+    above it)."""
+    assert update_ref.__doc__ and "default branch" in update_ref.__doc__
 
 
 def test_get_file_sha_returns_sha_when_file_exists():

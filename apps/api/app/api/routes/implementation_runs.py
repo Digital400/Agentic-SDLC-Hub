@@ -58,6 +58,7 @@ from app.services.implementation_agent import SUPPORTED_AREAS, run_implementatio
 from app.services.permissions import require_can_edit_stage
 from app.services.repo_context_builder import RepoContextBuilderService
 from app.services.retrieval import retrieve_relevant_chunks
+from app.services import story_git_pr_flow
 from app.services.story_export import Story as StoryDataclass
 from app.services.story_export import find_related_story
 from app.services.story_lld_agent import STORY_LLD_ARTIFACT_TYPE
@@ -548,6 +549,94 @@ def create_pull_request(
         },
     )
 
+    db.commit()
+    db.refresh(run)
+    db.refresh(link)
+    return ImplementationRunRead.from_orm_run(run, pull_request=link)
+
+
+@router.post("/{run_id}/create-pull-request-v2", response_model=ImplementationRunRead, status_code=status.HTTP_201_CREATED)
+def create_pull_request_v2(run_id: uuid.UUID, payload: CreatePullRequestRequest, db: Session = Depends(get_db)) -> ImplementationRunRead:
+    """Phase 10: the real, additive alternative to create_pull_request
+    above — see app/services/story_git_pr_flow.py's module docstring for
+    exactly what's different (one atomic Git Data API commit instead of
+    one Contents-API commit per file; an idempotent "update the existing
+    open PR" check create_pull_request has never had). Gated behind
+    Settings.STORY_GIT_PR_FLOW_V2_ENABLED (default False) — the endpoint
+    above is completely unaffected either way and remains the default.
+
+    Every precondition below is IDENTICAL to create_pull_request's own —
+    this is a different WRITE STRATEGY for an already-Accepted run, not a
+    different set of rules about when a PR may be created at all."""
+    if not get_settings().STORY_GIT_PR_FLOW_V2_ENABLED:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The v2 story git/PR flow is not enabled for this deployment.")
+
+    run = _get_run_or_404(db, run_id)
+    task = db.get(ImplementationTask, run.implementation_task_id)
+    if task is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Run {run_id}'s implementation task no longer exists.")
+    project = db.get(Project, run.project_id)
+    if project is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Run {run_id}'s project no longer exists.")
+
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+
+    implementation_node = (
+        db.query(WorkflowNode)
+        .filter(WorkflowNode.project_id == project.id, WorkflowNode.node_key == "implementation", WorkflowNode.story_id == task.story_id)
+        .first()
+    )
+    if implementation_node is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Project {project.id}'s workflow has no implementation stage.")
+    require_can_edit_stage(triggered_by, implementation_node.node_key)
+
+    if run.status != ImplementationRunStatus.COMPLETED or run.review_status != ImplementationRunReviewStatus.ACCEPTED:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Run {run_id} must be COMPLETED and ACCEPTED before a pull request can be created "
+            f"(currently status={run.status.value}, review_status={run.review_status.value}).",
+        )
+
+    repository = db.query(Repository).filter(Repository.project_id == project.id).order_by(Repository.created_at.desc()).first()
+    if repository is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Cannot create a pull request — no GitHub repository is configured.")
+
+    try:
+        github_token = decrypt_repository_token(repository)
+    except HTTPException as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Cannot create a pull request — " + str(exc.detail)) from exc
+
+    base_branch = payload.base_branch or repository.default_branch
+    if not base_branch:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No base_branch given and this repository has no known default branch.")
+
+    story = db.get(Story, task.story_id) if task.story_id is not None else None
+    project_key = _derive_project_key(project.name)
+    pr_title = f"[{project_key}] {task.title}"[:255]
+
+    try:
+        link = story_git_pr_flow.run_story_git_pr_flow(
+            db, run=run, task=task, story=story, repository=repository, base_branch=base_branch, github_token=github_token,
+            triggered_by_user_id=triggered_by.id, pr_title=pr_title, pr_body=_pr_body(project=project, task=task, run=run),
+        )
+    except story_git_pr_flow.StoryGitPrFlowError as exc:
+        record_audit_log(
+            db, project_id=project.id, actor_user_id=triggered_by.id, action="implementation_run.pr_creation_v2_failed",
+            entity_type="ImplementationRun", entity_id=run.id, extra_data={"error": str(exc)},
+        )
+        db.commit()
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+    record_audit_log(
+        db, project_id=project.id, actor_user_id=triggered_by.id, action="implementation_run.pr_created_v2",
+        entity_type="PullRequestLink", entity_id=link.id,
+        extra_data={
+            "owner": repository.owner, "name": repository.name, "branch_name": link.branch_name,
+            "base_branch": link.base_branch, "pr_number": link.pr_number, "pr_url": link.pr_url,
+        },
+    )
     db.commit()
     db.refresh(run)
     db.refresh(link)

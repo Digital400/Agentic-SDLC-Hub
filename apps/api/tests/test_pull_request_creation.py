@@ -139,15 +139,62 @@ def _mock_github(monkeypatch, *, record_calls: list | None = None):
         calls.append(("delete_file", path, branch, sha))
         return "commit-sha"
 
+    # Starts at 7 (this file's own established convention/expectation) and
+    # increments per call — a test creating more than one real PR within
+    # one _mock_github invocation (e.g. a second PR after the first was
+    # merged) must see a genuinely different number, not the same "7"
+    # every time.
+    pr_counter = {"n": 6}
+
     def _create_pull_request(token, owner, repo, *, title, head, base, body, **kwargs):
+        pr_counter["n"] += 1
         calls.append(("create_pull_request", title, head, base))
-        return github_api.GitHubPullRequest(number=7, html_url="https://github.com/octocat/hello-world/pull/7", state="open")
+        n = pr_counter["n"]
+        return github_api.GitHubPullRequest(number=n, html_url=f"https://github.com/octocat/hello-world/pull/{n}", state="open")
+
+    # --- Git Data API (Phase 10 / app/services/story_git_pr_flow.py) ---------------
+    # A tiny in-memory branch-head registry so the v2 flow's idempotency
+    # check (get_branch_head_sha) sees a real, consistent head across a
+    # test's own create_branch_at_sha -> create_commit -> update_ref
+    # sequence, and across a second, regenerated call onto the same branch.
+    branch_heads: dict[str, str] = {}
+
+    def _get_branch_head_sha(token, owner, repo, branch, **kwargs):
+        calls.append(("get_branch_head_sha", branch))
+        return branch_heads.get(branch)
+
+    def _create_branch_at_sha(token, owner, repo, *, new_branch, base_commit_sha, **kwargs):
+        calls.append(("create_branch_at_sha", new_branch, base_commit_sha))
+        branch_heads[new_branch] = base_commit_sha
+        return base_commit_sha
+
+    def _get_commit_tree_sha(token, owner, repo, commit_sha, **kwargs):
+        calls.append(("get_commit_tree_sha", commit_sha))
+        return f"tree-of-{commit_sha}"
+
+    def _create_tree(token, owner, repo, *, base_tree_sha, changes, **kwargs):
+        calls.append(("create_tree", base_tree_sha, len(changes)))
+        return f"new-tree-from-{base_tree_sha}"
+
+    def _create_commit(token, owner, repo, *, message, tree_sha, parent_sha, **kwargs):
+        calls.append(("create_commit", tree_sha, parent_sha))
+        return f"commit-on-{tree_sha}"
+
+    def _update_ref(token, owner, repo, *, branch, commit_sha, **kwargs):
+        calls.append(("update_ref", branch, commit_sha))
+        branch_heads[branch] = commit_sha
 
     monkeypatch.setattr(routes_module.github_api, "create_branch", _create_branch)
     monkeypatch.setattr(routes_module.github_api, "get_file_sha", _get_file_sha)
     monkeypatch.setattr(routes_module.github_api, "create_or_update_file", _create_or_update_file)
     monkeypatch.setattr(routes_module.github_api, "delete_file", _delete_file)
     monkeypatch.setattr(routes_module.github_api, "create_pull_request", _create_pull_request)
+    monkeypatch.setattr(routes_module.github_api, "get_branch_head_sha", _get_branch_head_sha)
+    monkeypatch.setattr(routes_module.github_api, "create_branch_at_sha", _create_branch_at_sha)
+    monkeypatch.setattr(routes_module.github_api, "get_commit_tree_sha", _get_commit_tree_sha)
+    monkeypatch.setattr(routes_module.github_api, "create_tree", _create_tree)
+    monkeypatch.setattr(routes_module.github_api, "create_commit", _create_commit)
+    monkeypatch.setattr(routes_module.github_api, "update_ref", _update_ref)
     return calls
 
 

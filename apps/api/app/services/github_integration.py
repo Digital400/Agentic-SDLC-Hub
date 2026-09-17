@@ -375,6 +375,137 @@ def delete_file(
     return data["commit"]["sha"]
 
 
+# --- Git Data API — atomic, multi-file commits (Phase 10) --------------------------
+#
+# create_or_update_file/delete_file above are GitHub's Contents API — one
+# REST call per file, each producing its own commit (disclosed as a known
+# simplification in this module's own docstring). Phase 10's "never
+# create one GitHub commit per changed file" requirement is what the four
+# functions below exist to satisfy: build one tree containing every
+# changed file, one commit for that tree, then move the branch ref to
+# point at it — a single, real, atomic commit no matter how many files
+# changed.
+
+
+def get_branch_head_sha(
+    token: str, owner: str, repo: str, branch: str, *, transport: httpx.BaseTransport | None = None
+) -> str | None:
+    """The branch's current commit sha, or None if the branch doesn't
+    exist yet — the idempotency check Phase 10's "detect an existing
+    branch/PR before creating duplicates" requirement needs: a caller
+    checks this before create_branch_at_sha, and pushes onto the existing
+    branch (via create_commit/update_ref) instead of creating a new one
+    when it's already there."""
+    try:
+        data = _request("GET", f"/repos/{owner}/{repo}/git/ref/heads/{branch}", token=token, transport=transport).json()
+    except GitHubIntegrationError as exc:
+        if exc.status_code == 404:
+            return None
+        raise
+    return data["object"]["sha"]
+
+
+def create_branch_at_sha(
+    token: str, owner: str, repo: str, *, new_branch: str, base_commit_sha: str, transport: httpx.BaseTransport | None = None
+) -> str:
+    """Creates `new_branch` pinned at the EXACT `base_commit_sha` given —
+    unlike create_branch (which re-resolves `base_ref` to whatever it
+    currently points at), this never re-reads the base ref, closing the
+    snapshot-time-vs-branch-creation-time gap Phase 10's "clone the
+    configured base SHA" requirement is about: a WorkPacket's
+    RepositoryReference.base_commit_sha was pinned when this run's repo
+    snapshot was taken, and that specific commit — not whatever the base
+    branch has since moved to — is what the new branch must fork from.
+    Returns `base_commit_sha` unchanged, for symmetry with create_branch's
+    own return shape."""
+    _request(
+        "POST", f"/repos/{owner}/{repo}/git/refs", token=token,
+        json_body={"ref": f"refs/heads/{new_branch}", "sha": base_commit_sha}, transport=transport,
+    )
+    return base_commit_sha
+
+
+def get_commit_tree_sha(
+    token: str, owner: str, repo: str, commit_sha: str, *, transport: httpx.BaseTransport | None = None
+) -> str:
+    """The top-level tree sha for a real commit — what create_tree's
+    `base_tree_sha` argument needs (the tree every changed file's new
+    tree is built on top of, so every unrelated path is carried through
+    unchanged)."""
+    data = _request("GET", f"/repos/{owner}/{repo}/commits/{commit_sha}", token=token, transport=transport).json()
+    return data["commit"]["tree"]["sha"]
+
+
+def create_tree(
+    token: str,
+    owner: str,
+    repo: str,
+    *,
+    base_tree_sha: str,
+    changes: list[dict],
+    transport: httpx.BaseTransport | None = None,
+) -> str:
+    """POST .../git/trees — one tree containing every changed file, built
+    on top of `base_tree_sha` (every path not named in `changes` is
+    carried through unchanged). `changes` is the same shape this
+    codebase's proposed-file-changes already use elsewhere:
+    [{"path", "change_type", "after_content"}, ...] — `change_type ==
+    "delete"` removes the path from the tree (GitHub's own `sha: null`
+    convention); every other change_type sets inline text content
+    directly (`content`), never a separately-created blob object, since
+    GitHub's tree API accepts inline content for exactly this case.
+    Returns the new tree's sha."""
+    tree_entries = []
+    for change in changes:
+        entry: dict = {"path": change["path"], "mode": "100644", "type": "blob"}
+        if change.get("change_type") == "delete":
+            entry["sha"] = None
+        else:
+            entry["content"] = change.get("after_content") or ""
+        tree_entries.append(entry)
+    data = _request(
+        "POST", f"/repos/{owner}/{repo}/git/trees", token=token,
+        json_body={"base_tree": base_tree_sha, "tree": tree_entries}, transport=transport,
+    ).json()
+    return data["sha"]
+
+
+def create_commit(
+    token: str,
+    owner: str,
+    repo: str,
+    *,
+    message: str,
+    tree_sha: str,
+    parent_sha: str,
+    transport: httpx.BaseTransport | None = None,
+) -> str:
+    """POST .../git/commits — one real commit object, `tree_sha` as its
+    tree and `parent_sha` as its sole parent. Returns the new commit's
+    sha. Does not move any ref by itself — see update_ref."""
+    data = _request(
+        "POST", f"/repos/{owner}/{repo}/git/commits", token=token,
+        json_body={"message": message, "tree": tree_sha, "parents": [parent_sha]}, transport=transport,
+    ).json()
+    return data["sha"]
+
+
+def update_ref(
+    token: str, owner: str, repo: str, *, branch: str, commit_sha: str, transport: httpx.BaseTransport | None = None
+) -> None:
+    """PATCH .../git/refs/heads/{branch} — moves `branch` to point at
+    `commit_sha`. Never called by this codebase against a repository's
+    default branch — same rule as create_or_update_file/delete_file above
+    (see module docstring). `force=False`: this only ever fast-forwards a
+    branch this codebase itself created and is the sole writer of; a
+    non-fast-forward failure here is a real, surfaced error, not silently
+    forced past."""
+    _request(
+        "PATCH", f"/repos/{owner}/{repo}/git/refs/heads/{branch}", token=token,
+        json_body={"sha": commit_sha, "force": False}, transport=transport,
+    )
+
+
 def create_pull_request(
     token: str,
     owner: str,
