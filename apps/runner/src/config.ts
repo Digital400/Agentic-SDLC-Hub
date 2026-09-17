@@ -16,6 +16,10 @@ export interface RunnerConfig {
   workspaceRoot: string;
   /** Hard wall-clock ceiling (seconds) applied even if a WorkPacket's own BudgetPolicy.max_wall_clock_seconds is absent or larger. */
   maxWallClockSecondsHardCeiling: number;
+  /** Phase 11's own master switch — "keep ACP disabled by default until security review." Independent of openCodeRuntimeEnabled: a deployment can run one, both, or neither. Defaults false. */
+  acpRuntimeEnabled: boolean;
+  /** JSON array of admin-approved ACP agents — see security/acp-registry.ts's parseApprovedAcpAgents. The ONLY source of an ACP executable path this runner ever uses; never present means no ACP agent is approved, not "allow anything." */
+  acpApprovedAgentsJson: string | undefined;
 }
 
 function envFlag(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
@@ -32,5 +36,7 @@ export function loadRunnerConfig(env: NodeJS.ProcessEnv = process.env): RunnerCo
     modelGatewayApiKey: env.MODEL_GATEWAY_API_KEY,
     workspaceRoot: env.RUNNER_WORKSPACE_ROOT ?? "/tmp/opencode-runner-workspaces",
     maxWallClockSecondsHardCeiling: Number(env.RUNNER_MAX_WALL_CLOCK_SECONDS_HARD_CEILING ?? "1800"),
+    acpRuntimeEnabled: envFlag(env, "ACP_RUNTIME_ENABLED", false),
+    acpApprovedAgentsJson: env.ACP_APPROVED_AGENTS_JSON,
   };
 }
