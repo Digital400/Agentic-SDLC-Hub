@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.routes.github_integration import decrypt_repository_token
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.models import (
     ImplementationRun,
@@ -51,6 +52,7 @@ from app.schemas.implementation_run import (
 from app.services.audit import record_audit_log
 from app.services import github_integration as github_api
 from app.services.github_integration import GitHubIntegrationError
+from app.services.execution_profile_service import CodingRuntimeBlockedError, require_active_profile_for_runtime_start
 from app.services.graph_engine import GraphEngineService
 from app.services.implementation_agent import SUPPORTED_AREAS, run_implementation_agent
 from app.services.permissions import require_can_edit_stage
@@ -244,6 +246,21 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
             f"No {task.area.value} Implementation Agent is available yet — only "
             f"{', '.join(sorted(a.value for a in SUPPORTED_AREAS))} are implemented.",
         )
+
+    # Phase 03 gate — "a coding runtime cannot start without an approved
+    # active profile." The Implementation Agent is this codebase's closest
+    # existing thing to a "coding runtime start" (see
+    # docs/architecture/universal-agent-runtime-baseline.md section 7).
+    # Behind a feature flag (default False, see Settings.
+    # REQUIRE_EXECUTION_PROFILE_FOR_CODING_RUNTIME) so this is a strangler
+    # migration — no existing project/task is blocked by this new
+    # precondition until the flag is explicitly turned on for a deployment
+    # that has actually adopted ProjectExecutionProfile.
+    if get_settings().REQUIRE_EXECUTION_PROFILE_FOR_CODING_RUNTIME:
+        try:
+            require_active_profile_for_runtime_start(db, project.id)
+        except CodingRuntimeBlockedError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, exc.reason) from exc
 
     # Requirement 1, gate 3 — a GitHub repo snapshot exists. Not an
     # artifact type, so not part of required_inputs; resolved the same way

@@ -1,0 +1,81 @@
+{
+  "additionalProperties": false,
+  "description": "Actual resource consumption for one ExecutionResult \u2014 the same\nshape BudgetPolicy caps, so a caller can directly compare usage against\nbudget field-by-field. Mirrors AgentRun's token_usage/cost/\nestimated_context_tokens fields (Phase 00 baseline section 5), but\nprovider-neutral: no field here is specific to any one of the five\nproviders ai_generation.py currently supports.",
+  "properties": {
+    "completion_tokens": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Completion Tokens",
+      "type": "integer"
+    },
+    "cost_usd": {
+      "default": 0.0,
+      "description": "0.0 is a valid, meaningful value (e.g. a free-tier provider) \u2014 not a sentinel for 'unknown'. A resolver that cannot determine cost should omit this field's producer from schema-version-compatible output entirely rather than guess 0.0 as a stand-in for unknown, per this phase's 'never fabricate' principle.",
+      "minimum": 0,
+      "title": "Cost Usd",
+      "type": "number"
+    },
+    "distinct_tools_used": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Distinct Tools Used",
+      "type": "array"
+    },
+    "extensions": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+      "title": "Extensions",
+      "type": "object"
+    },
+    "llm_calls_made": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Llm Calls Made",
+      "type": "integer"
+    },
+    "prompt_tokens": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Prompt Tokens",
+      "type": "integer"
+    },
+    "repair_attempts_used": {
+      "default": 0,
+      "description": "Mirrors AgentRun.loop_iteration / LoopResult.iterations_run \u2014 how many improve/repair passes this execution actually took, comparable against BudgetPolicy.max_repair_attempts.",
+      "minimum": 0,
+      "title": "Repair Attempts Used",
+      "type": "integer"
+    },
+    "tool_calls_made": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Tool Calls Made",
+      "type": "integer"
+    },
+    "total_tokens": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Total Tokens",
+      "type": "integer"
+    },
+    "wall_clock_seconds": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Wall Clock Seconds"
+    }
+  },
+  "title": "UsageEvidence",
+  "type": "object"
+}

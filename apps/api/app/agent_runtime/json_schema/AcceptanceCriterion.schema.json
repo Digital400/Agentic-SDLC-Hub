@@ -1,0 +1,36 @@
+{
+  "additionalProperties": false,
+  "description": "One checkable condition a completed WorkPacket is expected to\nsatisfy \u2014 mirrors ImplementationTask.acceptance_criteria, promoted to\na structured type here so RequiredCheck/TestEvidence can reference a\nspecific criterion by id rather than re-matching free text.",
+  "properties": {
+    "description": {
+      "minLength": 1,
+      "title": "Description",
+      "type": "string"
+    },
+    "id": {
+      "description": "Stable within one WorkPacket \u2014 e.g. 'AC-1'. Referenced by TestEvidence.criterion_id.",
+      "minLength": 1,
+      "title": "Id",
+      "type": "string"
+    },
+    "verification_method": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Free-text hint for how this should be checked, e.g. 'unit test' or 'manual QA' \u2014 advisory only, not enforced by this contract.",
+      "title": "Verification Method"
+    }
+  },
+  "required": [
+    "id",
+    "description"
+  ],
+  "title": "AcceptanceCriterion",
+  "type": "object"
+}

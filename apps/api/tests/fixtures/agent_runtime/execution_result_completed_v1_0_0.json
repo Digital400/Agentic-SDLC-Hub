@@ -1,0 +1,56 @@
+{
+  "clarification": null,
+  "commands": [
+    {
+      "command": "cd apps/api && pytest -q",
+      "duration_seconds": null,
+      "exit_code": null,
+      "extensions": {},
+      "real_execution": false,
+      "stderr_excerpt": null,
+      "stdout_excerpt": "REDACTED \u2014 reasoning-based assessment, not a real run."
+    }
+  ],
+  "completed_at": "2026-01-15T12:00:00Z",
+  "extensions": {},
+  "failure": null,
+  "file_changes": [
+    {
+      "change_type": "modify",
+      "content_ref": null,
+      "diff": "REDACTED unified diff.",
+      "extensions": {},
+      "path": "apps/api/app/services/REDACTED.py",
+      "summary": "REDACTED change summary."
+    }
+  ],
+  "packet_id": "11111111-1111-4111-8111-111111111111",
+  "result_id": "66666666-6666-4666-8666-666666666666",
+  "schema_version": "1.0.0",
+  "started_at": "2026-01-15T12:00:00Z",
+  "state": "COMPLETED",
+  "summary": "REDACTED short outcome summary.",
+  "test_evidence": [
+    {
+      "criterion_id": "AC-1",
+      "duration_seconds": null,
+      "extensions": {},
+      "name": "test_redacted_example",
+      "notes": "REDACTED reasoning-based assessment.",
+      "real_execution": false,
+      "result": "PASS"
+    }
+  ],
+  "usage": {
+    "completion_tokens": 400,
+    "cost_usd": 0.02,
+    "distinct_tools_used": [],
+    "extensions": {},
+    "llm_calls_made": 1,
+    "prompt_tokens": 1200,
+    "repair_attempts_used": 0,
+    "tool_calls_made": 0,
+    "total_tokens": 1600,
+    "wall_clock_seconds": null
+  }
+}

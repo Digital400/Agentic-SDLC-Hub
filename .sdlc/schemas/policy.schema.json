@@ -1,0 +1,62 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "applies_to": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Applies To",
+      "type": "array"
+    },
+    "description": {
+      "minLength": 1,
+      "title": "Description",
+      "type": "string"
+    },
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "policy_key": {
+      "minLength": 1,
+      "title": "Policy Key",
+      "type": "string"
+    },
+    "rules": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Rules",
+      "type": "array"
+    },
+    "severity": {
+      "default": "BLOCKING",
+      "description": "BLOCKING or ADVISORY \u2014 see enums.CheckSeverity's docstring in app/agent_runtime/enums.py for the same distinction applied elsewhere in this codebase.",
+      "title": "Severity",
+      "type": "string"
+    },
+    "source_path": {
+      "default": "",
+      "title": "Source Path",
+      "type": "string"
+    },
+    "version": {
+      "minLength": 1,
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "policy_key",
+    "name",
+    "version",
+    "description",
+    "applies_to",
+    "rules"
+  ],
+  "title": "Policy",
+  "type": "object"
+}

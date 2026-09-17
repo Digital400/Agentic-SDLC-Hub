@@ -21,6 +21,10 @@ from sqlalchemy.pool import StaticPool
 
 from app.models import (
     AgentDefinition,
+    AgentJob,
+    AgentJobEvent,
+    AgentJobOutboxEntry,
+    RuntimeRoleAssignment,
     AgentPrompt,
     AgentRun,
     AgentRunLoopEvent,
@@ -34,6 +38,7 @@ from app.models import (
     ImplementationTaskRiskLevel,
     ImplementationTaskStatus,
     Integration,
+    ProjectExecutionProfile,
     PullRequestLink,
     TestRun,
     PRReviewRun,
@@ -107,6 +112,11 @@ TEST_TABLES = [
     Repository.__table__,
     RepositorySnapshot.__table__,
     RepositoryFileIndex.__table__,
+    ProjectExecutionProfile.__table__,
+    AgentJob.__table__,
+    AgentJobEvent.__table__,
+    AgentJobOutboxEntry.__table__,
+    RuntimeRoleAssignment.__table__,
 ]
 
 

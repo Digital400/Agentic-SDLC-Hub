@@ -1,0 +1,118 @@
+{
+  "additionalProperties": false,
+  "description": "Every resource ceiling a WorkPacket's execution must respect \u2014 the\n\"maximum cost, time, calls, tools and repair attempts\" this phase's\ninstructions require. All fields are optional (None = \"no explicit\nceiling from this packet\"); a resolver applying this packet is expected\nto fall back to its own platform-wide default when a field is None,\nnever to treat None as \"unlimited\" silently \u2014 that interpretation is a\nresolver policy decision, deliberately left outside this schema.\n\n`max_repair_attempts` mirrors app/services/loop_engine.py's\nDEFAULT_MAX_ITERATIONS (currently 3, hardcoded with no per-stage\noverride \u2014 see the Phase 00 baseline section 6.2 and section 12 item 4)\n\u2014 this field is exactly the seam that gap would be closed through.",
+  "properties": {
+    "max_context_tokens": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional override of the context-window budget a resolver should apply \u2014 mirrors WorkflowNode.context_token_budget (Phase 00 baseline section 3.3).",
+      "title": "Max Context Tokens"
+    },
+    "max_cost_usd": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Cost Usd"
+    },
+    "max_distinct_tools": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Maximum number of DISTINCT tools (by name) that may be invoked \u2014 narrower than ToolPolicy.allowed_tools, which only says which tools are permitted at all.",
+      "title": "Max Distinct Tools"
+    },
+    "max_llm_calls": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Maximum number of distinct model/completion calls, across every step of a run (mirrors summing across LoopEngineService iterations \u2014 Phase 00 baseline section 5).",
+      "title": "Max Llm Calls"
+    },
+    "max_output_tokens": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Mirrors WorkflowNode.output_token_budget.",
+      "title": "Max Output Tokens"
+    },
+    "max_repair_attempts": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Maximum number of improve/repair iterations after the first attempt \u2014 0 means 'no repair, first attempt only.' Mirrors LoopEngineService's max_iterations.",
+      "title": "Max Repair Attempts"
+    },
+    "max_tool_calls": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Maximum number of tool/action invocations total, regardless of how many distinct tools are used.",
+      "title": "Max Tool Calls"
+    },
+    "max_wall_clock_seconds": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Wall Clock Seconds"
+    }
+  },
+  "title": "BudgetPolicy",
+  "type": "object"
+}

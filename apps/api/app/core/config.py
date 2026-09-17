@@ -1,13 +1,26 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # apps/api/app/core/config.py -> repo root is four levels up.
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 class Settings(BaseSettings):
+    # extra="ignore" — pydantic-settings' own default is "forbid", which
+    # made this crash unconditionally (ValidationError at import time,
+    # taking every route/test module down with it) the moment `.env` held
+    # any var this class doesn't declare a field for — e.g. a provider key
+    # for a branch/feature not present here. A settings class reading a
+    # shared local .env across branches/environments should tolerate that,
+    # not hard-fail the whole app over one line it doesn't recognize.
+    # (Consolidated with what used to be a separate, legacy `class Config:
+    # env_file = ".env"` below — Pydantic v2 refuses to have both a
+    # `Config` inner class and `model_config` defined on the same model.)
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
     PROJECT_NAME: str = "Agentic SDLC Hub API"
     ENVIRONMENT: str = "local"
 
@@ -93,8 +106,116 @@ class Settings(BaseSettings):
     # encrypted under the dev-only key is only as safe as this repo itself.
     GITHUB_TOKEN_ENCRYPTION_KEY: str | None = None
 
-    class Config:
-        env_file = ".env"
+    # Phase 03 strangler-migration flag — see
+    # app/services/execution_profile_service.py's
+    # require_active_profile_for_runtime_start and
+    # app/api/routes/implementation_runs.py's start_implementation_run.
+    # Defaults to False so every existing project (seeded or real, none of
+    # which has a ProjectExecutionProfile yet) keeps starting Implementation
+    # Agent runs exactly as it always has — flip to True only once the
+    # ProjectExecutionProfile propose/approve flow has been evaluated for a
+    # given deployment and every active project has an approved profile.
+    REQUIRE_EXECUTION_PROFILE_FOR_CODING_RUNTIME: bool = False
+
+    # Phase 05 strangler-migration flag — see app/model_gateway/__init__.py
+    # and app/services/ai_generation.py's generate()/generate_raw_text().
+    # Defaults to "legacy" so every existing call keeps going through the
+    # exact, unmodified provider-priority logic that already exists in
+    # ai_generation.py (get_active_provider, _generate_with_*) — nothing
+    # about the default request path changes. Set to "gateway" only once
+    # the new ModelGateway/ModelPolicy/model-alias architecture has been
+    # evaluated for a given deployment.
+    MODEL_GATEWAY_MODE: Literal["legacy", "gateway"] = "legacy"
+    # Which concrete ModelGateway adapter backs the "gateway" mode above —
+    # irrelevant while MODEL_GATEWAY_MODE is "legacy". "fake" is the safe
+    # default (never makes a network call) so an operator must explicitly
+    # opt into a real backend, not fall into one by omission.
+    MODEL_GATEWAY_BACKEND: Literal["litellm_proxy", "openrouter", "ollama", "fake"] = "fake"
+    LITELLM_PROXY_BASE_URL: str = "http://localhost:4000"
+    LITELLM_PROXY_API_KEY: str | None = None
+    # How long a cached provider-health result stays valid — see
+    # app/model_gateway/health.py's ProviderHealthCache. This is exactly
+    # the mechanism that removes a live connectivity check from every
+    # single request's hot path in the new gateway architecture.
+    MODEL_GATEWAY_HEALTH_CACHE_TTL_SECONDS: float = 30.0
+
+    # Phase 06 strangler-migration flag — see
+    # app/services/agent_jobs/__init__.py. Defaults to "inline": every
+    # AgentJob runs synchronously, in-process, inside the request that
+    # submitted it (see InlineJobDispatcher) — this IS today's existing
+    # synchronous agent-run behavior, now reachable through the new
+    # AgentJob interface without changing what actually happens. Set to
+    # "celery" only once a real Celery worker + Redis broker have been
+    # provisioned for a given deployment.
+    AGENT_JOB_DISPATCHER_MODE: Literal["inline", "celery"] = "inline"
+    # Irrelevant while AGENT_JOB_DISPATCHER_MODE is "inline". No default
+    # pointing at a real Redis instance — an operator must set this
+    # explicitly before "celery" mode can even construct a client (see
+    # app/services/agent_jobs/celery_dispatcher.py).
+    CELERY_BROKER_URL: str | None = None
+    CELERY_RESULT_BACKEND_URL: str | None = None
+    # How long a job may go without a heartbeat while
+    # PREPARING/RUNNING before app/services/agent_jobs/job_service.py's
+    # find_stale_jobs considers it STALE.
+    AGENT_JOB_STALE_THRESHOLD_SECONDS: float = 300.0
+
+    # --- Phase 07: runtime security / credential broker -----------------------------
+    #
+    # OIDC — see app/runtime_security/oidc_provider.py. Both OIDC_ISSUER
+    # and OIDC_AUDIENCE must be set together for OIDCIdentityProvider to
+    # construct at all (fails fast, not per-request — see that module).
+    OIDC_ISSUER: str | None = None
+    OIDC_AUDIENCE: str | None = None
+    OIDC_JWKS_URI: str | None = None  # optional override; defaults to '{issuer}/.well-known/jwks.json'
+    # Corporate Microsoft Entra ID — see app/runtime_security/entra_id.py.
+    # A thin preset over the OIDC settings above; set these INSTEAD OF
+    # OIDC_ISSUER/OIDC_AUDIENCE when the identity provider is Entra ID.
+    ENTRA_TENANT_ID: str | None = None
+    ENTRA_CLIENT_ID: str | None = None
+    # Local-development identity adapter — see
+    # app/runtime_security/local_dev_provider.py's own module docstring
+    # for the two-flag gate this is one half of (ENVIRONMENT=="local" is
+    # the other, checked at construction time). Defaults False so a
+    # misconfigured ENVIRONMENT value alone can never enable this path.
+    ALLOW_LOCAL_DEV_AUTH: bool = False
+    # Strangler-migration flag for server-side identity derivation on the
+    # routes that have adopted app/runtime_security/dependencies.py's
+    # get_current_actor — see that module's own docstring. Defaults False
+    # so every existing route's actor-id-in-request-body contract (Phase
+    # 00 baseline section 10) is completely unaffected until a deployment
+    # explicitly opts in per-route.
+    REQUIRE_SERVER_SIDE_IDENTITY: bool = False
+
+    # GitHub App — see app/runtime_security/credential_broker.py's
+    # preference for short-lived installation tokens over the long-lived
+    # PAT app/services/github_integration.py already supports (Phase 00
+    # baseline). All three must be set for the broker to attempt an App
+    # token exchange; otherwise it falls back to the existing PAT path.
+    GITHUB_APP_ID: str | None = None
+    GITHUB_APP_PRIVATE_KEY: str | None = None
+    GITHUB_APP_INSTALLATION_ID: str | None = None
+
+    # THE master switch this phase's "Keep all external coding runtimes
+    # disabled until this security gate passes" requirement compiles down
+    # to — see app/runtime_security/security_gate.py. Defaults False:
+    # Settings.AGENT_JOB_DISPATCHER_MODE="celery" (Phase 06) is refused at
+    # construction time unless this is also explicitly True AND the
+    # security gate's own self-check passes.
+    EXTERNAL_CODING_RUNTIMES_ENABLED: bool = False
+
+    # Registers the OpenCode company-managed sandbox (apps/runner,
+    # OpenCodeRuntimeAdapter — Phase 08) as an AVAILABLE runtime. Deliberately
+    # a separate flag from EXTERNAL_CODING_RUNTIMES_ENABLED: that flag is
+    # this codebase's existing security gate for the Phase 06/07
+    # Celery-dispatched execution path (app/runtime_security/security_gate.py);
+    # this one is apps/runner's own, independent feature flag (mirrored
+    # verbatim as OPENCODE_RUNTIME_ENABLED in apps/runner/src/config.py),
+    # since apps/runner is a standalone TypeScript service this Python
+    # process does not import or execute — enabling one does not enable
+    # the other. Both must be true, plus RUNNER_SHARED_SIGNING_SECRET and
+    # MODEL_GATEWAY_BASE_URL configured on apps/runner's own side, before
+    # any real OpenCode session can run. Defaults False.
+    OPENCODE_RUNTIME_ENABLED: bool = False
 
 
 @lru_cache

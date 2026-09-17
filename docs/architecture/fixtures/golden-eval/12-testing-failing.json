@@ -1,0 +1,23 @@
+{
+  "scenario": "Failing tests",
+  "code_path": [
+    "POST /test-runs — same route/gate as fixture 11",
+    "testing_agent.py — either the heuristic path (deterministic, exercised below) or the real-AI path returning result='FAIL' entries"
+  ],
+  "expected_heuristic_path_deterministic": {
+    "trigger": "diff_text contains the literal substring 'TODO(implementation-agent)' — the heuristic Implementation Agent's own scaffold marker (testing_agent.py:118-123)",
+    "tests_executed": "[] always — the heuristic path never fabricates ANY result, pass or fail (testing_agent.py:128)",
+    "bugs_found": ["'The diff contains an implementation-agent TODO scaffold, not working code — acceptance criteria cannot actually be verified yet.'"],
+    "suggested_fixes": ["'Replace the TODO scaffold with a real implementation before testing can produce a real result.'"],
+    "pass_count": 0,
+    "fail_count": 0,
+    "used_mock": true,
+    "honesty_note": "This is the codebase's actual behavior for 'the implementation is still a TODO scaffold' — it reports zero tests, not zero-passed/some-failed, because it has no execution capability to run anything against."
+  },
+  "expected_real_ai_path_with_genuine_failures": {
+    "precondition": "requires a REAL provider response — the deterministic path above cannot produce non-empty FAIL entries by construction",
+    "tests_executed_item_shape": { "name": "string", "result": "FAIL", "notes": "must explain this is a reasoning-based assessment (system-prompt instruction)" },
+    "downstream_effect": "TestRun.fail_count > 0 flows into pr_review_runs.py's _latest_test_summary() as a critical signal — the heuristic PR-review path treats test_fail_count > 0 as an automatic critical_finding forcing overall_recommendation=REQUEST_CHANGES (pr_review_agent.py:97-110)",
+    "actual_failure_reasons": "UNKNOWN — depends on the live model's assessment of the specific diff; not fabricated here"
+  }
+}

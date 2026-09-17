@@ -1,0 +1,14 @@
+policy_key: data-handling
+name: Data Handling Policy
+version: "1.0.0"
+description: >
+  How this project's data_classification (see ProjectExecutionProfile)
+  constrains what a skill may propose — a RESTRICTED/CONFIDENTIAL project
+  needs a stricter default than a PUBLIC one.
+applies_to:
+  - ALL
+severity: BLOCKING
+rules:
+  - "Never propose sending project data to a network destination not explicitly allow-listed in the active ProjectExecutionProfile's network_policy."
+  - "For a project classified CONFIDENTIAL or RESTRICTED, never propose logging full request/response bodies — reference shapes/field names only."
+  - "Never include real customer data, real credentials, or real personal data in an example, log excerpt, or explanation — use clearly labeled placeholder data instead."

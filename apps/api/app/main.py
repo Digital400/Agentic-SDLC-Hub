@@ -5,9 +5,11 @@ from sqlalchemy.exc import IntegrityError
 
 from app.api.routes import (
     agent_definitions,
+    agent_jobs,
     agent_runs,
     artifacts,
     confluence_integration,
+    execution_profiles,
     github_integration,
     health,
     implementation_runs,
@@ -74,3 +76,5 @@ app.include_router(sprints.router)
 app.include_router(ops.router)
 app.include_router(users.router)
 app.include_router(validators.router)
+app.include_router(execution_profiles.router)
+app.include_router(agent_jobs.router)

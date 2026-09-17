@@ -1,0 +1,44 @@
+{
+  "additionalProperties": false,
+  "description": "What a task is, and is not, allowed to touch \u2014 file-path scope only\nin Phase 01 (no code-symbol-level scoping yet). `denied_paths` is\nintended to always win over `allowed_paths` on overlap, matching the\nfail-closed posture the rest of this codebase already uses for\nsecurity-relevant checks (e.g. app/core/security.py's token handling)\n\u2014 this contract carries that DATA; per hard rule 5, no resolver/\nenforcement logic exists in this package yet to actually apply it.\n\nGlob syntax (`fnmatch`-style, e.g. `apps/api/app/services/**`) is the\nexpected pattern shape; this contract does not itself validate glob\nsyntax \u2014 that's a resolver-time concern, not a schema concern.",
+  "properties": {
+    "allowed_paths": {
+      "description": "Glob patterns this task may create/modify/delete. Empty list means 'no explicit allow-list' \u2014 a resolver should treat that as deny-by-default unless deny_by_default is explicitly set False.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Allowed Paths",
+      "type": "array"
+    },
+    "denied_paths": {
+      "description": "Glob patterns this task may never touch, regardless of allowed_paths. Always wins on overlap.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Denied Paths",
+      "type": "array"
+    },
+    "deny_by_default": {
+      "default": true,
+      "description": "When true (default), a path matching neither list is denied \u2014 fail-closed. When false, an unmatched path is allowed (only denied_paths is enforced).",
+      "title": "Deny By Default",
+      "type": "boolean"
+    },
+    "max_files_changed": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional cap on distinct file paths touched, independent of BudgetPolicy's cost/time caps.",
+      "title": "Max Files Changed"
+    }
+  },
+  "title": "ScopePolicy",
+  "type": "object"
+}

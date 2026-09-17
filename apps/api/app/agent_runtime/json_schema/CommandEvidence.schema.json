@@ -1,0 +1,83 @@
+{
+  "additionalProperties": false,
+  "description": "One command a resolver ran (or reasoned about) while executing a\ntask \u2014 e.g. a test command, a lint command. See module docstring's\nHONESTY RULE for `real_execution`.",
+  "properties": {
+    "command": {
+      "minLength": 1,
+      "title": "Command",
+      "type": "string"
+    },
+    "duration_seconds": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Duration Seconds"
+    },
+    "exit_code": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Exit Code"
+    },
+    "extensions": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+      "title": "Extensions",
+      "type": "object"
+    },
+    "real_execution": {
+      "description": "True only if this command was actually run in a real sandbox/CI environment. False for a reasoning-based assessment \u2014 see module docstring.",
+      "title": "Real Execution",
+      "type": "boolean"
+    },
+    "stderr_excerpt": {
+      "anyOf": [
+        {
+          "maxLength": 8000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Stderr Excerpt"
+    },
+    "stdout_excerpt": {
+      "anyOf": [
+        {
+          "maxLength": 8000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Bounded \u2014 never the full raw log. Must never contain a secret; see test_no_contract_field_is_secret_shaped.",
+      "title": "Stdout Excerpt"
+    }
+  },
+  "required": [
+    "command",
+    "real_execution"
+  ],
+  "title": "CommandEvidence",
+  "type": "object"
+}

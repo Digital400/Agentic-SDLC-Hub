@@ -1,0 +1,18 @@
+schema_version: "1.0.0"
+name: Agentic SDLC Hub
+description: >
+  Canonical prompt/policy/skill compiler root for this repository. See
+  apps/api/app/prompt_compiler for PromptCompiler, the code that reads
+  this tree, and docs/architecture/universal-agent-runtime-baseline.md
+  for the existing (still authoritative, unchanged) AgentPrompt system
+  this compiler is an additive, not-yet-connected alternative to.
+skills_dir: skills
+policies_dir: policies
+schemas_dir: schemas
+generated_dir: generated
+default_policies:
+  - security-baseline
+  - data-handling
+compiler:
+  default_max_context_tokens: 8000
+  default_max_output_tokens: 2048

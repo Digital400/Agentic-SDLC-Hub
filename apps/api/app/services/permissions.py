@@ -73,6 +73,13 @@ STAGE_APPROVE_ROLES: dict[str, set[UserRole]] = {
 # by the product request — inferred defaults, see module docstring.
 PROJECT_UPDATE_ROLES: set[UserRole] = {UserRole.PRODUCT_OWNER}  # inferred default
 PROMPT_UPDATE_ROLES: set[UserRole] = set()  # inferred default: Admin only (via the bypass below)
+# "Project Owner approval" (Phase 03's ProjectExecutionProfile requirement)
+# — this codebase has no distinct PROJECT_OWNER role (see UserRole);
+# PRODUCT_OWNER is the existing role that already owns every other
+# project-level approval (PROJECT_UPDATE_ROLES above), so it's reused here
+# rather than introducing a second, overlapping role — same
+# inferred-default reasoning as every other row in this module.
+EXECUTION_PROFILE_APPROVE_ROLES: set[UserRole] = {UserRole.PRODUCT_OWNER}  # inferred default: "Project Owner" == PRODUCT_OWNER
 # A manual override bypasses every graph rule (see
 # app/services/graph_engine.py) — Admin only, same inferred-default
 # reasoning as prompt updates.
@@ -111,6 +118,12 @@ def require_can_update_project(user: User) -> None:
 
 def require_can_update_prompt(user: User) -> None:
     _require_role(user, PROMPT_UPDATE_ROLES, "update agent prompts")
+
+
+def require_can_approve_execution_profile(user: User) -> None:
+    """Approve or reject a ProjectExecutionProfile version — see
+    app/services/execution_profile_service.py."""
+    _require_role(user, EXECUTION_PROFILE_APPROVE_ROLES, "approve a project execution profile")
 
 
 def require_can_override_node(user: User) -> None:

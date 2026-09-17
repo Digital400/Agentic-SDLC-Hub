@@ -1,0 +1,48 @@
+{
+  "additionalProperties": false,
+  "description": "Mirrors ai_generation.py's needs_clarification/\nclarification_questions contract (Phase 00 baseline section 6.1),\ngeneralized to every task_type rather than just the Markdown\ndraft/clarification response format.",
+  "properties": {
+    "blocking": {
+      "default": true,
+      "description": "True (the default, and the only behavior the current codebase implements \u2014 Phase 00 baseline section 6.1) means execution cannot proceed until answered.",
+      "title": "Blocking",
+      "type": "boolean"
+    },
+    "context": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional free-text explaining why clarification is needed, beyond the questions themselves.",
+      "title": "Context"
+    },
+    "extensions": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+      "title": "Extensions",
+      "type": "object"
+    },
+    "questions": {
+      "description": "At least one question \u2014 an empty ClarificationRequest is not meaningful.",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Questions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "questions"
+  ],
+  "title": "ClarificationRequest",
+  "type": "object"
+}

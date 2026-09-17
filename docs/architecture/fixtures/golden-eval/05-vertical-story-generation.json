@@ -1,0 +1,31 @@
+{
+  "scenario": "Vertical story generation",
+  "code_path": [
+    "story_crafting agent prompt (RICH_DEFAULT_PROMPTS['story_crafting'] in apps/api/app/db/seed.py — content not opened in this pass)",
+    "story block includes '**Mode:** VERTICAL'",
+    "story_export.parse_story_backlog (apps/api/app/services/story_export.py) parses story.mode == 'VERTICAL'",
+    "POST /stories/sync-from-backlog -> stories.py:sync_stories_from_backlog",
+    "StoryType.VERTICAL persisted on the real Story row (apps/api/app/models/enums.py:364-372)"
+  ],
+  "definition": "VERTICAL: end-to-end user-value stories (the existing default shape) — apps/api/app/models/enums.py:367-368",
+  "input_story_block_redacted": {
+    "title": "REDACTED — e.g. 'Add password reset endpoint'",
+    "epic": "REDACTED",
+    "feature": "REDACTED",
+    "mode": "VERTICAL",
+    "user_story": "As a REDACTED role, I want REDACTED capability, so that REDACTED value.",
+    "acceptance_criteria": ["REDACTED criterion 1", "REDACTED criterion 2"],
+    "suggested_owner_role": "DEVELOPER",
+    "technical_areas_involved": ["Backend", "Database"],
+    "story_points_estimate": "5"
+  },
+  "expected": {
+    "parsed_story_mode": "VERTICAL",
+    "sync_request": { "story_type": "VERTICAL" },
+    "persisted_story_fields": {
+      "suggested_owner_role": "DEVELOPER (agent-stated value preferred over the keyword-heuristic fallback — apps/api/tests/test_story_crafting_vertical_horizontal.py:74-89)",
+      "story_points": "5 (only set when the estimate parses as a plain integer; 'M (medium)' or similar leaves story_points=None for a human to fill in — same test file, line 92-105)"
+    },
+    "test_coverage_confirmed": "apps/api/tests/test_story_crafting_vertical_horizontal.py — 4 of its tests directly exercise this VERTICAL path; all passing at time of this baseline (406/406 suite-wide)."
+  }
+}

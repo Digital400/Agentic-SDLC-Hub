@@ -39,5 +39,18 @@ xhtml2pdf==0.2.16
 # app/services/document_ingestion.py) — .txt/.md files are read directly;
 # this covers .pdf uploads. Pure Python, no native deps.
 pypdf==5.1.0
+# Production background-worker adapter for durable AgentJob execution —
+# see app/services/agent_jobs/celery_dispatcher.py. Only ever imported
+# when Settings.AGENT_JOB_DISPATCHER_MODE="celery" is explicitly selected
+# (default "inline" never imports either package) — see
+# app/services/agent_jobs/__init__.py's own strangler-migration note.
+celery==5.4.0
+redis==5.0.8
+# OIDC bearer-token verification (Entra ID / any standards-compliant IdP)
+# and GitHub App installation-token JWT signing — see
+# app/runtime_security/oidc_provider.py and credential_broker.py. Uses the
+# `cryptography` backend already a dependency above, no separate crypto
+# library added.
+PyJWT==2.9.0
 # Test-only dependency — apps/api/tests/.
 pytest==8.3.3

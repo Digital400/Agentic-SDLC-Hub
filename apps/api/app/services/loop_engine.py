@@ -85,7 +85,12 @@ class LoopResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
-    cost: float = 0.0
+    # float on the (default) legacy generation path, unchanged. None only
+    # if generate() ever returns an unknown cost (Phase 05's gateway path,
+    # off by default — see app/services/ai_generation.py's
+    # AgentGenerationResult.cost) — a single unknown-cost iteration makes
+    # the whole loop's total cost unknown too, never silently partial.
+    cost: float | None = 0.0
     used_mock: bool = False
     # Token Budget Service (see app/services/token_budget.py) — summed
     # across every generate() call this loop made, mirroring how
@@ -213,7 +218,11 @@ class LoopEngineService:
             content = result.content_markdown
             total_prompt_tokens += result.prompt_tokens
             total_completion_tokens += result.completion_tokens
-            total_cost += result.cost
+            # An unknown-cost iteration (result.cost is None — only
+            # possible via the Phase 05 gateway path) makes the whole
+            # loop's running total unknown too, rather than silently
+            # summing only the known iterations as if that were complete.
+            total_cost = None if (total_cost is None or result.cost is None) else total_cost + result.cost
             total_estimated_context_tokens += result.estimated_context_tokens
             latest_token_budget_report = result.token_budget_report
             used_mock = used_mock or result.used_mock

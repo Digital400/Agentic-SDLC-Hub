@@ -1,0 +1,22 @@
+{
+  "scenario": "Stale PR review",
+  "confirmed_gap": "NO STALENESS DETECTION EXISTS IN THIS CODEBASE. This fixture documents the current (gap) behavior precisely, rather than fabricating a staleness-detection feature that does not exist. Verified by: (1) a full-repository grep for 'stale'/'Stale' turning up no PR-review-related hits (only unrelated docstring mentions of stale cache/client-preview/repo-snapshot elsewhere); (2) direct inspection of pr_review_agent.py and pr_review_runs.py finding no comparison of PR HEAD SHA, commit count, or diff content against any prior PRReviewRun.",
+  "code_path": [
+    "POST /pr-review-runs (apps/api/app/api/routes/pr_review_runs.py:92-243)",
+    "gate: latest ACCEPTED ImplementationRun for the task + its PullRequestLink + non-empty diff_text",
+    "start_pr_review_run always builds context from the LATEST accepted ImplementationRun's diff_text at call time and the LATEST completed TestRun's summary — it does not check for or compare against ANY previously completed PRReviewRun for the same task"
+  ],
+  "scenario_sequence_redacted": [
+    "1. ImplementationRun A is accepted; PR #REDACTED is created.",
+    "2. PRReviewRun #1 runs against PR #REDACTED's diff -> some overall_recommendation.",
+    "3. New commits are pushed to the same PR branch on GitHub directly (outside this app's control) OR a new ImplementationRun B is accepted for the same task and a NEW PR is created.",
+    "4. A human or automation calls POST /pr-review-runs again for the same task."
+  ],
+  "expected_current_behavior": {
+    "case_new_implementation_run_accepted": "start_pr_review_run re-queries 'latest ACCEPTED ImplementationRun' (pr_review_runs.py:123-131, ordered by completed_at desc) — it WILL pick up ImplementationRun B's diff/PR automatically. This is correct for the 'new PR' case, not a staleness bug.",
+    "case_same_pr_new_commits_pushed_directly_on_github": "start_pr_review_run fetches the CURRENT pr_title/pr_body via github_api.get_pull_request() (pr_review_runs.py:144-149) but reviews implementation_run.diff_text — the diff captured when the ImplementationRun itself completed, NOT the PR's current live diff on GitHub. If commits were pushed directly to the PR branch outside this app (bypassing create_pull_request's own file-write flow), a new PRReviewRun would review a diff that may no longer match what's actually on the PR branch. This is the concrete mechanism behind the 'stale PR review' gap.",
+    "no_warning_surfaced": "Nothing in the response schema (PRReviewRunRead) or the route logic warns that a diff might not reflect the PR's current live state. No field exists to compare against a prior PRReviewRun's own diff snapshot.",
+    "second_run_on_same_unchanged_pr": "Running POST /pr-review-runs twice against the exact same ImplementationRun/diff with nothing changed produces two independent PRReviewRun rows, each a fresh (and possibly differently-worded, if using a real provider) review — no deduplication, no 'nothing changed since last review' short-circuit."
+  },
+  "recommendation": "See baseline doc section 12, item 7 — staleness detection (comparing PR HEAD SHA or a diff hash against what the last completed PRReviewRun evaluated) is a pure addition, flaggable from day one since no existing behavior needs preserving here."
+}

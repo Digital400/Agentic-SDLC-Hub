@@ -1,0 +1,52 @@
+{
+  "$defs": {
+    "FailureCategory": {
+      "description": "A coarse, vendor-neutral classification of why an ExecutionResult\nreached FAILED \u2014 enough for a caller to decide \"retry as-is,\" \"retry\nwith a smaller scope,\" or \"needs a human,\" without leaking any\nprovider-specific exception type into this contract (see\napp.services.ai_generation.AIGenerationError, which is exactly the kind\nof vendor/implementation-shaped detail this enum exists to abstract\naway from).",
+      "enum": [
+        "PROVIDER_ERROR",
+        "TIMEOUT",
+        "SCOPE_VIOLATION",
+        "BUDGET_EXCEEDED",
+        "VALIDATION_FAILED",
+        "CANCELLED_BY_CALLER",
+        "UNKNOWN"
+      ],
+      "title": "FailureCategory",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Why an ExecutionResult reached FAILED \u2014 see enums.FailureCategory's\ndocstring for why this is a closed, vendor-neutral category set rather\nthan a passthrough of a provider's own exception type/message shape.",
+  "properties": {
+    "category": {
+      "$ref": "#/$defs/FailureCategory"
+    },
+    "extensions": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+      "title": "Extensions",
+      "type": "object"
+    },
+    "message": {
+      "description": "Human-readable \u2014 must never include a secret (a token, key, or Authorization header value), mirroring the existing discipline in ai_generation.py's provider functions (Phase 00 baseline section 7's 'never the token' pattern).",
+      "minLength": 1,
+      "title": "Message",
+      "type": "string"
+    },
+    "retryable": {
+      "description": "Whether retrying the same WorkPacket unmodified might succeed \u2014 e.g. True for a transient provider timeout, False for a SCOPE_VIOLATION that needs a corrected packet.",
+      "title": "Retryable",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "category",
+    "message",
+    "retryable"
+  ],
+  "title": "RuntimeFailure",
+  "type": "object"
+}

@@ -1,0 +1,73 @@
+{
+  "$defs": {
+    "ChangeType": {
+      "description": "Mirrors the existing _VALID_CHANGE_TYPES set in\napp/services/implementation_agent.py \u2014 kept as a real enum here since\nthis is a typed wire contract, not an internal dict key.",
+      "enum": [
+        "create",
+        "modify",
+        "delete"
+      ],
+      "title": "ChangeType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One proposed or applied file change \u2014 mirrors\nimplementation_agent.py's ProposedFileChange. `content_ref` exists so a\nlarge file's full after-content can be stored/fetched out-of-band\n(mirroring hard rule 3's \"reference, don't duplicate\" principle applied\nto OUTPUT evidence, not just upstream input) while `diff` stays a\nbounded, human-readable unified diff suitable for direct display.",
+  "properties": {
+    "change_type": {
+      "$ref": "#/$defs/ChangeType"
+    },
+    "content_ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "A pointer to where this file's full proposed content can be fetched, if it was stored out-of-band rather than inlined as `diff`.",
+      "title": "Content Ref"
+    },
+    "diff": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "A bounded unified diff for human review \u2014 mirrors implementation_agent.py's diff_text per file.",
+      "title": "Diff"
+    },
+    "extensions": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+      "title": "Extensions",
+      "type": "object"
+    },
+    "path": {
+      "minLength": 1,
+      "title": "Path",
+      "type": "string"
+    },
+    "summary": {
+      "minLength": 1,
+      "title": "Summary",
+      "type": "string"
+    }
+  },
+  "required": [
+    "path",
+    "change_type",
+    "summary"
+  ],
+  "title": "FileChangeEvidence",
+  "type": "object"
+}

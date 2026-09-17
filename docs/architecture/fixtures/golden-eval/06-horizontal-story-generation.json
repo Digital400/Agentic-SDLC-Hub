@@ -1,0 +1,26 @@
+{
+  "scenario": "Horizontal story generation",
+  "code_path": [
+    "story_crafting agent prompt (RICH_DEFAULT_PROMPTS['story_crafting'] in apps/api/app/db/seed.py — content not opened in this pass)",
+    "story block includes '**Mode:** HORIZONTAL'",
+    "story_export.parse_story_backlog parses story.mode == 'HORIZONTAL'",
+    "POST /stories/sync-from-backlog with story_type=HORIZONTAL",
+    "StoryType.HORIZONTAL persisted on the real Story row (apps/api/app/models/enums.py:364-372)"
+  ],
+  "definition": "HORIZONTAL: technical-layer stories (frontend/backend/database/integration/infrastructure/testing/documentation) — apps/api/app/models/enums.py:368-369",
+  "input_story_block_redacted": {
+    "title": "REDACTED — e.g. 'Provision password-reset-token database table'",
+    "epic": "REDACTED",
+    "feature": "REDACTED",
+    "mode": "HORIZONTAL",
+    "technical_layer": "REDACTED — e.g. 'Database'",
+    "acceptance_criteria": ["REDACTED criterion 1"],
+    "suggested_owner_role": "DEVELOPER"
+  },
+  "expected": {
+    "parsed_story_mode": "HORIZONTAL",
+    "sync_request": { "story_type": "HORIZONTAL" },
+    "persisted_story_fields": "same field set/rules as the VERTICAL fixture (05) — parse_story_backlog and sync_stories_from_backlog apply identical field-extraction and fallback logic regardless of mode; only story.mode/StoryType differs",
+    "test_coverage_status": "UNKNOWN — apps/api/tests/test_story_crafting_vertical_horizontal.py's inspected test bodies (this pass) exercise the VERTICAL mode explicitly (FULL_STORY_BLOCK sets Mode: VERTICAL); no HORIZONTAL-mode test body was directly opened in this pass to confirm equivalent coverage exists. Flagged for Phase 01+ verification rather than assumed identical."
+  }
+}

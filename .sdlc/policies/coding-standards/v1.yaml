@@ -1,0 +1,17 @@
+policy_key: coding-standards
+name: Coding Standards Policy
+version: "1.0.0"
+description: >
+  Baseline expectations for any proposed code change, applied on top of
+  whatever the target repository's own detected lint/format/type-check
+  commands already enforce (see ProjectExecutionProfile).
+applies_to:
+  - IMPLEMENT_STORY
+  - PR_REVIEW
+  - INFRASTRUCTURE_CHANGE
+severity: BLOCKING
+rules:
+  - "Follow the active ProjectExecutionProfile's lint_command/format_check_command/type_check_command as the standard of 'done' — never invent a different one."
+  - "Prefer the smallest change that satisfies the task's acceptance criteria — no unrelated refactoring bundled into the same proposal."
+  - "Never introduce a new third-party dependency without stating it explicitly as a risk."
+  - "Match the target repository's existing naming and structural conventions rather than imposing a different style."

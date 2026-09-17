@@ -1,0 +1,562 @@
+{
+  "$defs": {
+    "ChangeType": {
+      "description": "Mirrors the existing _VALID_CHANGE_TYPES set in\napp/services/implementation_agent.py \u2014 kept as a real enum here since\nthis is a typed wire contract, not an internal dict key.",
+      "enum": [
+        "create",
+        "modify",
+        "delete"
+      ],
+      "title": "ChangeType",
+      "type": "string"
+    },
+    "ClarificationRequest": {
+      "additionalProperties": false,
+      "description": "Mirrors ai_generation.py's needs_clarification/\nclarification_questions contract (Phase 00 baseline section 6.1),\ngeneralized to every task_type rather than just the Markdown\ndraft/clarification response format.",
+      "properties": {
+        "blocking": {
+          "default": true,
+          "description": "True (the default, and the only behavior the current codebase implements \u2014 Phase 00 baseline section 6.1) means execution cannot proceed until answered.",
+          "title": "Blocking",
+          "type": "boolean"
+        },
+        "context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional free-text explaining why clarification is needed, beyond the questions themselves.",
+          "title": "Context"
+        },
+        "extensions": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+          "title": "Extensions",
+          "type": "object"
+        },
+        "questions": {
+          "description": "At least one question \u2014 an empty ClarificationRequest is not meaningful.",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Questions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "questions"
+      ],
+      "title": "ClarificationRequest",
+      "type": "object"
+    },
+    "CommandEvidence": {
+      "additionalProperties": false,
+      "description": "One command a resolver ran (or reasoned about) while executing a\ntask \u2014 e.g. a test command, a lint command. See module docstring's\nHONESTY RULE for `real_execution`.",
+      "properties": {
+        "command": {
+          "minLength": 1,
+          "title": "Command",
+          "type": "string"
+        },
+        "duration_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Seconds"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exit Code"
+        },
+        "extensions": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+          "title": "Extensions",
+          "type": "object"
+        },
+        "real_execution": {
+          "description": "True only if this command was actually run in a real sandbox/CI environment. False for a reasoning-based assessment \u2014 see module docstring.",
+          "title": "Real Execution",
+          "type": "boolean"
+        },
+        "stderr_excerpt": {
+          "anyOf": [
+            {
+              "maxLength": 8000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stderr Excerpt"
+        },
+        "stdout_excerpt": {
+          "anyOf": [
+            {
+              "maxLength": 8000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bounded \u2014 never the full raw log. Must never contain a secret; see test_no_contract_field_is_secret_shaped.",
+          "title": "Stdout Excerpt"
+        }
+      },
+      "required": [
+        "command",
+        "real_execution"
+      ],
+      "title": "CommandEvidence",
+      "type": "object"
+    },
+    "ExecutionState": {
+      "description": "Where one ExecutionResult is in its lifecycle. A superset of this\ncodebase's existing per-feature status enums (AgentRunStatus,\nImplementationRunStatus, TestRunStatus, PRReviewRunStatus \u2014 all\nPENDING/RUNNING/COMPLETED/FAILED today) plus three states none of them\ncurrently model explicitly:\n  CLARIFICATION_REQUIRED \u2014 mirrors the existing needs_clarification /\n    LoopStatus.WAITING_FOR_INPUT outcome (see the Phase 00 baseline,\n    section 6.1) promoted to a first-class top-level state here.\n  WAITING_APPROVAL \u2014 mirrors ImplementationRunReviewStatus.PENDING_REVIEW\n    (Phase 00 baseline section 7), generalized to every task type.\n  STALE \u2014 deliberately new: the Phase 00 baseline (section 9.1)\n    confirmed no staleness detection exists anywhere in this codebase\n    today. Reserving this state here is a schema-only placeholder for\n    that gap, not a claim that any runtime currently sets it.",
+      "enum": [
+        "QUEUED",
+        "RUNNING",
+        "CLARIFICATION_REQUIRED",
+        "WAITING_APPROVAL",
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "STALE"
+      ],
+      "title": "ExecutionState",
+      "type": "string"
+    },
+    "FailureCategory": {
+      "description": "A coarse, vendor-neutral classification of why an ExecutionResult\nreached FAILED \u2014 enough for a caller to decide \"retry as-is,\" \"retry\nwith a smaller scope,\" or \"needs a human,\" without leaking any\nprovider-specific exception type into this contract (see\napp.services.ai_generation.AIGenerationError, which is exactly the kind\nof vendor/implementation-shaped detail this enum exists to abstract\naway from).",
+      "enum": [
+        "PROVIDER_ERROR",
+        "TIMEOUT",
+        "SCOPE_VIOLATION",
+        "BUDGET_EXCEEDED",
+        "VALIDATION_FAILED",
+        "CANCELLED_BY_CALLER",
+        "UNKNOWN"
+      ],
+      "title": "FailureCategory",
+      "type": "string"
+    },
+    "FileChangeEvidence": {
+      "additionalProperties": false,
+      "description": "One proposed or applied file change \u2014 mirrors\nimplementation_agent.py's ProposedFileChange. `content_ref` exists so a\nlarge file's full after-content can be stored/fetched out-of-band\n(mirroring hard rule 3's \"reference, don't duplicate\" principle applied\nto OUTPUT evidence, not just upstream input) while `diff` stays a\nbounded, human-readable unified diff suitable for direct display.",
+      "properties": {
+        "change_type": {
+          "$ref": "#/$defs/ChangeType"
+        },
+        "content_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A pointer to where this file's full proposed content can be fetched, if it was stored out-of-band rather than inlined as `diff`.",
+          "title": "Content Ref"
+        },
+        "diff": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A bounded unified diff for human review \u2014 mirrors implementation_agent.py's diff_text per file.",
+          "title": "Diff"
+        },
+        "extensions": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+          "title": "Extensions",
+          "type": "object"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "summary": {
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "change_type",
+        "summary"
+      ],
+      "title": "FileChangeEvidence",
+      "type": "object"
+    },
+    "RuntimeFailure": {
+      "additionalProperties": false,
+      "description": "Why an ExecutionResult reached FAILED \u2014 see enums.FailureCategory's\ndocstring for why this is a closed, vendor-neutral category set rather\nthan a passthrough of a provider's own exception type/message shape.",
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/FailureCategory"
+        },
+        "extensions": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+          "title": "Extensions",
+          "type": "object"
+        },
+        "message": {
+          "description": "Human-readable \u2014 must never include a secret (a token, key, or Authorization header value), mirroring the existing discipline in ai_generation.py's provider functions (Phase 00 baseline section 7's 'never the token' pattern).",
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "description": "Whether retrying the same WorkPacket unmodified might succeed \u2014 e.g. True for a transient provider timeout, False for a SCOPE_VIOLATION that needs a corrected packet.",
+          "title": "Retryable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "category",
+        "message",
+        "retryable"
+      ],
+      "title": "RuntimeFailure",
+      "type": "object"
+    },
+    "TestEvidence": {
+      "additionalProperties": false,
+      "description": "One test's result \u2014 mirrors testing_agent.py's TestExecuted. See\nmodule docstring's HONESTY RULE for `real_execution`; an unparseable or\nmissing result must be recorded as FAIL, never silently upgraded to\nPASS (same rule testing_agent.py's own _run_real_agent already\nenforces, Phase 00 baseline section 8).",
+      "properties": {
+        "criterion_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional link back to a WorkPacket.acceptance_criteria[].id this test verifies.",
+          "title": "Criterion Id"
+        },
+        "duration_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Seconds"
+        },
+        "extensions": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+          "title": "Extensions",
+          "type": "object"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notes"
+        },
+        "real_execution": {
+          "description": "True only if this test was actually run. False for a reasoning-based assessment.",
+          "title": "Real Execution",
+          "type": "boolean"
+        },
+        "result": {
+          "$ref": "#/$defs/TestResult"
+        }
+      },
+      "required": [
+        "name",
+        "result",
+        "real_execution"
+      ],
+      "title": "TestEvidence",
+      "type": "object"
+    },
+    "TestResult": {
+      "description": "Mirrors testing_agent.py's _VALID_RESULTS \u2014 an unparseable/missing\nresult must be coerced to FAIL by whatever produces a TestEvidence row,\nnever silently treated as PASS (same honesty rule as the existing\nTesting Agent, Phase 00 baseline section 8).",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "SKIPPED"
+      ],
+      "title": "TestResult",
+      "type": "string"
+    },
+    "UsageEvidence": {
+      "additionalProperties": false,
+      "description": "Actual resource consumption for one ExecutionResult \u2014 the same\nshape BudgetPolicy caps, so a caller can directly compare usage against\nbudget field-by-field. Mirrors AgentRun's token_usage/cost/\nestimated_context_tokens fields (Phase 00 baseline section 5), but\nprovider-neutral: no field here is specific to any one of the five\nproviders ai_generation.py currently supports.",
+      "properties": {
+        "completion_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Completion Tokens",
+          "type": "integer"
+        },
+        "cost_usd": {
+          "default": 0.0,
+          "description": "0.0 is a valid, meaningful value (e.g. a free-tier provider) \u2014 not a sentinel for 'unknown'. A resolver that cannot determine cost should omit this field's producer from schema-version-compatible output entirely rather than guess 0.0 as a stand-in for unknown, per this phase's 'never fabricate' principle.",
+          "minimum": 0,
+          "title": "Cost Usd",
+          "type": "number"
+        },
+        "distinct_tools_used": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Distinct Tools Used",
+          "type": "array"
+        },
+        "extensions": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+          "title": "Extensions",
+          "type": "object"
+        },
+        "llm_calls_made": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Llm Calls Made",
+          "type": "integer"
+        },
+        "prompt_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Prompt Tokens",
+          "type": "integer"
+        },
+        "repair_attempts_used": {
+          "default": 0,
+          "description": "Mirrors AgentRun.loop_iteration / LoopResult.iterations_run \u2014 how many improve/repair passes this execution actually took, comparable against BudgetPolicy.max_repair_attempts.",
+          "minimum": 0,
+          "title": "Repair Attempts Used",
+          "type": "integer"
+        },
+        "tool_calls_made": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Tool Calls Made",
+          "type": "integer"
+        },
+        "total_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Total Tokens",
+          "type": "integer"
+        },
+        "wall_clock_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Wall Clock Seconds"
+        }
+      },
+      "title": "UsageEvidence",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The top-level \"here is what happened\" envelope for one WorkPacket's\nexecution \u2014 referenced back to its packet by `packet_id`, never\nembedding the WorkPacket itself (that would duplicate the packet's own\nupstream-artifact references transitively).\n\nExactly one of `failure` / `clarification` is meaningful depending on\n`state` (FAILED -> failure populated; CLARIFICATION_REQUIRED ->\nclarification populated); both are Optional and this contract does not\nitself enforce that correlation \u2014 a resolver-time invariant, not a\nschema-time one, matching how AgentRun's own error_message/\nloop_status fields already coexist without a schema-level constraint\ntying them together (Phase 00 baseline section 5-6).",
+  "properties": {
+    "clarification": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClarificationRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Populated when state == CLARIFICATION_REQUIRED."
+    },
+    "commands": {
+      "items": {
+        "$ref": "#/$defs/CommandEvidence"
+      },
+      "title": "Commands",
+      "type": "array"
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Completed At"
+    },
+    "extensions": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+      "title": "Extensions",
+      "type": "object"
+    },
+    "failure": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RuntimeFailure"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Populated when state == FAILED."
+    },
+    "file_changes": {
+      "items": {
+        "$ref": "#/$defs/FileChangeEvidence"
+      },
+      "title": "File Changes",
+      "type": "array"
+    },
+    "packet_id": {
+      "description": "References the WorkPacket this result belongs to \u2014 see WorkPacket.packet_id.",
+      "format": "uuid",
+      "title": "Packet Id",
+      "type": "string"
+    },
+    "result_id": {
+      "format": "uuid",
+      "title": "Result Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Started At"
+    },
+    "state": {
+      "$ref": "#/$defs/ExecutionState"
+    },
+    "summary": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "A short human-readable outcome summary \u2014 not the full output content, which stays out of this contract per hard rule 3's spirit (output content belongs in FileChangeEvidence/an artifact, referenced or bounded, not inlined here as free text).",
+      "title": "Summary"
+    },
+    "test_evidence": {
+      "items": {
+        "$ref": "#/$defs/TestEvidence"
+      },
+      "title": "Test Evidence",
+      "type": "array"
+    },
+    "usage": {
+      "$ref": "#/$defs/UsageEvidence"
+    }
+  },
+  "required": [
+    "result_id",
+    "packet_id",
+    "state"
+  ],
+  "title": "ExecutionResult",
+  "type": "object"
+}

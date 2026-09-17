@@ -11,10 +11,14 @@ for exactly that reason.
 
 from app.models.base import Base
 from app.models.enums import (
+    AgentJobEventType,
+    AuthenticationMethod,
+    AgentJobStatus,
     AgentPromptRole,
     AgentRunStatus,
     ApprovalRecommendation,
     ArtifactStatus,
+    DataClassification,
     ImplementationRunReviewStatus,
     ImplementationRunStatus,
     ImplementationTaskArea,
@@ -28,6 +32,7 @@ from app.models.enums import (
     LoopStatus,
     LoopStepType,
     JiraSourceType,
+    JobFailureCategory,
     MaintenanceRunStatus,
     StoryType,
     StoryStatus,
@@ -35,13 +40,22 @@ from app.models.enums import (
     StoryDeliveryNodeStatus,
     SprintStatus,
     SprintStoryStatus,
+    NetworkPolicyDefault,
+    OutboxEntryStatus,
     PRReviewRecommendation,
     PRReviewRunStatus,
+    CredentialKind,
+    ProjectExecutionProfileSource,
+    ProjectExecutionProfileStatus,
+    ProjectExecutionProfileType,
     ProjectRole,
     ProjectStatus,
     PullRequestStatus,
     RepositoryFileEntryType,
     ReviewStatus,
+    RoleAssignmentScope,
+    RuntimeRole,
+    SensitiveActionKind,
     TestAgentType,
     TestRunStatus,
     UserRole,
@@ -78,6 +92,9 @@ from app.models.knowledge import KnowledgeChunk, KnowledgeSource
 from app.models.integration import Integration
 from app.models.integration_connection import IntegrationConnection
 from app.models.repository import Repository, RepositoryFileIndex, RepositorySnapshot
+from app.models.project_execution_profile import ProjectExecutionProfile
+from app.models.agent_job import AgentJob, AgentJobEvent, AgentJobOutboxEntry
+from app.models.runtime_security import RuntimeRoleAssignment
 from app.models.audit import AuditLog
 
 __all__ = [
@@ -158,5 +175,24 @@ __all__ = [
     "Repository",
     "RepositorySnapshot",
     "RepositoryFileIndex",
+    "ProjectExecutionProfile",
+    "ProjectExecutionProfileType",
+    "ProjectExecutionProfileSource",
+    "ProjectExecutionProfileStatus",
+    "DataClassification",
+    "NetworkPolicyDefault",
+    "AgentJob",
+    "AgentJobEvent",
+    "AgentJobOutboxEntry",
+    "AgentJobStatus",
+    "AgentJobEventType",
+    "JobFailureCategory",
+    "OutboxEntryStatus",
+    "RuntimeRoleAssignment",
+    "RuntimeRole",
+    "RoleAssignmentScope",
+    "AuthenticationMethod",
+    "CredentialKind",
+    "SensitiveActionKind",
     "AuditLog",
 ]

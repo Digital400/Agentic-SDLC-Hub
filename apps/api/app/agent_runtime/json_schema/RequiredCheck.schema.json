@@ -1,0 +1,51 @@
+{
+  "$defs": {
+    "CheckSeverity": {
+      "description": "Whether a RequiredCheck failing blocks completion (BLOCKING) or is\ninformational only (ADVISORY) \u2014 mirrors the \"critical vs. suggestion\"\ndistinction already present in ValidatorResult\n(app/services/validator_agent.py's critical_issues vs. suggestions).",
+      "enum": [
+        "BLOCKING",
+        "ADVISORY"
+      ],
+      "title": "CheckSeverity",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One check that must (BLOCKING) or should (ADVISORY) pass before this\ntask's output is considered acceptable \u2014 e.g. \"run the backend test\nsuite,\" \"no critical PR-review findings.\" Mirrors the\ntest_command/required_evidence_section concepts already present in this\ncodebase (ImplementationTask.test_expectation,\nGraphEngineService.validate_evidence_requirement \u2014 Phase 00 baseline\nsection 11) as a reusable, structured type instead of a single free-text\nfield.",
+  "properties": {
+    "command": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "An executable command a runtime could run to evaluate this check, e.g. 'cd apps/api && pytest -q'. Optional \u2014 not every check is command-shaped.",
+      "title": "Command"
+    },
+    "description": {
+      "minLength": 1,
+      "title": "Description",
+      "type": "string"
+    },
+    "name": {
+      "description": "e.g. 'backend-test-suite', 'pr-review-no-critical-findings'.",
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "severity": {
+      "$ref": "#/$defs/CheckSeverity",
+      "default": "BLOCKING"
+    }
+  },
+  "required": [
+    "name",
+    "description"
+  ],
+  "title": "RequiredCheck",
+  "type": "object"
+}

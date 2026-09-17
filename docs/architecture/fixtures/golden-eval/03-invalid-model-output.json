@@ -1,0 +1,25 @@
+{
+  "scenario": "Invalid model output",
+  "code_path_variant_a_draft_contract": [
+    "ai_generation._parse_response (apps/api/app/services/ai_generation.py:424-437) — header is not valid JSON, or '---' separator is missing"
+  ],
+  "code_path_variant_b_structured_json_agents": [
+    "implementation_agent._run_real_agent / testing_agent._run_real_agent / pr_review_agent._run_real_agent",
+    "json.loads(cleaned) raises json.JSONDecodeError",
+    "run_implementation_agent / run_testing_agent / run_pr_review_agent entry-point except clause",
+    "logger.warning(...); falls back to the deterministic heuristic builder"
+  ],
+  "variant_a_expected": {
+    "behavior": "Never raises or crashes the run. logger.warning('Agent response header was not valid JSON; treating the whole response as content.') is emitted, and the ENTIRE raw_text is treated as needs_clarification=false, content_markdown=raw_text.strip().",
+    "needs_clarification": false,
+    "content_markdown": "the full raw model response, unparsed, verbatim (minus leading/trailing whitespace)",
+    "agent_run_status": "COMPLETED — a formatting slip is not treated as a failure"
+  },
+  "variant_b_expected": {
+    "exceptions_caught": ["AIGenerationError", "json.JSONDecodeError", "ValueError", "TypeError", "AttributeError", "KeyError"],
+    "behavior": "Falls back to the same deterministic heuristic result the mock-provider path would produce (_build_heuristic_result) — the caller cannot distinguish 'provider unconfigured' from 'provider returned unparseable JSON' from the run's output shape alone; both produce used_mock=true... note: heuristic result always sets used_mock=True regardless of which of the two triggered it (implementation_agent.py:194-202, testing_agent.py:125-132, pr_review_agent.py:118-128) — this is a real ambiguity in the current recorded data, flagged rather than fabricated as a distinguishing field.",
+    "run_status": "COMPLETED (not FAILED) — same resilience contract as variant A: a provider formatting slip never fails the run",
+    "logged_not_raised": true
+  },
+  "not_covered": "A malformed response that also fails the OUTER try/except boundary (e.g. a non-Exception BaseException, or an error inside the heuristic builder itself) is not handled by this fallback and would propagate — no evidence of such a case was found in the inspected code, and none is fabricated here."
+}

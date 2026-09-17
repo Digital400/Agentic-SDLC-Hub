@@ -1,0 +1,35 @@
+{
+  "scenario": "Validation and repair",
+  "code_path": [
+    "LoopEngineService.run_loop (apps/api/app/services/loop_engine.py:193-293)",
+    "validator_agent.run_validator -> ValidatorResult.has_critical_issues (apps/api/app/services/validator_agent.py:64-65)",
+    "iteration 2: LoopStepType.IMPROVE, validation_feedback = validation.suggestions or validation.critical_issues",
+    "ai_generation.generate (iteration=2) — mock_agent.generate_mock_output appends a 'Revision history (loop iteration 2)' section listing each addressed item"
+  ],
+  "input": {
+    "project": { "name": "REDACTED-PROJECT" },
+    "workflow_node": { "node_key": "lld", "output_artifact_type": "lld_document" },
+    "action": "draft",
+    "provider": "mock",
+    "validator_definition": { "criteria": ["REDACTED criterion 1", "REDACTED criterion 2", "REDACTED criterion 3"], "quality_threshold": 0.8 }
+  },
+  "expected_iteration_1": {
+    "step": "GENERATE_DRAFT",
+    "word_count_condition": "< CRITICAL_WORD_COUNT (15) triggers automatic REJECT with quality_score=0.0; otherwise scored via completeness/clarity/risk_coverage heuristics (validator_agent.py:96-202)",
+    "validate_result_recommendation": "REVISE (quality_score below threshold, critical_issues present due to unmet criteria)"
+  },
+  "expected_iteration_2": {
+    "step": "IMPROVE",
+    "trigger_condition": "quality_score < quality_threshold AND validation.has_critical_issues == true AND iteration < max_iterations (default 3)",
+    "validation_feedback_passed_in": "validation.suggestions (falls back to critical_issues if suggestions is empty) — apps/api/app/services/loop_engine.py:292",
+    "mock_output_contains": "'## Revision history (loop iteration 2)' section with one '- **Addressed:** <item>' bullet per feedback item (mock_agent.py:50-60)",
+    "quality_score_expectation": "should increase relative to iteration 1 because the mock output is now longer and more directly echoes each feedback item (criteria keyword coverage heuristic will score higher) — this is a property of the deterministic mock generator, not a claim about real model quality improvement"
+  },
+  "stop_condition_paths": {
+    "COMPLETED_QUALITY_MET": "iteration N's quality_score >= quality_threshold",
+    "COMPLETED_MAX_ITERATIONS": "iteration reaches DEFAULT_MAX_ITERATIONS=3 without meeting threshold",
+    "COMPLETED_NO_CRITICAL_ISSUES": "below threshold but validation.has_critical_issues == false — loop stops without further IMPROVE"
+  },
+  "loop_events_persisted": "one AgentRunLoopEvent row per step per iteration, immutable, queryable via GET /agent-runs/{id}/loop-events",
+  "real_provider_note": "With a real provider, exact quality_score trajectory across iterations is UNKNOWN — depends on the live validator's judgment each pass; only the control-flow contract above is guaranteed by code, not the specific scores."
+}

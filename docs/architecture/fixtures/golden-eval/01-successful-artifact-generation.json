@@ -1,0 +1,35 @@
+{
+  "scenario": "Successful artifact generation",
+  "code_path": [
+    "POST /agent-runs (apps/api/app/api/routes/agent_runs.py:130)",
+    "GraphEngineService.validate_can_run (apps/api/app/services/graph_engine.py:153)",
+    "LoopEngineService.run_loop (apps/api/app/services/loop_engine.py:130) — action=DRAFT",
+    "ai_generation.generate (apps/api/app/services/ai_generation.py:694)",
+    "validator_agent.run_validator (apps/api/app/services/validator_agent.py:265)"
+  ],
+  "preconditions": {
+    "workflow_node_status": "READY",
+    "required_inputs": "all resolved to APPROVED upstream artifacts",
+    "active_prompt": "exists and is_active=true for (agent_definition, DRAFT)",
+    "provider": "mock (no ANTHROPIC_API_KEY/GEMINI_API_KEY/OPENROUTER_API_KEY/NVIDIA_API_KEY set, Ollama unreachable) — chosen for a fully deterministic fixture"
+  },
+  "input": {
+    "project": { "name": "REDACTED-PROJECT", "business_owner": "REDACTED", "description": "Synthetic project for baseline fixtures." },
+    "workflow_node": { "node_key": "hld", "output_artifact_type": "hld_document" },
+    "action": "draft",
+    "input_context": { "stakeholder_request": "REDACTED sample stakeholder request text." }
+  },
+  "expected": {
+    "loop_status_progression": ["RUNNING", "COMPLETED_QUALITY_MET"],
+    "loop_events": ["PLAN", "RETRIEVE_CONTEXT", "GENERATE_DRAFT", "VALIDATE", "READY_FOR_REVIEW"],
+    "needs_clarification": false,
+    "output_text_starts_with": "# hld — Mock Output",
+    "used_mock": true,
+    "workflow_node_status_after": "READY",
+    "agent_run_status": "COMPLETED",
+    "quality_score_condition": ">= quality_threshold (default 0.8, or the stage's ValidatorDefinition.quality_threshold)",
+    "token_usage_shape": { "prompt_tokens": "word-count of assembled prompt (mock_agent.estimate_mock_usage)", "completion_tokens": "word-count of output", "total_tokens": "sum" },
+    "cost": "UNKNOWN — deterministic placeholder rate (0.000002/token) applies only on the mock path; not a real price",
+    "real_provider_note": "With a real provider configured, output_text/token counts/cost/latency depend on the live model response — marked UNKNOWN here rather than fabricated."
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "scenario": "Story-specific LLD",
+  "code_path": [
+    "story_lld_agent.py — constructs a transient, NEVER-PERSISTED WorkflowNode as generate()'s node parameter (apps/api/app/services/story_lld_agent.py:1-19,41)",
+    "ai_generation.generate() — same call ai-generation every project-level stage uses",
+    "output persisted as a StoryArtifact (STORY_LLD_ARTIFACT_TYPE='story_lld'), not a project-level Artifact/ArtifactVersion",
+    "advance_lane (apps/api/app/services/story_delivery.py) progresses the STORY_LLD lane node"
+  ],
+  "distinction_from_project_level_lld": "The project-level 'lld' workflow stage (workflows/sdlc-workflow.json) designs for a whole story backlog at once. story_lld_agent.py designs for exactly one story. Both reuse the identical generate() call path, provider fallback chain, and P0-P5 token-budget prioritization — story_lld_agent.py:8-19.",
+  "required_output_sections": [
+    "Story Summary", "Scope", "Out of Scope", "API Changes", "DB Changes", "Frontend Changes",
+    "Business Rules", "Validation Rules", "Permission Rules", "Error Handling", "Test Cases",
+    "Implementation Tasks", "Dependencies", "Risks"
+  ],
+  "input": {
+    "story": { "title": "REDACTED", "user_story": "REDACTED", "acceptance_criteria": ["REDACTED"] },
+    "story_delivery_lane_node": "STORY_LLD",
+    "precondition": "STORY_READY node must be COMPLETED before STORY_LLD unlocks (story_delivery_node.py:30-37 sequential unlock rule)"
+  },
+  "expected": {
+    "artifact_type": "story_lld (StoryArtifact row, not a project-level Artifact)",
+    "content_sections_present": "all 14 sections listed above, per STORY_LLD_SECTIONS (story_lld_agent.py:53-68)",
+    "downstream_gate": "LLD_REVIEW lane node must reach COMPLETED (a Tech Lead-only transition) before the IMPLEMENTATION lane node can start a run — apps/api/app/api/routes/implementation_runs.py:176-184",
+    "review_role": "TECH_LEAD approves story_lld per STAGE_APPROVE_ROLES['story_lld'] (apps/api/app/services/permissions.py:67)",
+    "used_mock_condition": "true if no real provider configured, per the same get_active_provider() resolution as every other generate() call"
+  }
+}

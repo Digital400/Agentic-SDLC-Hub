@@ -1,0 +1,22 @@
+{
+  "scenario": "Passing tests",
+  "honesty_disclosure_required": "testing_agent.py has NO test-execution sandbox anywhere in this codebase. 'Passing' here means the agent's own reasoning-based assessment of the diff against acceptance criteria concluded PASS for each test — never a real CI/pytest/jest run. This disclosure is rendered verbatim in the produced artifact's Test Evidence section (testing_agent.py:265-269) and must not be summarized away.",
+  "code_path": [
+    "POST /test-runs (apps/api/app/api/routes/test_runs.py:94-285)",
+    "gate: latest ImplementationRun for the task has review_status==ACCEPTED, and (PullRequestLink exists or diff_text non-empty)",
+    "testing_agent.run_testing_agent() -> _run_real_agent (real provider) — the mock/heuristic path NEVER fabricates a PASS (tests_executed=[] always on the heuristic path, testing_agent.py:128)",
+    "render_test_report_markdown() -> persisted as a READY_FOR_REVIEW test_report Artifact + a pending Review"
+  ],
+  "precondition_for_this_scenario": "requires a REAL provider response containing tests_executed entries with result='PASS' — the deterministic mock/heuristic path cannot produce this scenario by construction (it always returns an empty tests_executed list). This is documented explicitly rather than fabricating a mock 'passing tests' output that the code does not actually produce.",
+  "expected_real_ai_contract": {
+    "response_schema_keys": ["test_plan", "tests_to_add", "tests_executed", "bugs_found", "suggested_fixes"],
+    "tests_executed_item_shape": { "name": "string", "result": "PASS|FAIL (unparseable values coerced to FAIL, never silently dropped or coerced to PASS — testing_agent.py:194-197)", "notes": "must explain this is a reasoning-based assessment, not a real run (enforced by system prompt instruction, not by code-level validation of notes content)" },
+    "actual_pass_count_and_names": "UNKNOWN — depends on the live model's assessment of the specific diff; not fabricated here"
+  },
+  "expected_persisted_artifact": {
+    "test_report_sections": ["Summary", "Acceptance Criteria Coverage", "Tests To Add", "Test Evidence", "Defects Found", "Suggested Fixes", "Coverage Impact"],
+    "coverage_impact": "always the fixed placeholder {'estimated_change': 'unknown', 'note': 'Coverage measurement is not wired up in this codebase yet...'} — never a real percentage (testing_agent.py:51-54)",
+    "review_created": "a pending Review row against the new ArtifactVersion — QA approval happens through the existing generic Review flow, never auto-approved by this module",
+    "workflow_node_status_after": "WAITING_FOR_REVIEW (graph_engine.mark_waiting_for_review)"
+  }
+}

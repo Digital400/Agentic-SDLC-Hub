@@ -1,0 +1,28 @@
+{
+  "scenario": "Clarification required",
+  "code_path": [
+    "ai_generation._build_system_prompt (apps/api/app/services/ai_generation.py:399) — instructs the two-part response contract",
+    "ai_generation._parse_response (apps/api/app/services/ai_generation.py:424) — parses needs_clarification=true",
+    "ai_generation.format_clarification_output (apps/api/app/services/ai_generation.py:440)",
+    "LoopEngineService.run_loop early-return (apps/api/app/services/loop_engine.py:231-255)",
+    "GraphEngineService.mark_waiting_for_input (apps/api/app/api/routes/agent_runs.py:357-358)"
+  ],
+  "precondition_note": "This scenario only occurs against a REAL provider — the mock path (mock_agent.py) never sets needs_clarification=true; it has no judgment to decide input is insufficient. Documented as UNKNOWN-triggerable-live, not fabricated as a mock behavior.",
+  "input": {
+    "project": { "name": "REDACTED-PROJECT" },
+    "workflow_node": { "node_key": "hld", "output_artifact_type": "hld_document" },
+    "action": "draft",
+    "input_context": { "stakeholder_request": "REDACTED — deliberately underspecified input, e.g. a one-line request with no acceptance criteria or scope." }
+  },
+  "expected": {
+    "raw_response_contract": "single-line JSON header {\"needs_clarification\": true, \"clarification_questions\": [...]}  then a line containing only '---' then nothing further",
+    "parsed_needs_clarification": true,
+    "content_markdown_shape": "starts with CLARIFICATION_MARKER = '# Clarification Needed', followed by a bulleted list of clarification_questions (or a placeholder bullet if the list was empty)",
+    "loop_status_after": "WAITING_FOR_INPUT",
+    "loop_events": ["PLAN", "RETRIEVE_CONTEXT", "GENERATE_DRAFT (or IMPROVE if iteration>1)", "READY_FOR_REVIEW (notes: 'Loop stopped: draft requested clarification from a human.')"],
+    "iterations_run_condition": "loop stops immediately at whichever iteration produced the clarification request — no VALIDATE step runs for that iteration",
+    "workflow_node_status_after": "WAITING_FOR_INPUT",
+    "agent_run_status": "COMPLETED (not FAILED — a clarification request is a normal, successful outcome, not an error)",
+    "frontend_handling": "apps/web/components/documents/clarification-panel.tsx renders this state distinctly from a normal draft (confirmed by its existence as a dedicated component, baseline doc section 14)"
+  }
+}

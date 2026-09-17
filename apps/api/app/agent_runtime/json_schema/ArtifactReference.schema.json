@@ -1,0 +1,58 @@
+{
+  "additionalProperties": false,
+  "description": "A pointer to an approved upstream artifact \u2014 never its full content\n(hard rule 3). Mirrors the existing approved_artifact_content/\napproved_artifact_summaries split in\napp/services/ai_generation.py's build_prioritized_context: `summary`\nhere plays the same role as agent_context_summary there (a bounded,\npre-computed stand-in for the full document), and is the ONLY textual\ncontent this reference may carry \u2014 there is deliberately no\n`full_content` field on this model.",
+  "properties": {
+    "artifact_id": {
+      "format": "uuid",
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "artifact_type": {
+      "description": "e.g. 'hld_document', 'story_backlog', 'lld_document'.",
+      "minLength": 1,
+      "title": "Artifact Type",
+      "type": "string"
+    },
+    "artifact_version_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "None means 'the artifact's current version' \u2014 resolved at execution time, not pinned.",
+      "title": "Artifact Version Id"
+    },
+    "status": {
+      "description": "The artifact's status at reference time, e.g. 'APPROVED' \u2014 for audit/display only, not re-validated by this contract.",
+      "minLength": 1,
+      "title": "Status",
+      "type": "string"
+    },
+    "summary": {
+      "anyOf": [
+        {
+          "maxLength": 4000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "A bounded context summary (see app/services/artifact_summary.py) \u2014 never the full document body.",
+      "title": "Summary"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "artifact_type",
+    "status"
+  ],
+  "title": "ArtifactReference",
+  "type": "object"
+}

@@ -1,0 +1,61 @@
+{
+  "additionalProperties": false,
+  "description": "A pointer to one retrieved Knowledge Base chunk \u2014 mirrors\napp/services/retrieval.py's RetrievedChunk. Unlike ArtifactReference,\na knowledge chunk IS already a bounded excerpt by construction (RAG\nchunks are pre-sized for exactly this purpose), so `snippet` carrying\nthat excerpt does not violate hard rule 3 the way embedding a full\nartifact would.",
+  "properties": {
+    "chunk_id": {
+      "minLength": 1,
+      "title": "Chunk Id",
+      "type": "string"
+    },
+    "content_type": {
+      "description": "e.g. 'COMPANY_STANDARD', 'PAST_ARTIFACT' \u2014 see KnowledgeContentType.",
+      "minLength": 1,
+      "title": "Content Type",
+      "type": "string"
+    },
+    "similarity": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Similarity",
+      "type": "number"
+    },
+    "snippet": {
+      "description": "The retrieved chunk's own bounded content \u2014 not a full document.",
+      "maxLength": 4000,
+      "title": "Snippet",
+      "type": "string"
+    },
+    "source_id": {
+      "minLength": 1,
+      "title": "Source Id",
+      "type": "string"
+    },
+    "source_title": {
+      "minLength": 1,
+      "title": "Source Title",
+      "type": "string"
+    },
+    "stage": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Stage"
+    }
+  },
+  "required": [
+    "chunk_id",
+    "source_id",
+    "source_title",
+    "content_type",
+    "similarity",
+    "snippet"
+  ],
+  "title": "KnowledgeReference",
+  "type": "object"
+}

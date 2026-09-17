@@ -1,0 +1,28 @@
+{
+  "scenario": "Budget limit",
+  "important_finding": "This codebase currently implements a CONTEXT-WINDOW budget (how much text fits in one prompt), not a SPEND budget (a dollar/cost ceiling). No cost-ceiling or spend-limit enforcement of any kind was found in ai_generation.py, loop_engine.py, or agent_runs.py during this inspection. This fixture documents the context-window behavior precisely (real, testable) and explicitly marks spend-limit enforcement as ABSENT rather than fabricating a stop-at-$X mechanism that does not exist.",
+  "code_path": [
+    "TokenBudgetService.build() (apps/api/app/services/token_budget.py:150-198)",
+    "priority order P0 > P1 > P2 > P3 > P4 > P5 (token_budget.py:14-33)"
+  ],
+  "input": {
+    "context_token_budget": "REDACTED small value for the fixture, e.g. 500 (WorkflowNode.context_token_budget)",
+    "blocks": [
+      { "priority": "P0", "label": "current_instruction", "compressible": true, "approx_tokens": 200 },
+      { "priority": "P1", "label": "node_rules", "compressible": true, "approx_tokens": 150 },
+      { "priority": "P2", "label": "summary:REDACTED_artifact_type", "compressible": true, "approx_tokens": 300 },
+      { "priority": "P3", "label": "rag:REDACTED_source:0", "compressible": false, "approx_tokens": 200 },
+      { "priority": "P4", "label": "review_comments", "compressible": false, "approx_tokens": 100 }
+    ]
+  },
+  "expected": {
+    "processing_order": "P0, P1, P2, P3, P4 — strictly by PRIORITY_ORDER, not by size or arrival order",
+    "p0_p1_p2_behavior": "included as-is if they fit in remaining budget; otherwise truncated to whatever budget remains (never below MIN_COMPRESSED_TOKENS=40) — never dropped entirely",
+    "p3_p4_p5_behavior": "included whole if they fit; otherwise dropped entirely (never partially truncated) — token_budget.py:171-186",
+    "over_budget_flag": "TokenBudgetResult.over_budget == (raw_estimated_tokens > context_token_budget) — informational only, does not block or raise",
+    "dropped_labels_reported": "TokenBudgetResult.dropped_labels lists every block priority P3-P5 that didn't fit, surfaced in AgentRun.token_budget_report.blocks[*].included=false",
+    "hard_stop_behavior": "NONE — the call to the provider proceeds regardless of over_budget; TokenBudgetService never raises or refuses to build a result",
+    "spend_limit_enforcement": "ABSENT — no mechanism in this codebase compares AgentRun.cost or any running total against a ceiling and blocks further generation. Confirmed by grep across ai_generation.py, loop_engine.py, and the agent_runs/implementation_runs/test_runs/pr_review_runs routes for cost-limit/spend-limit logic — none found.",
+    "recommendation": "See baseline doc section 12, item 8 — a spend-limit check is a pure addition for Phase 01+, not a modification of existing behavior, and should default OFF behind a feature flag until evaluated."
+  }
+}

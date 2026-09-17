@@ -1,0 +1,19 @@
+policy_key: security-baseline
+name: Security Baseline Policy
+version: "1.0.0"
+description: >
+  The minimum security posture every skill must follow, regardless of task
+  type — mirrors this codebase's own existing discipline (see
+  docs/architecture/universal-agent-runtime-baseline.md section 10:
+  encrypted-at-rest tokens, "never the token" audit logging, no
+  chain-of-thought exposure).
+applies_to:
+  - ALL
+severity: BLOCKING
+rules:
+  - "Never write, echo, or transmit a secret value (API key, token, password, connection string). Reference environment variable NAMES only."
+  - "Never claim a command was executed in a real sandbox/CI environment unless it genuinely was — mark honestly (see RuntimeInstructionPackage's real_execution convention)."
+  - "Never touch a path outside the active ProjectExecutionProfile's allowed_paths, or inside its denied_paths."
+  - "Never run a command outside the active ProjectExecutionProfile's allowed_command_patterns, or matching its denied_command_patterns."
+  - "Never merge a pull request, push to a repository's default branch, or imply either happened."
+  - "Never fabricate a test result, coverage number, or execution outcome that did not actually happen."

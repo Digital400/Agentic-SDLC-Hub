@@ -1,0 +1,78 @@
+{
+  "$defs": {
+    "CompilerDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "default_max_context_tokens": {
+          "minimum": 1,
+          "title": "Default Max Context Tokens",
+          "type": "integer"
+        },
+        "default_max_output_tokens": {
+          "minimum": 1,
+          "title": "Default Max Output Tokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "default_max_context_tokens",
+        "default_max_output_tokens"
+      ],
+      "title": "CompilerDefaults",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "compiler": {
+      "$ref": "#/$defs/CompilerDefaults"
+    },
+    "default_policies": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Default Policies",
+      "type": "array"
+    },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "generated_dir": {
+      "title": "Generated Dir",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "policies_dir": {
+      "title": "Policies Dir",
+      "type": "string"
+    },
+    "schema_version": {
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "schemas_dir": {
+      "title": "Schemas Dir",
+      "type": "string"
+    },
+    "skills_dir": {
+      "title": "Skills Dir",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "name",
+    "description",
+    "skills_dir",
+    "policies_dir",
+    "schemas_dir",
+    "generated_dir",
+    "compiler"
+  ],
+  "title": "ProjectConfig",
+  "type": "object"
+}

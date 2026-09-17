@@ -1,0 +1,41 @@
+{
+  "additionalProperties": false,
+  "description": "What this task is actually trying to accomplish \u2014 kept separate\nfrom WorkPacket itself so \"the goal\" and \"the guardrails around\nachieving it\" (scope/tool/budget/approval policies) are independently\nreadable and independently testable.",
+  "properties": {
+    "extensions": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+      "title": "Extensions",
+      "type": "object"
+    },
+    "goal": {
+      "description": "A single, concrete statement of what a completed task should have achieved.",
+      "minLength": 1,
+      "title": "Goal",
+      "type": "string"
+    },
+    "non_goals": {
+      "description": "Explicitly out of scope \u2014 mirrors the existing 'Out of Scope' section convention (see STORY_LLD_SECTIONS, Phase 00 baseline appendix).",
+      "items": {
+        "type": "string"
+      },
+      "title": "Non Goals",
+      "type": "array"
+    },
+    "success_definition": {
+      "description": "How a resolver/human should recognize the goal was met \u2014 distinct from acceptance_criteria, which are individually checkable sub-conditions.",
+      "minLength": 1,
+      "title": "Success Definition",
+      "type": "string"
+    }
+  },
+  "required": [
+    "goal",
+    "success_definition"
+  ],
+  "title": "WorkObjective",
+  "type": "object"
+}

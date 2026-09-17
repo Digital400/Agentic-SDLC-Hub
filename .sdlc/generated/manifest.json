@@ -1,0 +1,12 @@
+{
+  "catalog_hash": "7b554f80816d86ad2a5b86b024cd277edcc7952e92895e21b92e2df9b1397d09",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "opencode.json"
+  ],
+  "generated_at": "2026-09-15T09:20:33.241162+00:00",
+  "policy_count": 3,
+  "skill_count": 13
+}

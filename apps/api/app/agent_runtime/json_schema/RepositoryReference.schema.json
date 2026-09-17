@@ -1,0 +1,43 @@
+{
+  "additionalProperties": false,
+  "description": "Which repository, and which exact commit, a task's scope applies\nto. Deliberately vendor-neutral: `provider` is a free-text label (e.g.\n\"github\"), not a closed enum tied to this codebase's current sole\nintegration (app/services/github_integration.py) \u2014 Phase 01 defines\nthe contract shape, not a commitment to GitHub specifically.\n\nHARD RULE: `base_commit_sha` is REQUIRED and immutable once the\nWorkPacket is created \u2014 a runtime must pin its scope to a known\ncommit, never \"the current tip of base_branch at execution time,\"\nso a delayed or retried execution can't silently pick up unrelated\nintervening changes. `base_branch` is carried alongside purely for\nhuman/audit readability (e.g. rendering \"based on main @ <sha>\"); the\nSHA, not the branch name, is what actually pins scope.",
+  "properties": {
+    "base_branch": {
+      "description": "Human-readable only \u2014 base_commit_sha is what actually pins scope.",
+      "minLength": 1,
+      "title": "Base Branch",
+      "type": "string"
+    },
+    "base_commit_sha": {
+      "description": "Immutable, required. The exact commit this task's scope is pinned to.",
+      "minLength": 7,
+      "title": "Base Commit Sha",
+      "type": "string"
+    },
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "owner": {
+      "minLength": 1,
+      "title": "Owner",
+      "type": "string"
+    },
+    "provider": {
+      "description": "Free-text VCS provider label, e.g. 'github'. Not a closed enum \u2014 see class docstring.",
+      "minLength": 1,
+      "title": "Provider",
+      "type": "string"
+    }
+  },
+  "required": [
+    "provider",
+    "owner",
+    "name",
+    "base_branch",
+    "base_commit_sha"
+  ],
+  "title": "RepositoryReference",
+  "type": "object"
+}

@@ -130,7 +130,11 @@ class AgentGenerationResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
-    cost: float = 0.0
+    # float on every existing (legacy) call path, unchanged. None is only
+    # possible via the Phase 05 gateway path (Settings.MODEL_GATEWAY_MODE
+    # == "gateway", off by default) — see app/model_gateway/cost.py's Cost
+    # type: an explicit "unknown," never silently coerced to 0.0.
+    cost: float | None = 0.0
     used_mock: bool = False
     # Token Budget Service output (see app/services/token_budget.py) — the
     # pre-call estimate and the full per-block report, for AgentRun's
@@ -738,8 +742,6 @@ def generate(
     path (see mock_agent.generate_mock_output's docstring);
     `validation_feedback` is included in a real call's context either way.
     """
-    provider = get_active_provider()
-
     # Rule: a human-triggered revise (IMPROVE) or a validator's full-document
     # check (VALIDATE) both need full content, not a summary — see
     # build_prioritized_context's docstring.
@@ -760,6 +762,19 @@ def generate(
         review_comments=review_comments,
         current_draft_content=current_draft_content,
     )
+
+    # Phase 05 strangler-migration branch — see
+    # app/model_gateway/__init__.py. Settings.MODEL_GATEWAY_MODE defaults
+    # to "legacy", so this branch is never taken by default and every line
+    # below it (get_active_provider() through the final _generate_with_*
+    # dispatch) remains byte-for-byte what it always was.
+    if get_settings().MODEL_GATEWAY_MODE == "gateway":
+        result = _generate_via_gateway(system_prompt=_build_system_prompt(active_prompt), user_content=budget_result.assembled_text(), output_token_budget=output_token_budget)
+        result.estimated_context_tokens = budget_result.estimated_tokens
+        result.token_budget_report = budget_result.to_report_dict()
+        return result
+
+    provider = get_active_provider()
 
     if provider == "mock":
         # Local import avoids a hard dependency the other direction (mock
@@ -815,7 +830,14 @@ def generate_raw_text(*, system_prompt: str, user_content: str, output_token_bud
     instead). Raises AIGenerationError on a provider failure, same as
     `generate`. Never called when the mock provider is active — mock
     summaries use a deterministic heuristic instead (see
-    artifact_summary.py), so this assumes a real key is configured."""
+    artifact_summary.py), so this assumes a real key is configured.
+
+    Phase 05 strangler-migration branch — see generate()'s own comment on
+    the same Settings.MODEL_GATEWAY_MODE check; defaults to "legacy", so
+    the dispatch below is unchanged by default."""
+    if get_settings().MODEL_GATEWAY_MODE == "gateway":
+        return _generate_via_gateway(system_prompt=system_prompt, user_content=user_content, output_token_budget=output_token_budget).content_markdown
+
     provider = get_active_provider()
     if provider == "gemini":
         result = _generate_with_gemini(system_prompt, user_content, output_token_budget)
@@ -828,3 +850,62 @@ def generate_raw_text(*, system_prompt: str, user_content: str, output_token_bud
     else:
         result = _generate_with_anthropic(system_prompt, user_content, output_token_budget)
     return result.content_markdown
+
+
+def _generate_via_gateway(*, system_prompt: str, user_content: str, output_token_budget: int) -> AgentGenerationResult:
+    """The Phase 05 gateway path — routes through
+    app.model_gateway.select_gateway() + PolicyDrivenRouter using
+    DEFAULT_MODEL_POLICY, then converts the resulting GatewayResponse back
+    into this module's own AgentGenerationResult shape so both `generate`
+    and `generate_raw_text` keep their existing return contracts
+    regardless of which path served the call. Only reachable when
+    Settings.MODEL_GATEWAY_MODE == "gateway" — see both callers' own
+    comments. Local import: ai_generation.py has no reason to import
+    app.model_gateway on the (default) legacy path, same "avoid a hard
+    dependency the other direction" reasoning `generate`'s own mock-path
+    import of app.services.mock_agent already documents.
+    """
+    from app.model_gateway import DEFAULT_MODEL_POLICY, GatewayRequest, PolicyDrivenRouter, select_gateway
+    from app.model_gateway.base import ModelGatewayError
+
+    gateway = select_gateway()
+    router = PolicyDrivenRouter(gateway, DEFAULT_MODEL_POLICY)
+    request = GatewayRequest(
+        alias=DEFAULT_MODEL_POLICY.default_alias, system_prompt=system_prompt, user_content=user_content,
+        output_token_budget=output_token_budget,
+    )
+    try:
+        response = router.generate(request)
+    except ModelGatewayError as exc:
+        raise AIGenerationError(str(exc)) from exc
+
+    # Adapters differ in whether they've already parsed the two-part
+    # draft/clarification contract themselves: LegacyModelGateway delegates
+    # to ai_generation.py's own _generate_with_* functions, which already
+    # ran _parse_response internally — response.needs_clarification is
+    # authoritative there. The newer adapters (ollama/openrouter/litellm)
+    # return raw, unparsed provider text with needs_clarification hardcoded
+    # False (see each adapter's own docstring) — for those, parse it here.
+    # Trusting an adapter's own True signal first, before ever re-parsing,
+    # means this never loses an already-correct clarification result.
+    if response.needs_clarification:
+        needs_clarification = True
+        questions = response.clarification_questions
+        content_markdown = format_clarification_output(questions)
+    else:
+        needs_clarification, questions, content_markdown = _parse_response(response.content_markdown)
+        if needs_clarification:
+            content_markdown = format_clarification_output(questions)
+
+    return AgentGenerationResult(
+        content_markdown=content_markdown,
+        needs_clarification=needs_clarification,
+        clarification_questions=questions,
+        prompt_tokens=response.prompt_tokens,
+        completion_tokens=response.completion_tokens,
+        total_tokens=response.total_tokens,
+        # See app/model_gateway/cost.py's Cost.to_report_value — None means
+        # genuinely unknown, never silently coerced to 0.0 here.
+        cost=response.cost.to_report_value(),
+        used_mock=response.used_mock,
+    )

@@ -442,3 +442,226 @@ class RepositoryFileEntryType(str, enum.Enum):
 
     FILE = "FILE"
     DIRECTORY = "DIRECTORY"
+
+
+class ProjectExecutionProfileType(str, enum.Enum):
+    """Which of the two profile flows produced/applies to one
+    ProjectExecutionProfile — see app/models/project_execution_profile.py.
+    NEW_PROJECT: the user selects an approved company stack/template and a
+    profile is generated from it, before any scaffolding happens.
+    EXISTING_REPOSITORY: the profile is detected from a real repository's
+    already-committed configuration files (see
+    app/services/execution_profile_detection.py) and proposed for review."""
+
+    NEW_PROJECT = "NEW_PROJECT"
+    EXISTING_REPOSITORY = "EXISTING_REPOSITORY"
+
+
+class ProjectExecutionProfileSource(str, enum.Enum):
+    """How one profile's field values were derived — distinct from
+    ProjectExecutionProfileType (which flow this profile belongs to):
+    a NEW_PROJECT profile is always TEMPLATE-sourced; an
+    EXISTING_REPOSITORY profile is normally DETECTED, but MANUAL is
+    reserved for a human-edited revision of either (see
+    ProjectExecutionProfileStatus — a MANUAL profile is still a brand new
+    version, never an in-place edit of an approved one)."""
+
+    DETECTED = "DETECTED"
+    TEMPLATE = "TEMPLATE"
+    MANUAL = "MANUAL"
+
+
+class ProjectExecutionProfileStatus(str, enum.Enum):
+    """One profile version's place in its own approval lifecycle — see
+    app/models/project_execution_profile.py's class docstring for the
+    versioning rule this backs (immutable rows, at most one APPROVED +
+    is_active=True per project at a time).
+
+    DRAFT              — detected/generated, not yet submitted for approval.
+    PENDING_APPROVAL    — submitted; awaiting a Project Owner decision.
+    APPROVED            — a Project Owner approved it. Exactly the state a
+                          "coding runtime" gate checks for (together with
+                          is_active) before any execution may start — see
+                          app/services/execution_profile_gate.py.
+    REJECTED            — a Project Owner rejected it; terminal, not
+                          resubmittable (propose a new version instead).
+    SUPERSEDED          — was APPROVED, but a newer version has since been
+                          approved in its place; kept for audit history,
+                          no longer active.
+    """
+
+    DRAFT = "DRAFT"
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    SUPERSEDED = "SUPERSEDED"
+
+
+class DataClassification(str, enum.Enum):
+    """How sensitive this project's own data/code is — informs which
+    tools/network access a coding runtime should be trusted with (e.g. a
+    RESTRICTED project's runtime should never get outbound network access
+    regardless of NetworkPolicy defaults). A profile-level declaration,
+    not enforced by any runtime yet — see app/agent_runtime's own "no
+    runtime connected yet" scope note (Phase 01)."""
+
+    PUBLIC = "PUBLIC"
+    INTERNAL = "INTERNAL"
+    CONFIDENTIAL = "CONFIDENTIAL"
+    RESTRICTED = "RESTRICTED"
+
+
+class NetworkPolicyDefault(str, enum.Enum):
+    """The default posture for network access not explicitly listed in a
+    NetworkPolicy's allow/deny domain lists — see
+    app/schemas/project_execution_profile.py's NetworkPolicy. DENY is the
+    fail-closed default, matching ScopePolicy/ToolPolicy's own
+    deny_by_default convention in app/agent_runtime/policies.py (Phase 01)."""
+
+    DENY = "DENY"
+    ALLOW = "ALLOW"
+
+
+class AgentJobStatus(str, enum.Enum):
+    """One AgentJob's lifecycle state — see
+    app/models/agent_job.py and app/services/agent_jobs/job_service.py.
+
+    QUEUED              — created, not yet picked up by a dispatcher/worker.
+    PREPARING            — a worker has claimed it; compiling/resolving
+                          context (Phase 04 PromptCompiler) before any
+                          model call.
+    RUNNING              — a model/tool call is actually in flight.
+    WAITING_INPUT         — stopped for a human clarification answer (see
+                          app/agent_runtime's ClarificationRequest) — not
+                          resumed in place; see continuation_of_job_id.
+    WAITING_APPROVAL       — stopped for a human approval decision (e.g. an
+                          Implementation Agent diff) — same continuation
+                          rule as WAITING_INPUT.
+    COMPLETED               — terminal success.
+    FAILED                    — terminal failure; see failure_category for
+                          transient vs. permanent.
+    CANCELLED                  — terminal; a human/system requested
+                          cancellation and it was honored.
+    STALE                        — terminal; no heartbeat within the
+                          configured window while RUNNING/PREPARING — see
+                          job_service.py's find_stale_jobs. Mirrors
+                          app.agent_runtime.ExecutionState.STALE's own
+                          Phase 01 reservation for exactly this gap.
+    """
+
+    QUEUED = "QUEUED"
+    PREPARING = "PREPARING"
+    RUNNING = "RUNNING"
+    WAITING_INPUT = "WAITING_INPUT"
+    WAITING_APPROVAL = "WAITING_APPROVAL"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    STALE = "STALE"
+
+
+class AgentJobEventType(str, enum.Enum):
+    """One normalized runtime event kind — see
+    app/models/agent_job.py's AgentJobEvent and
+    app/services/agent_jobs/events.py. "Normalized" means every dispatcher
+    backend (InlineJobDispatcher, CeleryJobDispatcher, any future one)
+    emits the SAME event shapes regardless of which model/tool/provider
+    actually produced the underlying activity — a caller polling
+    GET /agent-jobs/{id}/events never needs to know which backend ran the
+    job.
+    """
+
+    STATUS = "STATUS"
+    PLAN_SUMMARY = "PLAN_SUMMARY"
+    TOOL_REQUEST = "TOOL_REQUEST"
+    TOOL_RESULT = "TOOL_RESULT"
+    FILE_CHANGE = "FILE_CHANGE"
+    COMMAND = "COMMAND"
+    TEST_RESULT = "TEST_RESULT"
+    USAGE = "USAGE"
+    APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
+    ARTIFACT = "ARTIFACT"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    COMPLETED = "COMPLETED"
+
+
+class JobFailureCategory(str, enum.Enum):
+    """Whether a FAILED AgentJob is worth retrying as-is — see
+    app/services/agent_jobs/failure_classification.py. Mirrors
+    app.agent_runtime.RuntimeFailure.retryable's same TRANSIENT/PERMANENT
+    distinction (Phase 01), now applied at the job-persistence layer."""
+
+    TRANSIENT = "TRANSIENT"
+    PERMANENT = "PERMANENT"
+
+
+class OutboxEntryStatus(str, enum.Enum):
+    """One AgentJobOutboxEntry's delivery state — see
+    app/services/agent_jobs/outbox.py's module docstring for the
+    write-ahead pattern this backs."""
+
+    PENDING = "PENDING"
+    SENT = "SENT"
+    FAILED = "FAILED"
+
+
+class RuntimeRole(str, enum.Enum):
+    """Phase 07's runtime/credential-broker/organization-project RBAC role
+    set — see app/runtime_security/rbac.py. Deliberately a NEW, separate
+    enum from UserRole (app/models/enums.py, used by
+    app/services/permissions.py's existing per-stage content-authoring
+    checks) and from ProjectRole (app/models/project.py's ProjectMember,
+    which the Phase 00 baseline found is written once at project creation
+    and never actually read/enforced anywhere) — this phase's own RBAC
+    system is additive, not a replacement for either existing one; see
+    app/runtime_security/__init__.py's module docstring for why.
+    """
+
+    ADMIN = "ADMIN"
+    PROJECT_OWNER = "PROJECT_OWNER"
+    ARCHITECT = "ARCHITECT"
+    DEVELOPER = "DEVELOPER"
+    REVIEWER = "REVIEWER"
+    QA = "QA"
+    AUDITOR = "AUDITOR"
+    VIEWER = "VIEWER"
+
+
+class RoleAssignmentScope(str, enum.Enum):
+    """Whether a RuntimeRoleAssignment grants a role organization-wide or
+    for exactly one project — see
+    app/models/runtime_security.py's RuntimeRoleAssignment."""
+
+    ORGANIZATION = "ORGANIZATION"
+    PROJECT = "PROJECT"
+
+
+class AuthenticationMethod(str, enum.Enum):
+    """How an AuthenticatedActor's identity was established — see
+    app/runtime_security/identity.py. Recorded on every authorization
+    audit entry (never silently assumed) so an auditor can distinguish a
+    real corporate sign-in from the local-development carve-out."""
+
+    OIDC = "OIDC"
+    LOCAL_DEV = "LOCAL_DEV"
+
+
+class CredentialKind(str, enum.Enum):
+    """What kind of credential app.runtime_security.credential_broker
+    issued — recorded on every audit entry, never the credential value
+    itself."""
+
+    GITHUB_APP_INSTALLATION_TOKEN = "GITHUB_APP_INSTALLATION_TOKEN"
+    GITHUB_PAT_FALLBACK = "GITHUB_PAT_FALLBACK"
+
+
+class SensitiveActionKind(str, enum.Enum):
+    """The four action kinds this phase requires human approval for,
+    without exception — see
+    app/runtime_security/authorization.py's AuthorizationService."""
+
+    REPOSITORY_PUSH = "REPOSITORY_PUSH"
+    PULL_REQUEST_CREATE = "PULL_REQUEST_CREATE"
+    PULL_REQUEST_COMMENT = "PULL_REQUEST_COMMENT"
+    INFRASTRUCTURE_ACTION = "INFRASTRUCTURE_ACTION"

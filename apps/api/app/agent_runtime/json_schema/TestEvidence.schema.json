@@ -1,0 +1,85 @@
+{
+  "$defs": {
+    "TestResult": {
+      "description": "Mirrors testing_agent.py's _VALID_RESULTS \u2014 an unparseable/missing\nresult must be coerced to FAIL by whatever produces a TestEvidence row,\nnever silently treated as PASS (same honesty rule as the existing\nTesting Agent, Phase 00 baseline section 8).",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "SKIPPED"
+      ],
+      "title": "TestResult",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One test's result \u2014 mirrors testing_agent.py's TestExecuted. See\nmodule docstring's HONESTY RULE for `real_execution`; an unparseable or\nmissing result must be recorded as FAIL, never silently upgraded to\nPASS (same rule testing_agent.py's own _run_real_agent already\nenforces, Phase 00 baseline section 8).",
+  "properties": {
+    "criterion_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional link back to a WorkPacket.acceptance_criteria[].id this test verifies.",
+      "title": "Criterion Id"
+    },
+    "duration_seconds": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Duration Seconds"
+    },
+    "extensions": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+      "title": "Extensions",
+      "type": "object"
+    },
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "notes": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Notes"
+    },
+    "real_execution": {
+      "description": "True only if this test was actually run. False for a reasoning-based assessment.",
+      "title": "Real Execution",
+      "type": "boolean"
+    },
+    "result": {
+      "$ref": "#/$defs/TestResult"
+    }
+  },
+  "required": [
+    "name",
+    "result",
+    "real_execution"
+  ],
+  "title": "TestEvidence",
+  "type": "object"
+}

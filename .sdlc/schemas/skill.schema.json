@@ -1,0 +1,137 @@
+{
+  "$defs": {
+    "SkillExample": {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "minLength": 1,
+          "title": "Input",
+          "type": "string"
+        },
+        "output": {
+          "minLength": 1,
+          "title": "Output",
+          "type": "string"
+        },
+        "scenario": {
+          "minLength": 1,
+          "title": "Scenario",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scenario",
+        "input",
+        "output"
+      ],
+      "title": "SkillExample",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The fully parsed, validated form of one `.sdlc/skills/<key>/vN.md`\nfile \u2014 every field this phase's instructions require, no more:\nname, version, purpose, applicable task types, required inputs,\nprocedure, validation checklist, output contract, prohibited actions,\nallowed tool categories, short examples.",
+  "properties": {
+    "allowed_tool_categories": {
+      "description": "Coarse categories, e.g. 'file_read' \u2014 intersected against RuntimeCapabilityManifest.supported_tool_categories at compile time (see compiler.py), never trusted alone.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Allowed Tool Categories",
+      "type": "array"
+    },
+    "applicable_task_types": {
+      "description": "One or more app.agent_runtime.WorkPacketTaskType values this skill applies to.",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Applicable Task Types",
+      "type": "array"
+    },
+    "examples": {
+      "items": {
+        "$ref": "#/$defs/SkillExample"
+      },
+      "title": "Examples",
+      "type": "array"
+    },
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "output_contract": {
+      "description": "Parsed from '## Output Contract' \u2014 kept as prose (a format description), not further structured, since output shapes vary per skill (Markdown headings for a drafting skill, a JSON key list for a structured skill).",
+      "minLength": 1,
+      "title": "Output Contract",
+      "type": "string"
+    },
+    "procedure": {
+      "description": "Ordered steps \u2014 parsed from the '## Procedure' body section, one entry per numbered/bulleted line.",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Procedure",
+      "type": "array"
+    },
+    "prohibited_actions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Prohibited Actions",
+      "type": "array"
+    },
+    "purpose": {
+      "minLength": 1,
+      "title": "Purpose",
+      "type": "string"
+    },
+    "required_inputs": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Required Inputs",
+      "type": "array"
+    },
+    "skill_key": {
+      "description": "Directory name under .sdlc/skills/ \u2014 stable identity across versions.",
+      "minLength": 1,
+      "title": "Skill Key",
+      "type": "string"
+    },
+    "source_path": {
+      "description": "Relative path this skill was loaded from, for audit/debugging \u2014 not part of the file's own frontmatter.",
+      "title": "Source Path",
+      "type": "string"
+    },
+    "validation_checklist": {
+      "description": "Parsed from '## Validation Checklist'.",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Validation Checklist",
+      "type": "array"
+    },
+    "version": {
+      "description": "e.g. '1.0.0' \u2014 matched against the filename (vN.md) at load time; see load_skill's consistency check.",
+      "minLength": 1,
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "skill_key",
+    "name",
+    "version",
+    "purpose",
+    "applicable_task_types",
+    "procedure",
+    "validation_checklist",
+    "output_contract",
+    "source_path"
+  ],
+  "title": "Skill",
+  "type": "object"
+}

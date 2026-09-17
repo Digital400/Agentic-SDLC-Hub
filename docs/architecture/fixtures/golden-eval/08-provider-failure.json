@@ -1,0 +1,30 @@
+{
+  "scenario": "Provider failure",
+  "code_path_variant_a_draft_or_loop_run": [
+    "_generate_with_<provider>() raises AIGenerationError (e.g. anthropic.APIError, httpx.HTTPError, ollama client exception — apps/api/app/services/ai_generation.py:463-464,510-514,569-573,612-613,666-671)",
+    "propagates up through LoopEngineService.run_loop / ai_generation.generate (not caught inside the loop)",
+    "apps/api/app/api/routes/agent_runs.py:341-343 — except AIGenerationError: graph_engine.mark_failed(node); return _fail(...)"
+  ],
+  "code_path_variant_b_structured_json_agent": [
+    "generate_raw_text() raises AIGenerationError inside _run_real_agent()",
+    "caught by run_implementation_agent / run_testing_agent / run_pr_review_agent's own except clause",
+    "falls back to the deterministic heuristic result — NOT surfaced as a run failure"
+  ],
+  "trigger_examples_redacted": [
+    "Anthropic API returns 401 (invalid/revoked key) — anthropic.APIError",
+    "OpenRouter/NVIDIA request times out after 300s or returns non-2xx — httpx.HTTPError, re-raised as AIGenerationError with the httpx exception message only (never Authorization header or key)",
+    "Ollama unreachable or times out after 180s generation timeout — wrapped Exception -> AIGenerationError"
+  ],
+  "expected_variant_a": {
+    "workflow_node_status_after": "FAILED (graph_engine.mark_failed)",
+    "agent_run_status": "FAILED",
+    "agent_run_error_message": "'AI generation failed: <provider exception message>' — never includes the API key or Authorization header, per the httpx.HTTPError handling in each provider function",
+    "audit_log_entry": "action='agent_run.failed', extra_data={'error': <message>}",
+    "retryable": "yes — FAILED is in RUNNABLE_STATUSES (graph_engine.py:48-55), so the node can be run again directly without a manual override"
+  },
+  "expected_variant_b": {
+    "implementation_run_or_test_run_or_pr_review_run_status": "COMPLETED (not FAILED) — the outer route's except clause only catches truly unexpected exceptions (implementation_runs.py:302-313); a provider failure inside run_implementation_agent is already swallowed one level down and converted to a heuristic COMPLETED result",
+    "used_mock": true,
+    "distinguishing_field": "none — as noted in fixture 03, a provider outage and an unconfigured provider produce identical used_mock=true output; this is a real observability gap, not fabricated as resolved"
+  }
+}

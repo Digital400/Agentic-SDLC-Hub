@@ -1,0 +1,73 @@
+{
+  "additionalProperties": false,
+  "description": "No vendor-mandatory field (hard rule 1) \u2014 `runtime_name` is a\nfree-text label a runtime chooses for itself (e.g. \"claude-code\",\n\"generic-ci-container\"), not a closed enum of known vendors; anything\nvendor-specific about HOW a capability is realized belongs in\n`extensions`, never as a new field here.",
+  "properties": {
+    "extensions": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+      "title": "Extensions",
+      "type": "object"
+    },
+    "max_context_tokens": {
+      "description": "This runtime's own hard context-window ceiling \u2014 PromptCompiler trims to min(this, BudgetPolicy.max_context_tokens).",
+      "minimum": 1,
+      "title": "Max Context Tokens",
+      "type": "integer"
+    },
+    "max_output_tokens": {
+      "minimum": 1,
+      "title": "Max Output Tokens",
+      "type": "integer"
+    },
+    "response_formats": {
+      "description": "Which response contracts this runtime can follow, e.g. 'markdown_with_clarification_header' (see ai_generation.py's existing two-part contract, Phase 00 baseline section 6.1) or 'structured_json' (see implementation_agent.py/testing_agent.py/pr_review_agent.py's shared JSON contract, Phase 00 baseline section 1.4).",
+      "items": {
+        "type": "string"
+      },
+      "title": "Response Formats",
+      "type": "array"
+    },
+    "runtime_name": {
+      "description": "A free-text, self-declared runtime label \u2014 not a closed vendor enum. See class docstring.",
+      "minLength": 1,
+      "title": "Runtime Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "supported_tool_categories": {
+      "description": "Coarse categories this runtime can actually invoke, e.g. 'file_read', 'file_write', 'shell_command', 'network_request' \u2014 PromptCompiler only ever instructs the runtime to use a tool category both this manifest AND the ProjectExecutionProfile/ToolPolicy allow (the intersection, never either alone).",
+      "items": {
+        "type": "string"
+      },
+      "title": "Supported Tool Categories",
+      "type": "array"
+    },
+    "supports_streaming": {
+      "default": false,
+      "description": "Advisory only \u2014 no contract here changes shape based on streaming; informational for a caller's own transport choice.",
+      "title": "Supports Streaming",
+      "type": "boolean"
+    },
+    "supports_structured_output": {
+      "default": false,
+      "description": "Whether this runtime can reliably emit schema-conformant JSON (vs. only free-form Markdown) \u2014 affects which response_format PromptCompiler selects.",
+      "title": "Supports Structured Output",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "runtime_name",
+    "max_context_tokens",
+    "max_output_tokens"
+  ],
+  "title": "RuntimeCapabilityManifest",
+  "type": "object"
+}

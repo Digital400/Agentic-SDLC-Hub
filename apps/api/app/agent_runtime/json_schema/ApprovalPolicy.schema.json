@@ -1,0 +1,30 @@
+{
+  "additionalProperties": false,
+  "description": "Who, if anyone, must sign off on this task's output before it is\nconsidered final \u2014 generalizes the per-stage STAGE_APPROVE_ROLES table\n(app/services/permissions.py, Phase 00 baseline section 10) and the\nImplementation Run accept/reject gate (section 7) into one reusable\nshape. `approval_roles` uses plain strings, not app.models.enums.UserRole\ndirectly \u2014 this package must stay importable without a hard dependency\non the application's own ORM/enum layer (this is a wire contract, meant\nto also be consumable by an out-of-process runtime), so role names are\nvalidated as non-empty strings, not as members of that specific enum.",
+  "properties": {
+    "approval_roles": {
+      "description": "Role names permitted to approve this task's output, e.g. ['TECH_LEAD']. Empty with requires_human_approval=True means 'any authorized reviewer' \u2014 a resolver-level policy decision, not resolved here.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Approval Roles",
+      "type": "array"
+    },
+    "escalation_roles": {
+      "description": "Optional additional roles notified if approval is overdue \u2014 advisory only, not enforced by this contract.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Escalation Roles",
+      "type": "array"
+    },
+    "requires_human_approval": {
+      "default": true,
+      "description": "False only for a task type/stage explicitly configured to complete without a review gate \u2014 mirrors WorkflowNode.requires_human_approval.",
+      "title": "Requires Human Approval",
+      "type": "boolean"
+    }
+  },
+  "title": "ApprovalPolicy",
+  "type": "object"
+}

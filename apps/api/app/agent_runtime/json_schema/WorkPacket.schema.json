@@ -1,0 +1,671 @@
+{
+  "$defs": {
+    "AcceptanceCriterion": {
+      "additionalProperties": false,
+      "description": "One checkable condition a completed WorkPacket is expected to\nsatisfy \u2014 mirrors ImplementationTask.acceptance_criteria, promoted to\na structured type here so RequiredCheck/TestEvidence can reference a\nspecific criterion by id rather than re-matching free text.",
+      "properties": {
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "id": {
+          "description": "Stable within one WorkPacket \u2014 e.g. 'AC-1'. Referenced by TestEvidence.criterion_id.",
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "verification_method": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Free-text hint for how this should be checked, e.g. 'unit test' or 'manual QA' \u2014 advisory only, not enforced by this contract.",
+          "title": "Verification Method"
+        }
+      },
+      "required": [
+        "id",
+        "description"
+      ],
+      "title": "AcceptanceCriterion",
+      "type": "object"
+    },
+    "ApprovalPolicy": {
+      "additionalProperties": false,
+      "description": "Who, if anyone, must sign off on this task's output before it is\nconsidered final \u2014 generalizes the per-stage STAGE_APPROVE_ROLES table\n(app/services/permissions.py, Phase 00 baseline section 10) and the\nImplementation Run accept/reject gate (section 7) into one reusable\nshape. `approval_roles` uses plain strings, not app.models.enums.UserRole\ndirectly \u2014 this package must stay importable without a hard dependency\non the application's own ORM/enum layer (this is a wire contract, meant\nto also be consumable by an out-of-process runtime), so role names are\nvalidated as non-empty strings, not as members of that specific enum.",
+      "properties": {
+        "approval_roles": {
+          "description": "Role names permitted to approve this task's output, e.g. ['TECH_LEAD']. Empty with requires_human_approval=True means 'any authorized reviewer' \u2014 a resolver-level policy decision, not resolved here.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Approval Roles",
+          "type": "array"
+        },
+        "escalation_roles": {
+          "description": "Optional additional roles notified if approval is overdue \u2014 advisory only, not enforced by this contract.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Escalation Roles",
+          "type": "array"
+        },
+        "requires_human_approval": {
+          "default": true,
+          "description": "False only for a task type/stage explicitly configured to complete without a review gate \u2014 mirrors WorkflowNode.requires_human_approval.",
+          "title": "Requires Human Approval",
+          "type": "boolean"
+        }
+      },
+      "title": "ApprovalPolicy",
+      "type": "object"
+    },
+    "ArtifactReference": {
+      "additionalProperties": false,
+      "description": "A pointer to an approved upstream artifact \u2014 never its full content\n(hard rule 3). Mirrors the existing approved_artifact_content/\napproved_artifact_summaries split in\napp/services/ai_generation.py's build_prioritized_context: `summary`\nhere plays the same role as agent_context_summary there (a bounded,\npre-computed stand-in for the full document), and is the ONLY textual\ncontent this reference may carry \u2014 there is deliberately no\n`full_content` field on this model.",
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "artifact_type": {
+          "description": "e.g. 'hld_document', 'story_backlog', 'lld_document'.",
+          "minLength": 1,
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "artifact_version_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "None means 'the artifact's current version' \u2014 resolved at execution time, not pinned.",
+          "title": "Artifact Version Id"
+        },
+        "status": {
+          "description": "The artifact's status at reference time, e.g. 'APPROVED' \u2014 for audit/display only, not re-validated by this contract.",
+          "minLength": 1,
+          "title": "Status",
+          "type": "string"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "maxLength": 4000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A bounded context summary (see app/services/artifact_summary.py) \u2014 never the full document body.",
+          "title": "Summary"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "artifact_type",
+        "status"
+      ],
+      "title": "ArtifactReference",
+      "type": "object"
+    },
+    "BudgetPolicy": {
+      "additionalProperties": false,
+      "description": "Every resource ceiling a WorkPacket's execution must respect \u2014 the\n\"maximum cost, time, calls, tools and repair attempts\" this phase's\ninstructions require. All fields are optional (None = \"no explicit\nceiling from this packet\"); a resolver applying this packet is expected\nto fall back to its own platform-wide default when a field is None,\nnever to treat None as \"unlimited\" silently \u2014 that interpretation is a\nresolver policy decision, deliberately left outside this schema.\n\n`max_repair_attempts` mirrors app/services/loop_engine.py's\nDEFAULT_MAX_ITERATIONS (currently 3, hardcoded with no per-stage\noverride \u2014 see the Phase 00 baseline section 6.2 and section 12 item 4)\n\u2014 this field is exactly the seam that gap would be closed through.",
+      "properties": {
+        "max_context_tokens": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional override of the context-window budget a resolver should apply \u2014 mirrors WorkflowNode.context_token_budget (Phase 00 baseline section 3.3).",
+          "title": "Max Context Tokens"
+        },
+        "max_cost_usd": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Cost Usd"
+        },
+        "max_distinct_tools": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum number of DISTINCT tools (by name) that may be invoked \u2014 narrower than ToolPolicy.allowed_tools, which only says which tools are permitted at all.",
+          "title": "Max Distinct Tools"
+        },
+        "max_llm_calls": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum number of distinct model/completion calls, across every step of a run (mirrors summing across LoopEngineService iterations \u2014 Phase 00 baseline section 5).",
+          "title": "Max Llm Calls"
+        },
+        "max_output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Mirrors WorkflowNode.output_token_budget.",
+          "title": "Max Output Tokens"
+        },
+        "max_repair_attempts": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum number of improve/repair iterations after the first attempt \u2014 0 means 'no repair, first attempt only.' Mirrors LoopEngineService's max_iterations.",
+          "title": "Max Repair Attempts"
+        },
+        "max_tool_calls": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum number of tool/action invocations total, regardless of how many distinct tools are used.",
+          "title": "Max Tool Calls"
+        },
+        "max_wall_clock_seconds": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Wall Clock Seconds"
+        }
+      },
+      "title": "BudgetPolicy",
+      "type": "object"
+    },
+    "CheckSeverity": {
+      "description": "Whether a RequiredCheck failing blocks completion (BLOCKING) or is\ninformational only (ADVISORY) \u2014 mirrors the \"critical vs. suggestion\"\ndistinction already present in ValidatorResult\n(app/services/validator_agent.py's critical_issues vs. suggestions).",
+      "enum": [
+        "BLOCKING",
+        "ADVISORY"
+      ],
+      "title": "CheckSeverity",
+      "type": "string"
+    },
+    "KnowledgeReference": {
+      "additionalProperties": false,
+      "description": "A pointer to one retrieved Knowledge Base chunk \u2014 mirrors\napp/services/retrieval.py's RetrievedChunk. Unlike ArtifactReference,\na knowledge chunk IS already a bounded excerpt by construction (RAG\nchunks are pre-sized for exactly this purpose), so `snippet` carrying\nthat excerpt does not violate hard rule 3 the way embedding a full\nartifact would.",
+      "properties": {
+        "chunk_id": {
+          "minLength": 1,
+          "title": "Chunk Id",
+          "type": "string"
+        },
+        "content_type": {
+          "description": "e.g. 'COMPANY_STANDARD', 'PAST_ARTIFACT' \u2014 see KnowledgeContentType.",
+          "minLength": 1,
+          "title": "Content Type",
+          "type": "string"
+        },
+        "similarity": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Similarity",
+          "type": "number"
+        },
+        "snippet": {
+          "description": "The retrieved chunk's own bounded content \u2014 not a full document.",
+          "maxLength": 4000,
+          "title": "Snippet",
+          "type": "string"
+        },
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_title": {
+          "minLength": 1,
+          "title": "Source Title",
+          "type": "string"
+        },
+        "stage": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stage"
+        }
+      },
+      "required": [
+        "chunk_id",
+        "source_id",
+        "source_title",
+        "content_type",
+        "similarity",
+        "snippet"
+      ],
+      "title": "KnowledgeReference",
+      "type": "object"
+    },
+    "RepositoryReference": {
+      "additionalProperties": false,
+      "description": "Which repository, and which exact commit, a task's scope applies\nto. Deliberately vendor-neutral: `provider` is a free-text label (e.g.\n\"github\"), not a closed enum tied to this codebase's current sole\nintegration (app/services/github_integration.py) \u2014 Phase 01 defines\nthe contract shape, not a commitment to GitHub specifically.\n\nHARD RULE: `base_commit_sha` is REQUIRED and immutable once the\nWorkPacket is created \u2014 a runtime must pin its scope to a known\ncommit, never \"the current tip of base_branch at execution time,\"\nso a delayed or retried execution can't silently pick up unrelated\nintervening changes. `base_branch` is carried alongside purely for\nhuman/audit readability (e.g. rendering \"based on main @ <sha>\"); the\nSHA, not the branch name, is what actually pins scope.",
+      "properties": {
+        "base_branch": {
+          "description": "Human-readable only \u2014 base_commit_sha is what actually pins scope.",
+          "minLength": 1,
+          "title": "Base Branch",
+          "type": "string"
+        },
+        "base_commit_sha": {
+          "description": "Immutable, required. The exact commit this task's scope is pinned to.",
+          "minLength": 7,
+          "title": "Base Commit Sha",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "owner": {
+          "minLength": 1,
+          "title": "Owner",
+          "type": "string"
+        },
+        "provider": {
+          "description": "Free-text VCS provider label, e.g. 'github'. Not a closed enum \u2014 see class docstring.",
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "owner",
+        "name",
+        "base_branch",
+        "base_commit_sha"
+      ],
+      "title": "RepositoryReference",
+      "type": "object"
+    },
+    "RequiredCheck": {
+      "additionalProperties": false,
+      "description": "One check that must (BLOCKING) or should (ADVISORY) pass before this\ntask's output is considered acceptable \u2014 e.g. \"run the backend test\nsuite,\" \"no critical PR-review findings.\" Mirrors the\ntest_command/required_evidence_section concepts already present in this\ncodebase (ImplementationTask.test_expectation,\nGraphEngineService.validate_evidence_requirement \u2014 Phase 00 baseline\nsection 11) as a reusable, structured type instead of a single free-text\nfield.",
+      "properties": {
+        "command": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "An executable command a runtime could run to evaluate this check, e.g. 'cd apps/api && pytest -q'. Optional \u2014 not every check is command-shaped.",
+          "title": "Command"
+        },
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "name": {
+          "description": "e.g. 'backend-test-suite', 'pr-review-no-critical-findings'.",
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/CheckSeverity",
+          "default": "BLOCKING"
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "title": "RequiredCheck",
+      "type": "object"
+    },
+    "ScopePolicy": {
+      "additionalProperties": false,
+      "description": "What a task is, and is not, allowed to touch \u2014 file-path scope only\nin Phase 01 (no code-symbol-level scoping yet). `denied_paths` is\nintended to always win over `allowed_paths` on overlap, matching the\nfail-closed posture the rest of this codebase already uses for\nsecurity-relevant checks (e.g. app/core/security.py's token handling)\n\u2014 this contract carries that DATA; per hard rule 5, no resolver/\nenforcement logic exists in this package yet to actually apply it.\n\nGlob syntax (`fnmatch`-style, e.g. `apps/api/app/services/**`) is the\nexpected pattern shape; this contract does not itself validate glob\nsyntax \u2014 that's a resolver-time concern, not a schema concern.",
+      "properties": {
+        "allowed_paths": {
+          "description": "Glob patterns this task may create/modify/delete. Empty list means 'no explicit allow-list' \u2014 a resolver should treat that as deny-by-default unless deny_by_default is explicitly set False.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Paths",
+          "type": "array"
+        },
+        "denied_paths": {
+          "description": "Glob patterns this task may never touch, regardless of allowed_paths. Always wins on overlap.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Denied Paths",
+          "type": "array"
+        },
+        "deny_by_default": {
+          "default": true,
+          "description": "When true (default), a path matching neither list is denied \u2014 fail-closed. When false, an unmatched path is allowed (only denied_paths is enforced).",
+          "title": "Deny By Default",
+          "type": "boolean"
+        },
+        "max_files_changed": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional cap on distinct file paths touched, independent of BudgetPolicy's cost/time caps.",
+          "title": "Max Files Changed"
+        }
+      },
+      "title": "ScopePolicy",
+      "type": "object"
+    },
+    "ToolPolicy": {
+      "additionalProperties": false,
+      "description": "Which named tools/actions a runtime may invoke while executing this\npacket \u2014 identity/allow-deny only. How MANY tool calls are permitted in\ntotal is a BudgetPolicy concern (max_tool_calls), not this one; keeping\n\"which\" and \"how many\" on separate contracts means a caller can tighten\none without touching the other.",
+      "properties": {
+        "allowed_tools": {
+          "description": "Named tools/actions this task may invoke, e.g. 'read_file', 'run_tests', 'create_pull_request'. Empty means 'no explicit allow-list' \u2014 see deny_by_default.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Tools",
+          "type": "array"
+        },
+        "denied_tools": {
+          "description": "Always wins over allowed_tools on overlap.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Denied Tools",
+          "type": "array"
+        },
+        "deny_by_default": {
+          "default": true,
+          "description": "Same fail-closed semantics as ScopePolicy.deny_by_default.",
+          "title": "Deny By Default",
+          "type": "boolean"
+        },
+        "require_dry_run_first": {
+          "default": false,
+          "description": "Advisory flag: a resolver may require one dry-run/preview pass (e.g. a diff, never a real write) before any tool in allowed_tools may run for real.",
+          "title": "Require Dry Run First",
+          "type": "boolean"
+        }
+      },
+      "title": "ToolPolicy",
+      "type": "object"
+    },
+    "WorkObjective": {
+      "additionalProperties": false,
+      "description": "What this task is actually trying to accomplish \u2014 kept separate\nfrom WorkPacket itself so \"the goal\" and \"the guardrails around\nachieving it\" (scope/tool/budget/approval policies) are independently\nreadable and independently testable.",
+      "properties": {
+        "extensions": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+          "title": "Extensions",
+          "type": "object"
+        },
+        "goal": {
+          "description": "A single, concrete statement of what a completed task should have achieved.",
+          "minLength": 1,
+          "title": "Goal",
+          "type": "string"
+        },
+        "non_goals": {
+          "description": "Explicitly out of scope \u2014 mirrors the existing 'Out of Scope' section convention (see STORY_LLD_SECTIONS, Phase 00 baseline appendix).",
+          "items": {
+            "type": "string"
+          },
+          "title": "Non Goals",
+          "type": "array"
+        },
+        "success_definition": {
+          "description": "How a resolver/human should recognize the goal was met \u2014 distinct from acceptance_criteria, which are individually checkable sub-conditions.",
+          "minLength": 1,
+          "title": "Success Definition",
+          "type": "string"
+        }
+      },
+      "required": [
+        "goal",
+        "success_definition"
+      ],
+      "title": "WorkObjective",
+      "type": "object"
+    },
+    "WorkPacketTaskType": {
+      "description": "What kind of unit of work a WorkPacket describes. Deliberately a\nclosed set for Phase 01 (adding a new task type is a schema change, not\na free-text field) \u2014 every value here maps to an existing stage/agent\nalready inspected in the Phase 00 baseline\n(docs/architecture/universal-agent-runtime-baseline.md):\nREQUIREMENT_ANALYSIS/PROBLEM_DISCOVERY/SOLUTION_DISCOVERY/HLD -> the\nproject-level workflow stages; STORY_CRAFTING_VERTICAL/HORIZONTAL ->\nStoryType.VERTICAL/HORIZONTAL (app/models/enums.py); STORY_LLD ->\napp/services/story_lld_agent.py; IMPLEMENTATION_PLAN -> the\nimplementation_planning stage; IMPLEMENT_STORY -> the Implementation\nAgent (app/services/implementation_agent.py); TEST_STORY -> the Testing\nAgent (app/services/testing_agent.py); PR_REVIEW -> the PR Review Agent\n(app/services/pr_review_agent.py); INFRASTRUCTURE_CHANGE -> the\ninfrastructure/infrastructure_planning stages; MAINTENANCE_ANALYSIS ->\nthe maintenance stage.",
+      "enum": [
+        "REQUIREMENT_ANALYSIS",
+        "PROBLEM_DISCOVERY",
+        "SOLUTION_DISCOVERY",
+        "HLD",
+        "STORY_CRAFTING_VERTICAL",
+        "STORY_CRAFTING_HORIZONTAL",
+        "STORY_LLD",
+        "IMPLEMENTATION_PLAN",
+        "IMPLEMENT_STORY",
+        "TEST_STORY",
+        "PR_REVIEW",
+        "INFRASTRUCTURE_CHANGE",
+        "MAINTENANCE_ANALYSIS"
+      ],
+      "title": "WorkPacketTaskType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One self-contained, vendor-neutral unit of work \u2014 the contract a\nfuture scheduler would hand to a runtime resolver. See the package\ndocstring (app/agent_runtime/__init__.py) for the five hard rules every\nfield below was designed to satisfy; in particular, `repository`,\n`upstream_artifacts`, and `knowledge_context` all carry REFERENCES, not\ncontent (hard rule 3).\n\n`repository` is optional because not every task_type touches a\nrepository (e.g. HLD, STORY_CRAFTING_VERTICAL/HORIZONTAL, or\nMAINTENANCE_ANALYSIS when it's a documentation-only review, produce a\ndocument, not a code change) \u2014 a resolver for a repository-touching\ntask_type (IMPLEMENT_STORY, PR_REVIEW, INFRASTRUCTURE_CHANGE, ...) is\nexpected to require it be present, but that requirement is task-type\nspecific and therefore a resolver-level concern, not a schema-level\n`Optional` vs. required split this contract can express generically.",
+  "properties": {
+    "acceptance_criteria": {
+      "items": {
+        "$ref": "#/$defs/AcceptanceCriterion"
+      },
+      "title": "Acceptance Criteria",
+      "type": "array"
+    },
+    "approval_policy": {
+      "$ref": "#/$defs/ApprovalPolicy"
+    },
+    "budget_policy": {
+      "$ref": "#/$defs/BudgetPolicy"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "created_by_user_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "None permitted \u2014 a system-triggered packet (e.g. a scheduled maintenance scan) may have no human actor.",
+      "title": "Created By User Id"
+    },
+    "extensions": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "description": "Namespaced vendor/runtime-specific metadata, keyed by a short vendor identifier (e.g. 'anthropic', 'langgraph'). Never required, never interpreted by this codebase's own workflow engine \u2014 purely a passthrough for a concrete runtime integration. Must never contain secrets (tokens, keys, passwords) \u2014 see test_no_contract_field_is_secret_shaped.",
+      "title": "Extensions",
+      "type": "object"
+    },
+    "knowledge_context": {
+      "description": "Retrieved Knowledge Base chunks relevant to this task \u2014 mirrors app/services/retrieval.py's RetrievedChunk list.",
+      "items": {
+        "$ref": "#/$defs/KnowledgeReference"
+      },
+      "title": "Knowledge Context",
+      "type": "array"
+    },
+    "objective": {
+      "$ref": "#/$defs/WorkObjective"
+    },
+    "packet_id": {
+      "description": "Stable identity for this unit of work \u2014 referenced back by ExecutionResult.packet_id.",
+      "format": "uuid",
+      "title": "Packet Id",
+      "type": "string"
+    },
+    "project_id": {
+      "format": "uuid",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "repository": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RepositoryReference"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "required_checks": {
+      "items": {
+        "$ref": "#/$defs/RequiredCheck"
+      },
+      "title": "Required Checks",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0.0",
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scope_policy": {
+      "$ref": "#/$defs/ScopePolicy"
+    },
+    "story_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Set for a story-scoped task_type (STORY_LLD, IMPLEMENT_STORY, TEST_STORY, PR_REVIEW, ...); None for a project-level task_type.",
+      "title": "Story Id"
+    },
+    "task_type": {
+      "$ref": "#/$defs/WorkPacketTaskType"
+    },
+    "tool_policy": {
+      "$ref": "#/$defs/ToolPolicy"
+    },
+    "upstream_artifacts": {
+      "description": "Approved upstream artifacts this task depends on \u2014 by reference, never full content (hard rule 3).",
+      "items": {
+        "$ref": "#/$defs/ArtifactReference"
+      },
+      "title": "Upstream Artifacts",
+      "type": "array"
+    }
+  },
+  "required": [
+    "packet_id",
+    "task_type",
+    "project_id",
+    "objective",
+    "created_at"
+  ],
+  "title": "WorkPacket",
+  "type": "object"
+}

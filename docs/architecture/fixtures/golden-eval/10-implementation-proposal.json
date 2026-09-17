@@ -1,0 +1,42 @@
+{
+  "scenario": "Implementation proposal",
+  "code_path": [
+    "POST /implementation-runs (apps/api/app/api/routes/implementation_runs.py:129-347)",
+    "gates: LLD_REVIEW COMPLETED (story-scoped) or GraphEngineService.validate_can_run (project-level); task.area in SUPPORTED_AREAS; Repository + RepositorySnapshot exist",
+    "RepoContextBuilderService(db).build(...)",
+    "implementation_agent.run_implementation_agent() -> _build_heuristic_result or _run_real_agent"
+  ],
+  "supported_areas": ["BACKEND", "FRONTEND", "DATABASE", "DOCS"],
+  "unsupported_areas_rejected_with_400": ["TESTING", "INFRA"],
+  "input": {
+    "implementation_task": {
+      "title": "REDACTED — e.g. 'Add POST /auth/password-reset endpoint'",
+      "area": "BACKEND",
+      "description": "REDACTED",
+      "expected_paths": ["REDACTED/path/one.py"],
+      "acceptance_criteria": ["REDACTED criterion 1"]
+    },
+    "provider": "mock (heuristic path exercised for a deterministic fixture)"
+  },
+  "expected_heuristic_path": {
+    "proposed_file_changes": "one entry per expected_paths item; change_type='create' if RepoContextBuilderService marked the path 'new', else 'modify' (implementation_agent.py:110-116)",
+    "after_content_shape": "'# TODO(implementation-agent): implement \"<title>\"' plus a commented acceptance-criteria checklist — never real working code (implementation_agent.py:91-99)",
+    "diff_text": "a real stdlib difflib unified diff between the existing snippet (if any) and the TODO scaffold above",
+    "explanation_contains": "'Heuristic scaffold' and 'No real model is configured (mock provider active)' and 'No repository, branch, or file was written by generating this'",
+    "used_mock": true
+  },
+  "expected_real_ai_path_contract": {
+    "response_schema_keys": ["proposed_file_changes", "diff", "explanation", "test_command", "risks", "pr_description"],
+    "hard_rules_in_system_prompt": [
+      "Output a diff only — never claim the change has been applied, committed, or pushed",
+      "Never reference the repository's default/main branch as a target"
+    ],
+    "actual_generated_text": "UNKNOWN — depends on the live model response; not fabricated here"
+  },
+  "human_gate_and_pr_creation": {
+    "review_endpoint": "POST /implementation-runs/{id}/review — decision ACCEPTED|REJECTED, never auto-decided",
+    "pr_creation_precondition": "run.status==COMPLETED AND run.review_status==ACCEPTED (implementation_runs.py:438-443)",
+    "pr_creation_behavior": "always a NEW feature branch 'agent/{slugified-title}-{run-id-prefix8}'; explicit refusal if that branch name would equal the repository's default branch (implementation_runs.py:462-467); writes after_content (not diff_text) to GitHub via create_or_update_file/delete_file",
+    "never_writes_to_default_branch": true
+  }
+}

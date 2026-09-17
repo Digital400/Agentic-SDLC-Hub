@@ -1,0 +1,36 @@
+{
+  "additionalProperties": false,
+  "description": "Which named tools/actions a runtime may invoke while executing this\npacket \u2014 identity/allow-deny only. How MANY tool calls are permitted in\ntotal is a BudgetPolicy concern (max_tool_calls), not this one; keeping\n\"which\" and \"how many\" on separate contracts means a caller can tighten\none without touching the other.",
+  "properties": {
+    "allowed_tools": {
+      "description": "Named tools/actions this task may invoke, e.g. 'read_file', 'run_tests', 'create_pull_request'. Empty means 'no explicit allow-list' \u2014 see deny_by_default.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Allowed Tools",
+      "type": "array"
+    },
+    "denied_tools": {
+      "description": "Always wins over allowed_tools on overlap.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Denied Tools",
+      "type": "array"
+    },
+    "deny_by_default": {
+      "default": true,
+      "description": "Same fail-closed semantics as ScopePolicy.deny_by_default.",
+      "title": "Deny By Default",
+      "type": "boolean"
+    },
+    "require_dry_run_first": {
+      "default": false,
+      "description": "Advisory flag: a resolver may require one dry-run/preview pass (e.g. a diff, never a real write) before any tool in allowed_tools may run for real.",
+      "title": "Require Dry Run First",
+      "type": "boolean"
+    }
+  },
+  "title": "ToolPolicy",
+  "type": "object"
+}
