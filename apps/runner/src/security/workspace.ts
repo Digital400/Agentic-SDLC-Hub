@@ -62,7 +62,9 @@ export async function createEphemeralWorkspace(workspaceRoot: string, jobId: str
     async dispose() {
       if (disposed) return;
       disposed = true;
-      await rm(directory, { recursive: true, force: true });
+      // A just-killed child process can briefly hold its cwd on Windows even
+      // after its "close" event fires, so retry rather than fail disposal.
+      await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     },
     async assertDiskUsageWithin(maxBytes: number) {
       const used = await directorySizeBytes(directory);

@@ -13,6 +13,8 @@
 import type { CodingRuntimeAdapter } from "./contracts/coding-runtime-adapter.js";
 import { loadRunnerConfig, type RunnerConfig } from "./config.js";
 import { OpenCodeRuntimeAdapter } from "./runtime/opencode-adapter.js";
+import { AcpCodingRuntimeAdapter } from "./runtime/acp-adapter.js";
+import { AcpAgentRegistry, parseApprovedAcpAgents } from "./security/acp-registry.js";
 
 export interface RuntimeCapabilityManifest {
   schema_version: string;
@@ -32,7 +34,7 @@ export interface RegisteredRuntime {
 }
 
 export function buildRuntimeRegistry(config: RunnerConfig = loadRunnerConfig()): Record<string, RegisteredRuntime> {
-  return {
+  const registry: Record<string, RegisteredRuntime> = {
     opencode: {
       // Registered unconditionally — availability is separate from
       // whether it may actually run (see `enabled`). A caller listing
@@ -53,6 +55,32 @@ export function buildRuntimeRegistry(config: RunnerConfig = loadRunnerConfig()):
       createAdapter: () => new OpenCodeRuntimeAdapter({ runnerConfig: config }),
     },
   };
+
+  // Phase 11: one registry entry per admin-approved ACP agent, named
+  // "acp:<key>" — every one registered unconditionally (same reasoning as
+  // opencode above), but `enabled` is false for ALL of them unless BOTH
+  // config.acpRuntimeEnabled (the master ACP switch — "keep ACP disabled
+  // by default until security review") AND that specific agent's own
+  // `enabled` flag are true.
+  const acpAgentRegistry = new AcpAgentRegistry(parseApprovedAcpAgents(config.acpApprovedAgentsJson));
+  for (const agent of acpAgentRegistry.list()) {
+    registry[`acp:${agent.key}`] = {
+      enabled: config.acpRuntimeEnabled && agent.enabled,
+      capability: {
+        schema_version: "1.0.0",
+        runtime_name: `acp:${agent.key}`,
+        max_context_tokens: 128_000,
+        max_output_tokens: 8_192,
+        supported_tool_categories: ["file_read", "file_write", "shell_command"],
+        supports_structured_output: false,
+        supports_streaming: true,
+        response_formats: ["acp_session_update_stream"],
+      },
+      createAdapter: () => new AcpCodingRuntimeAdapter({ runnerConfig: config, registry: acpAgentRegistry, agentKey: agent.key }),
+    };
+  }
+
+  return registry;
 }
 
 export class RuntimeDisabledError extends Error {}
@@ -65,7 +93,9 @@ export function getEnabledAdapter(name: string, config?: RunnerConfig): CodingRu
     throw new UnknownRuntimeError(`No runtime registered under the name '${name}'.`);
   }
   if (!entry.enabled) {
-    throw new RuntimeDisabledError(`Runtime '${name}' is registered but disabled — set OPENCODE_RUNTIME_ENABLED=true to enable it.`);
+    throw new RuntimeDisabledError(
+      `Runtime '${name}' is registered but disabled — set OPENCODE_RUNTIME_ENABLED=true (for 'opencode') or ACP_RUNTIME_ENABLED=true plus that agent's own "enabled" entry in ACP_APPROVED_AGENTS_JSON (for an 'acp:*' runtime) to enable it.`,
+    );
   }
   return entry.createAdapter();
 }
