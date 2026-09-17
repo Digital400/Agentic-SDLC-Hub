@@ -37,7 +37,7 @@ repoint the existing version at different data — see
 `test_agent_runtime_schema_versioning.py`.
 """
 
-from app.agent_runtime.capability import RuntimeCapabilityManifest
+from app.agent_runtime.capability import RuntimeCapability, RuntimeCapabilityManifest
 from app.agent_runtime.common import (
     AcceptanceCriterion,
     ArtifactReference,
@@ -87,6 +87,7 @@ __all__ = [
     "ArtifactReference",
     "KnowledgeReference",
     "RepositoryReference",
+    "RuntimeCapability",
     "RuntimeCapabilityManifest",
     # enums
     "ChangeType",

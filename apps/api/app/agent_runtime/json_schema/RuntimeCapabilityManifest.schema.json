@@ -1,7 +1,39 @@
 {
+  "$defs": {
+    "RuntimeCapability": {
+      "description": "One discrete thing a runtime can do \u2014 Phase 02's closed capability\nvocabulary, checked against a WorkPacket's task-derived requirements\nduring runtime selection (see app/coding_runtime/selection.py). Closed\n(not free text) so selection logic can do exact set intersection/\ndifference against it; a runtime's own finer-grained detail about HOW\nit realizes a capability still belongs in `extensions`, never as a new\nenum value invented ad hoc.",
+      "enum": [
+        "REPOSITORY_READ",
+        "FILE_EDIT",
+        "PATCH_GENERATION",
+        "SHELL_EXECUTION",
+        "TEST_EXECUTION",
+        "LSP",
+        "MCP",
+        "STREAMING",
+        "HUMAN_APPROVAL",
+        "PAUSE_RESUME",
+        "CANCELLATION",
+        "SANDBOX",
+        "USAGE_REPORTING",
+        "CUSTOM_MODEL_GATEWAY",
+        "BROWSER_IMAGE_SUPPORT"
+      ],
+      "title": "RuntimeCapability",
+      "type": "string"
+    }
+  },
   "additionalProperties": false,
   "description": "No vendor-mandatory field (hard rule 1) \u2014 `runtime_name` is a\nfree-text label a runtime chooses for itself (e.g. \"claude-code\",\n\"generic-ci-container\"), not a closed enum of known vendors; anything\nvendor-specific about HOW a capability is realized belongs in\n`extensions`, never as a new field here.",
   "properties": {
+    "capabilities": {
+      "description": "Phase 02 addition \u2014 the closed-vocabulary set of things this runtime can do (see RuntimeCapability). RuntimeSelectionRequest.required_capabilities is checked against this as a subset test during selection.",
+      "items": {
+        "$ref": "#/$defs/RuntimeCapability"
+      },
+      "title": "Capabilities",
+      "type": "array"
+    },
     "extensions": {
       "additionalProperties": {
         "additionalProperties": true,
