@@ -56,6 +56,9 @@ from app.models.enums import (
     RoleAssignmentScope,
     RuntimeRole,
     SensitiveActionKind,
+    BridgeDeviceAuthorizationStatus,
+    BridgeSessionStatus,
+    BridgeJobAssignmentStatus,
     TestAgentType,
     TestRunStatus,
     UserRole,
@@ -96,6 +99,7 @@ from app.models.project_execution_profile import ProjectExecutionProfile
 from app.models.agent_job import AgentJob, AgentJobEvent, AgentJobOutboxEntry
 from app.models.runtime_security import RuntimeRoleAssignment
 from app.models.audit import AuditLog
+from app.models.developer_bridge import BridgeDeviceAuthorization, BridgeSession, BridgeJobAssignment
 
 __all__ = [
     "Base",
@@ -195,4 +199,10 @@ __all__ = [
     "CredentialKind",
     "SensitiveActionKind",
     "AuditLog",
+    "BridgeDeviceAuthorization",
+    "BridgeSession",
+    "BridgeJobAssignment",
+    "BridgeDeviceAuthorizationStatus",
+    "BridgeSessionStatus",
+    "BridgeJobAssignmentStatus",
 ]

@@ -229,6 +229,13 @@ class Settings(BaseSettings):
     # old path on.
     STORY_GIT_PR_FLOW_V2_ENABLED: bool = False
 
+    # Phase 13's own "keep the bridge feature disabled by default"
+    # requirement. Gates every app/api/routes/developer_bridge.py endpoint —
+    # while False, all of them return 403 rather than silently no-op, so a
+    # misconfigured deployment fails loudly instead of pretending the
+    # bridge is unavailable for some other reason.
+    DEVELOPER_BRIDGE_ENABLED: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

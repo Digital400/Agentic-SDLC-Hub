@@ -9,6 +9,7 @@ from app.api.routes import (
     agent_runs,
     artifacts,
     confluence_integration,
+    developer_bridge,
     execution_profiles,
     github_integration,
     health,
@@ -78,3 +79,4 @@ app.include_router(users.router)
 app.include_router(validators.router)
 app.include_router(execution_profiles.router)
 app.include_router(agent_jobs.router)
+app.include_router(developer_bridge.router)
