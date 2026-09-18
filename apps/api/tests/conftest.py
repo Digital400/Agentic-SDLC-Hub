@@ -32,6 +32,9 @@ from app.models import (
     ArtifactVersion,
     AuditLog,
     Base,
+    BridgeDeviceAuthorization,
+    BridgeJobAssignment,
+    BridgeSession,
     ImplementationRun,
     ImplementationTask,
     ImplementationTaskArea,
@@ -117,6 +120,9 @@ TEST_TABLES = [
     AgentJobEvent.__table__,
     AgentJobOutboxEntry.__table__,
     RuntimeRoleAssignment.__table__,
+    BridgeDeviceAuthorization.__table__,
+    BridgeSession.__table__,
+    BridgeJobAssignment.__table__,
 ]
 
 

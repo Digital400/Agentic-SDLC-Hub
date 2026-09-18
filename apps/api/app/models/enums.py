@@ -665,3 +665,28 @@ class SensitiveActionKind(str, enum.Enum):
     PULL_REQUEST_CREATE = "PULL_REQUEST_CREATE"
     PULL_REQUEST_COMMENT = "PULL_REQUEST_COMMENT"
     INFRASTRUCTURE_ACTION = "INFRASTRUCTURE_ACTION"
+
+
+class BridgeDeviceAuthorizationStatus(str, enum.Enum):
+    """One OAuth 2.0 Device Authorization Grant attempt's lifecycle —
+    see app/models/developer_bridge.py's BridgeDeviceAuthorization."""
+
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    DENIED = "DENIED"
+    EXPIRED = "EXPIRED"
+
+
+class BridgeSessionStatus(str, enum.Enum):
+    CONNECTED = "CONNECTED"
+    OFFLINE = "OFFLINE"
+
+
+class BridgeJobAssignmentStatus(str, enum.Enum):
+    """See app/models/developer_bridge.py's BridgeJobAssignment."""
+
+    ASSIGNED = "ASSIGNED"
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+    EVIDENCE_UPLOADED = "EVIDENCE_UPLOADED"
+    CREDENTIAL_EXPIRED = "CREDENTIAL_EXPIRED"
