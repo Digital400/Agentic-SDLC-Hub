@@ -414,7 +414,8 @@ export function toArtifactDocument(
   currentVersionMarkdown: string,
   comments: ArtifactCommentItem[] = [],
   agentKey: string = "",
-  freeformInputKeys: string[] = []
+  freeformInputKeys: string[] = [],
+  nodeKey: string = ""
 ): ArtifactDocument {
   return {
     id: artifact.id,
@@ -423,6 +424,7 @@ export function toArtifactDocument(
     workflowNodeId: artifact.workflow_node_id,
     workflowStageName: artifact.workflow_stage_name,
     agentKey,
+    nodeKey,
     freeformInputKeys,
     artifactType: artifact.artifact_type,
     title: artifact.title,

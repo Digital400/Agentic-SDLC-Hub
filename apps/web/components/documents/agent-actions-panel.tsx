@@ -8,8 +8,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { StructuredActionForm } from "@/components/structured-actions/structured-action-form";
 import { api, ApiError } from "@/lib/api";
 import { runAgentAndApply } from "@/lib/run-agent";
+import { getStageSchema } from "@/lib/structured-actions/schemas";
 
 type AgentAction = "draft" | "improve" | "validate";
 
@@ -33,6 +35,7 @@ export function AgentActionsPanel({
   projectId,
   workflowNodeId,
   agentKey,
+  nodeKey,
   artifactId,
   artifactEditable,
   documentHasRealSections,
@@ -44,6 +47,10 @@ export function AgentActionsPanel({
   projectId: string;
   workflowNodeId: string;
   agentKey: string;
+  /** WorkflowNode.node_key — selects a Phase 15 structured action form
+   * when one exists for this stage (see lib/structured-actions/schemas.ts);
+   * falls back to the existing generic freeform textareas otherwise. */
+  nodeKey: string;
   artifactId: string;
   /** Only a DRAFT artifact can be improved this way — see
    * app/services/section_improve_agent.py's precondition. */
@@ -114,7 +121,7 @@ export function AgentActionsPanel({
     }
   }
 
-  async function handleRun() {
+  async function handleRun(inputContextOverride?: Record<string, string>) {
     if (triggeredByUserId === null) {
       setResult({ kind: "failed", message: "No users exist yet to attribute this run to." });
       return;
@@ -127,7 +134,7 @@ export function AgentActionsPanel({
         workflowNodeId,
         action,
         triggeredByUserId,
-        inputContext: freeformValues,
+        inputContext: inputContextOverride ?? freeformValues,
       });
 
       if (run.status !== "COMPLETED" || saved === null) {
@@ -164,21 +171,39 @@ export function AgentActionsPanel({
             ))}
           </Select>
 
-          {freeformInputKeys.map((key) => (
-            <Textarea
-              key={key}
-              placeholder={key.replace(/_/g, " ")}
-              value={freeformValues[key] ?? ""}
-              onChange={(e) => setFreeformValues((prev) => ({ ...prev, [key]: e.target.value }))}
-              rows={2}
-              className="mb-2 text-xs"
-            />
-          ))}
-
-          <Button size="sm" className="w-full" onClick={handleRun} disabled={running}>
-            {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlayCircle className="h-3.5 w-3.5" />}
-            {running ? "Running…" : "Run Agent"}
-          </Button>
+          {(() => {
+            const stageSchema = getStageSchema(nodeKey);
+            if (stageSchema) {
+              // Phase 15: a structured action form for this stage, instead
+              // of one open textarea per required-input key.
+              return (
+                <StructuredActionForm
+                  schema={stageSchema}
+                  submitting={running}
+                  submitLabel={running ? "Running…" : "Run Agent"}
+                  onSubmit={(inputContext) => void handleRun(inputContext)}
+                />
+              );
+            }
+            return (
+              <>
+                {freeformInputKeys.map((key) => (
+                  <Textarea
+                    key={key}
+                    placeholder={key.replace(/_/g, " ")}
+                    value={freeformValues[key] ?? ""}
+                    onChange={(e) => setFreeformValues((prev) => ({ ...prev, [key]: e.target.value }))}
+                    rows={2}
+                    className="mb-2 text-xs"
+                  />
+                ))}
+                <Button size="sm" className="w-full" onClick={() => void handleRun()} disabled={running}>
+                  {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlayCircle className="h-3.5 w-3.5" />}
+                  {running ? "Running…" : "Run Agent"}
+                </Button>
+              </>
+            );
+          })()}
 
           {result?.kind === "failed" ? (
             <p className="mt-2 text-xs text-destructive">{result.message}</p>

@@ -396,6 +396,12 @@ export interface ArtifactDocument {
   workflowStageName: string;
   /** The agent responsible for this stage — see ProjectWorkflowNode.agentKey. */
   agentKey: string;
+  /** WorkflowNode.node_key ("requirement_intake", "lld", ...) — distinct
+   * from workflowStageName (a human display name) and agentKey (the
+   * agent's own slug). Used to pick a Phase 15 structured action form
+   * (see lib/structured-actions/schemas.ts) for the stages that have one;
+   * falls back to the freeform inputs below for any stage that doesn't. */
+  nodeKey: string;
   /** Which of this stage's required_inputs are freeform (no upstream
    * artifact to satisfy them) — e.g. "stakeholder_request" for Requirement
    * Intake. Empty for a stage whose inputs are all upstream artifacts. */

@@ -455,6 +455,7 @@ export function ArtifactEditor({
             projectId={doc.projectId}
             workflowNodeId={doc.workflowNodeId}
             agentKey={doc.agentKey}
+            nodeKey={doc.nodeKey}
             artifactId={doc.id}
             artifactEditable={editable}
             documentHasRealSections={docHasRealSections}
