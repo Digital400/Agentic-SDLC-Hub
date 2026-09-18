@@ -247,6 +247,12 @@ class Settings(BaseSettings):
     # docs/architecture/agent-migration-requirement-intake.md).
     REQUIREMENT_INTAKE_AGENT_V2_MODE: str = "disabled"
 
+    # Phase 17's RuntimeCostRouter — nothing calls it from a live path in
+    # this phase (see app/services/runtime_cost_router.py's own module
+    # docstring); this flag exists for a future caller to check before
+    # doing so. Defaults False.
+    RUNTIME_COST_ROUTER_ENABLED: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:
