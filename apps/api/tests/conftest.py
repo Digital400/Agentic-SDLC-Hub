@@ -33,6 +33,7 @@ from app.models import (
     AuditLog,
     Base,
     AgentMigrationShadowRun,
+    RuntimeRoutingDecision,
     BridgeDeviceAuthorization,
     BridgeJobAssignment,
     BridgeSession,
@@ -125,6 +126,7 @@ TEST_TABLES = [
     BridgeSession.__table__,
     BridgeJobAssignment.__table__,
     AgentMigrationShadowRun.__table__,
+    RuntimeRoutingDecision.__table__,
 ]
 
 
