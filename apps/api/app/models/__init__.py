@@ -100,6 +100,7 @@ from app.models.agent_job import AgentJob, AgentJobEvent, AgentJobOutboxEntry
 from app.models.runtime_security import RuntimeRoleAssignment
 from app.models.audit import AuditLog
 from app.models.developer_bridge import BridgeDeviceAuthorization, BridgeSession, BridgeJobAssignment
+from app.models.agent_migration_shadow_run import AgentMigrationShadowRun
 
 __all__ = [
     "Base",
@@ -205,4 +206,5 @@ __all__ = [
     "BridgeDeviceAuthorizationStatus",
     "BridgeSessionStatus",
     "BridgeJobAssignmentStatus",
+    "AgentMigrationShadowRun",
 ]

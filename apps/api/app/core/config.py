@@ -236,6 +236,17 @@ class Settings(BaseSettings):
     # bridge is unavailable for some other reason.
     DEVELOPER_BRIDGE_ENABLED: bool = False
 
+    # Phase 16's own "enable only this target agent through its runtime
+    # configuration" requirement. "disabled" (default): pure legacy
+    # behavior, app/services/agent_migration_shadow.py is never called.
+    # "shadow": both paths run (see that module's docstring); the legacy
+    # result is still what's persisted, but a comparison row is recorded.
+    # "enabled": a future cutover value — no caller currently checks for
+    # it, since this phase does not wire either mode into the live
+    # POST /agent-runs route (disclosed, deferred — see
+    # docs/architecture/agent-migration-requirement-intake.md).
+    REQUIREMENT_INTAKE_AGENT_V2_MODE: str = "disabled"
+
 
 @lru_cache
 def get_settings() -> Settings:

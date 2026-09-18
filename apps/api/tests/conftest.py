@@ -32,6 +32,7 @@ from app.models import (
     ArtifactVersion,
     AuditLog,
     Base,
+    AgentMigrationShadowRun,
     BridgeDeviceAuthorization,
     BridgeJobAssignment,
     BridgeSession,
@@ -123,6 +124,7 @@ TEST_TABLES = [
     BridgeDeviceAuthorization.__table__,
     BridgeSession.__table__,
     BridgeJobAssignment.__table__,
+    AgentMigrationShadowRun.__table__,
 ]
 
 

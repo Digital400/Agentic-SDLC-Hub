@@ -400,17 +400,17 @@ def build_prioritized_context(
     ).build(blocks)
 
 
-def _build_system_prompt(active_prompt: AgentPrompt) -> str:
-    checklist = "\n".join(f"- {item}" for item in active_prompt.validation_checklist) or "(none specified)"
+def response_format_instructions() -> str:
+    """The exact "two-part JSON-header-then-body" response contract every
+    `_generate_with_<provider>` function's `_parse_response` call expects.
+    Extracted from `_build_system_prompt` (pure extraction, no behavior
+    change — same text, same call site below) so a caller that builds its
+    own system prompt outside the AgentPrompt/build_prioritized_context
+    path (see app/services/requirement_intake_agent.py's Phase 16 v2 path,
+    which sources instructions from PromptCompiler instead) can still
+    produce output the existing provider-dispatch functions can parse,
+    without duplicating this text out of sync."""
     return (
-        f"{active_prompt.system_prompt}\n\n"
-        f"## Output format\n{active_prompt.output_format}\n\n"
-        f"## Quality checklist — self-check before responding\n{checklist}\n\n"
-        "## Citing internal knowledge\n"
-        "The input may include an \"Internal Knowledge Base\" section with excerpts from the "
-        "company's own knowledge sources. If it's present and you draw on it, cite the source "
-        "by its title in parentheses at the point you use it. If that section says no relevant "
-        "knowledge was found, do not invent a citation — proceed on project context alone.\n\n"
         "## Response format (follow exactly)\n"
         "Respond with exactly two parts, in order:\n"
         "1. A single-line JSON object: "
@@ -422,6 +422,21 @@ def _build_system_prompt(active_prompt: AgentPrompt) -> str:
         "partial or best-guess document in that case.\n\n"
         "Only set needs_clarification to true when the input genuinely lacks information "
         "you need — not merely because more detail would be nice to have."
+    )
+
+
+def _build_system_prompt(active_prompt: AgentPrompt) -> str:
+    checklist = "\n".join(f"- {item}" for item in active_prompt.validation_checklist) or "(none specified)"
+    return (
+        f"{active_prompt.system_prompt}\n\n"
+        f"## Output format\n{active_prompt.output_format}\n\n"
+        f"## Quality checklist — self-check before responding\n{checklist}\n\n"
+        "## Citing internal knowledge\n"
+        "The input may include an \"Internal Knowledge Base\" section with excerpts from the "
+        "company's own knowledge sources. If it's present and you draw on it, cite the source "
+        "by its title in parentheses at the point you use it. If that section says no relevant "
+        "knowledge was found, do not invent a citation — proceed on project context alone.\n\n"
+        f"{response_format_instructions()}"
     )
 
 
