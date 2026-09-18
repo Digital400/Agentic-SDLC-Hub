@@ -53,7 +53,8 @@ export default async function ArtifactEditorPage({ params }: { params: { artifac
     currentVersion?.content_markdown ?? "",
     comments,
     node?.agent_key ?? "",
-    freeformInputKeys
+    freeformInputKeys,
+    node?.node_key ?? ""
   );
   const defaultUserId = users[0]?.id ?? null;
   const reviewers = users.map((u) => ({ id: u.id, name: u.full_name }));
