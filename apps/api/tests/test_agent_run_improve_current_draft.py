@@ -79,25 +79,8 @@ def test_improve_action_passes_the_artifacts_current_content_to_generate(db, pro
     assert captured_kwargs["current_draft_content"] == ORIGINAL_DOC
 
 
-def test_validate_action_also_passes_current_content(db, project, actor, monkeypatch):
-    node, _artifact = _setup(db, project, actor, with_validate_prompt=True)
-
-    captured_kwargs = {}
-
-    def fake_generate(**kwargs):
-        captured_kwargs.update(kwargs)
-        return _result("Validation notes.")
-
-    monkeypatch.setattr(agent_runs, "generate", fake_generate)
-    monkeypatch.setattr(agent_runs, "retrieve_relevant_chunks", lambda *a, **kw: [])
-
-    payload = AgentRunCreate(
-        project_id=project.id, workflow_node_id=node.id, action=AgentPromptRole.VALIDATE, triggered_by_user_id=actor.id,
-    )
-    run = agent_runs.start_agent_run(payload, db)
-
-    assert run.status.value == "COMPLETED"
-    assert captured_kwargs["current_draft_content"] == ORIGINAL_DOC
+# (The VALIDATE action no longer calls generate() at all — it runs the stage's validator on the
+# current draft; see tests/test_validate_action.py.)
 
 
 def test_draft_action_does_not_pass_current_draft_content(db, project, actor, monkeypatch):

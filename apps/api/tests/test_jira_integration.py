@@ -16,6 +16,7 @@ from app.services.jira_integration import (
     create_issue,
     get_issue_status,
     get_project,
+    list_projects,
     verify_credentials,
 )
 
@@ -180,4 +181,42 @@ def test_write_methods_never_leak_the_token_in_an_error_message():
             BASE_URL, "suru@example.com", REAL_TOKEN, project_key="PROJ", issue_type="Bug",
             summary="x", description="x", transport=_transport(handler),
         )
+    assert REAL_TOKEN not in str(exc_info.value)
+
+
+# --- list_projects -------------------------------------------------------------------------
+
+
+def test_list_projects_maps_key_and_name():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/rest/api/3/project/search"
+        return _json_response(200, {
+            "isLast": True,
+            "values": [{"key": "LOYAL", "name": "Loyalty Portal", "id": "1"}, {"key": "ENG", "name": "Engineering", "id": "2"}],
+        })
+
+    projects = list_projects(BASE_URL, "suru@example.com", "fake-token", transport=_transport(handler))
+    assert [(p.key, p.name) for p in projects] == [("LOYAL", "Loyalty Portal"), ("ENG", "Engineering")]
+
+
+def test_list_projects_pages_until_last():
+    pages = [
+        {"isLast": False, "values": [{"key": "A", "name": "A", "id": "1"}]},
+        {"isLast": True, "values": [{"key": "B", "name": "B", "id": "2"}]},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        start_at = int(request.url.params.get("startAt", "0"))
+        return _json_response(200, pages[0 if start_at == 0 else 1])
+
+    projects = list_projects(BASE_URL, "suru@example.com", "fake-token", transport=_transport(handler))
+    assert [p.key for p in projects] == ["A", "B"]
+
+
+def test_list_projects_never_leaks_the_token_on_failure():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(403, {"errorMessages": ["Forbidden"]})
+
+    with pytest.raises(JiraIntegrationError) as exc_info:
+        list_projects(BASE_URL, "suru@example.com", REAL_TOKEN, transport=_transport(handler))
     assert REAL_TOKEN not in str(exc_info.value)

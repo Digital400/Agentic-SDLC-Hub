@@ -116,6 +116,19 @@ class GitHubPullRequestDetail:
     body: str
     html_url: str
     state: str
+    # Added for register_pull_request (app/api/routes/implementation_runs.py)
+    # — the feature/base branch names of an already-open, externally
+    # created PR, needed to populate PullRequestLink.branch_name/base_branch
+    # without this app having created the branch itself.
+    head_ref: str = ""
+    base_ref: str = ""
+
+
+@dataclass
+class GitHubPullRequestFile:
+    filename: str
+    status: str
+    patch: str | None
 
 
 @dataclass
@@ -219,6 +232,29 @@ def list_repositories(
             break
         page += 1
     return repos[:max_repos]
+
+
+def create_repository(
+    token: str,
+    name: str,
+    *,
+    description: str | None = None,
+    private: bool = True,
+    transport: httpx.BaseTransport | None = None,
+) -> GitHubRepoSummary:
+    """POST /user/repos — create a brand-new, EMPTY repository under the
+    token's own account (no auto_init, so the bootstrap-repository flow can
+    seed it from the project's docs). Backs the project-creation wizard's
+    "Create a new repository" option. Private by default."""
+    body: dict = {"name": name, "private": private, "auto_init": False}
+    if description:
+        body["description"] = description
+    item = _request("POST", "/user/repos", token=token, json_body=body, transport=transport).json()
+    return GitHubRepoSummary(
+        owner=item["owner"]["login"], name=item["name"], full_name=item["full_name"],
+        default_branch=item.get("default_branch") or "main", description=item.get("description"),
+        is_private=item.get("private", private), html_url=item["html_url"],
+    )
 
 
 def get_repository(token: str, owner: str, repo: str, *, transport: httpx.BaseTransport | None = None) -> GitHubRepo:
@@ -409,7 +445,27 @@ def get_pull_request(
     return GitHubPullRequestDetail(
         number=data["number"], title=data["title"], body=data.get("body") or "",
         html_url=data["html_url"], state=data["state"],
+        head_ref=data.get("head", {}).get("ref", ""), base_ref=data.get("base", {}).get("ref", ""),
     )
+
+
+def get_pull_request_files(
+    token: str, owner: str, repo: str, pr_number: int, *, transport: httpx.BaseTransport | None = None
+) -> list[GitHubPullRequestFile]:
+    """GET .../pulls/{pr_number}/files — the real per-file patches of an
+    already-open PR. Used only by register_pull_request (see
+    app/api/routes/implementation_runs.py) to build a representational
+    ImplementationRun.diff_text for a PR this app never generated itself
+    (one opened from an external coding tool). A read; never called with a
+    write intent. GitHub paginates this at 30 files/page by default and
+    caps it at 3000 changed files per PR — a single unpaginated page is
+    accepted as a deliberate, disclosed limit (this app has no PR today
+    anywhere close to that size)."""
+    data = _request(
+        "GET", f"/repos/{owner}/{repo}/pulls/{pr_number}/files", token=token,
+        params={"per_page": 100}, transport=transport,
+    ).json()
+    return [GitHubPullRequestFile(filename=f["filename"], status=f["status"], patch=f.get("patch")) for f in data]
 
 
 def create_issue_comment(

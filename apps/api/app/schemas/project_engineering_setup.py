@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.enums import CodingStandardCategory, DocumentationTarget, GithubSetupOption, JiraSetupOption
 from app.schemas.validators import NonBlankStr
@@ -65,6 +65,21 @@ class CodingStandardInput(BaseModel):
     # under (see app/services/agent_context_builder.py) — GENERAL for one
     # that isn't specifically architecture/security/testing/git/docs.
     category: CodingStandardCategory = CodingStandardCategory.GENERAL
+    # Confluence / SharePoint (or any http(s)) page this standard comes
+    # from — a reference only; nothing is fetched from it.
+    source_url: str | None = Field(default=None, max_length=2048)
+
+    @field_validator("source_url")
+    @classmethod
+    def _http_url_only(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        if not value.lower().startswith(("http://", "https://")):
+            raise ValueError("source_url must start with http:// or https://")
+        return value
 
 
 class CodingStandardRead(BaseModel):
@@ -74,6 +89,7 @@ class CodingStandardRead(BaseModel):
     title: str
     content: str
     category: CodingStandardCategory
+    source_url: str | None = None
     order_index: int
 
 

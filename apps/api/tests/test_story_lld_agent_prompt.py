@@ -1,7 +1,7 @@
 """Tests for the Story LLD Agent prompt/validator registration — mirrors
 tests/test_lld_agent_prompt.py's exact conventions for the project-level
 lld-agent, applied to the per-story story-lld-agent:
-  - RICH_DEFAULT_PROMPTS["story_lld"]'s content shape (all 15 required
+  - RICH_DEFAULT_PROMPTS["story_lld"]'s content shape (all 16 required
     sections, in order; the 9 system-prompt rules; the checklist).
   - app/db/seed.py's _ensure_story_lld_agent / _ensure_story_lld_validator_definition
     — Add requirements 2 (agent prompt: story-lld-agent) and 3 (validator
@@ -15,10 +15,10 @@ from app.services.story_lld_agent import STORY_LLD_AGENT_KEY, STORY_LLD_SECTIONS
 # --- RICH_DEFAULT_PROMPTS["story_lld"] content shape --------------------------------
 
 
-def test_story_lld_prompt_output_format_lists_all_15_sections_in_order():
+def test_story_lld_prompt_output_format_lists_all_16_sections_in_order():
     output_format = RICH_DEFAULT_PROMPTS["story_lld"]["output_format"]
 
-    assert len(STORY_LLD_SECTIONS) == 15
+    assert len(STORY_LLD_SECTIONS) == 16
     positions = [output_format.index(section) for section in STORY_LLD_SECTIONS]
 
     assert positions == sorted(positions), "sections must appear in the documented order"
@@ -40,8 +40,9 @@ def test_story_lld_prompt_encodes_the_stated_rules():
 def test_story_lld_validation_checklist_covers_the_new_sections():
     checklist = " ".join(RICH_DEFAULT_PROMPTS["story_lld"]["validation_checklist"]).lower()
 
-    assert "15 required sections" in checklist
+    assert "16 required sections" in checklist
     assert "related hld sections" in checklist
+    assert "file/folder structure" in checklist
     assert "does not plan implementation tasks or write test scenarios" in checklist
 
 

@@ -106,7 +106,8 @@ def create_engineering_setup(
     for index, standard in enumerate(payload.coding_standards):
         db.add(
             ProjectCodingStandard(
-                setup_id=setup.id, title=standard.title, content=standard.content, category=standard.category, order_index=index
+                setup_id=setup.id, title=standard.title, content=standard.content, category=standard.category,
+                source_url=standard.source_url, order_index=index,
             )
         )
     for index, guardrail in enumerate(payload.guardrails):
@@ -201,7 +202,8 @@ def update_engineering_setup(
         for index, standard in enumerate(payload.coding_standards):
             db.add(
                 ProjectCodingStandard(
-                    setup_id=setup.id, title=standard.title, content=standard.content, category=standard.category, order_index=index
+                    setup_id=setup.id, title=standard.title, content=standard.content, category=standard.category,
+                    source_url=standard.source_url, order_index=index,
                 )
             )
 

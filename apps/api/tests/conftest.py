@@ -19,6 +19,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import get_settings
+
 from app.models import (
     AgentDefinition,
     AgentPrompt,
@@ -130,6 +132,33 @@ TEST_TABLES = [
     ProjectDocumentationConfig.__table__,
     ProjectCommandConfig.__table__,
 ]
+
+
+@pytest.fixture(autouse=True)
+def _claude_agent_sdk_disabled_by_default(monkeypatch):
+    """Settings always reads the real apps/api/.env (see
+    app/core/config.py's Config.env_file) — there is no test-specific env
+    file. CLAUDE_AGENT_SDK_ENABLED=true in a developer's own .env (a
+    legitimate thing to have on for real local use — see
+    app/services/claude_agent_harness.py) would otherwise leak into every
+    test that calls get_settings() without explicitly overriding it,
+    sending real implementation/generation runs down the real-session path
+    and failing them for real (confirmed: this broke ~65 unrelated tests
+    the moment a developer's own .env turned it on).
+
+    get_settings() is @lru_cache'd (app/core/config.py) — a single process-
+    lifetime cache, no per-call args to key on — so whichever test (or
+    import-time code) calls it FIRST bakes that moment's real .env
+    contents in for the rest of the whole pytest run; a plain
+    monkeypatch.setenv here is not enough on its own, since every later
+    get_settings() call just returns the already-cached object and never
+    re-reads the environment at all. Clearing the cache every test, after
+    setting the env var, is what actually makes this override take
+    effect — and takes effect for every subsequent test too, not just
+    this one, since the next get_settings() call anywhere rebuilds fresh
+    from (by then) this test's own monkeypatched environment."""
+    monkeypatch.setenv("CLAUDE_AGENT_SDK_ENABLED", "false")
+    get_settings.cache_clear()
 
 
 @pytest.fixture()

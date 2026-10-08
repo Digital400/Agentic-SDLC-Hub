@@ -55,6 +55,15 @@ class JiraConnectionRead(BaseModel):
         )
 
 
+class JiraProjectSummaryRead(BaseModel):
+    """One project option for the picker — see
+    app/services/jira_integration.py's list_projects. Not persisted; built
+    fresh from Jira's own response on every call."""
+
+    key: str
+    name: str
+
+
 class CreateJiraProjectLinkRequest(BaseModel):
     project_id: uuid.UUID
     connection_id: uuid.UUID

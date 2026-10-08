@@ -11,6 +11,14 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  APPLICATION_TYPE_OPTIONS,
+  BACKEND_FRAMEWORK_OPTIONS,
+  CLOUD_PROVIDER_OPTIONS,
+  DATABASE_OPTIONS,
+  FRONTEND_FRAMEWORK_OPTIONS,
+  TechStackSelect,
+} from "@/components/projects/tech-stack-select";
+import {
   api,
   ApiCodingStandardCategory,
   ApiDocumentationTarget,
@@ -261,7 +269,7 @@ function TechnologyStackSection({ projectId, setup, currentUserId, onSaved }: Se
           <label className="mb-1 block text-xs font-medium">
             Application type <span className="text-destructive">*</span>
           </label>
-          <Input value={applicationType} onChange={(e) => setApplicationType(e.target.value)} />
+          <TechStackSelect value={applicationType} onChange={setApplicationType} options={APPLICATION_TYPE_OPTIONS} placeholder="Select application type…" />
         </div>
         <div>
           <label className="mb-1 block text-xs font-medium">
@@ -271,19 +279,19 @@ function TechnologyStackSection({ projectId, setup, currentUserId, onSaved }: Se
         </div>
         <div>
           <label className="mb-1 block text-xs font-medium">Frontend framework</label>
-          <Input value={frontendFramework} onChange={(e) => setFrontendFramework(e.target.value)} />
+          <TechStackSelect value={frontendFramework} onChange={setFrontendFramework} options={FRONTEND_FRAMEWORK_OPTIONS} placeholder="Select frontend framework…" />
         </div>
         <div>
           <label className="mb-1 block text-xs font-medium">Backend framework</label>
-          <Input value={backendFramework} onChange={(e) => setBackendFramework(e.target.value)} />
+          <TechStackSelect value={backendFramework} onChange={setBackendFramework} options={BACKEND_FRAMEWORK_OPTIONS} placeholder="Select backend framework…" />
         </div>
         <div>
           <label className="mb-1 block text-xs font-medium">Database</label>
-          <Input value={database} onChange={(e) => setDatabase(e.target.value)} />
+          <TechStackSelect value={database} onChange={setDatabase} options={DATABASE_OPTIONS} placeholder="Select database…" />
         </div>
         <div>
           <label className="mb-1 block text-xs font-medium">Cloud provider</label>
-          <Input value={cloudProvider} onChange={(e) => setCloudProvider(e.target.value)} />
+          <TechStackSelect value={cloudProvider} onChange={setCloudProvider} options={CLOUD_PROVIDER_OPTIONS} placeholder="Select cloud provider…" />
         </div>
       </div>
     </SectionCard>
@@ -478,6 +486,7 @@ interface CodingStandardDraft {
   title: string;
   content: string;
   category: ApiCodingStandardCategory;
+  sourceUrl: string;
 }
 
 function CodingStandardsSection({ projectId, setup, currentUserId, onSaved }: SectionProps) {
@@ -487,7 +496,7 @@ function CodingStandardsSection({ projectId, setup, currentUserId, onSaved }: Se
   const [drafts, setDrafts] = useState<CodingStandardDraft[]>([]);
 
   function startEdit() {
-    setDrafts(setup.coding_standards.map((s) => ({ title: s.title, content: s.content, category: s.category })));
+    setDrafts(setup.coding_standards.map((s) => ({ title: s.title, content: s.content, category: s.category, sourceUrl: s.source_url ?? "" })));
     setError(null);
     setEditing(true);
   }
@@ -503,7 +512,7 @@ function CodingStandardsSection({ projectId, setup, currentUserId, onSaved }: Se
     try {
       const updated = await api.engineeringSetup.update(projectId, {
         updated_by_id: currentUserId,
-        coding_standards: valid.map((s) => ({ title: s.title.trim(), content: s.content.trim(), category: s.category })),
+        coding_standards: valid.map((s) => ({ title: s.title.trim(), content: s.content.trim(), category: s.category, source_url: s.sourceUrl.trim() || null })),
       });
       onSaved(updated);
       setEditing(false);
@@ -536,6 +545,11 @@ function CodingStandardsSection({ projectId, setup, currentUserId, onSaved }: Se
                   <Badge variant="outline">{CODING_STANDARD_CATEGORY_OPTIONS.find((o) => o.value === s.category)?.label ?? s.category}</Badge>
                 </div>
                 <p className="whitespace-pre-wrap text-xs text-muted-foreground">{s.content}</p>
+                {s.source_url ? (
+                  <a href={s.source_url} target="_blank" rel="noreferrer" className="mt-1 block break-all text-xs text-primary underline">
+                    {s.source_url}
+                  </a>
+                ) : null}
               </div>
             ))}
           </div>
@@ -574,6 +588,11 @@ function CodingStandardsSection({ projectId, setup, currentUserId, onSaved }: Se
               onChange={(e) => setDrafts((prev) => prev.map((d, idx) => (idx === i ? { ...d, content: e.target.value } : d)))}
               rows={2}
             />
+            <Input
+              value={s.sourceUrl}
+              onChange={(e) => setDrafts((prev) => prev.map((d, idx) => (idx === i ? { ...d, sourceUrl: e.target.value } : d)))}
+              placeholder="Confluence or SharePoint link (optional) — https://…"
+            />
           </div>
         ))}
         <Button
@@ -581,7 +600,7 @@ function CodingStandardsSection({ projectId, setup, currentUserId, onSaved }: Se
           variant="outline"
           size="sm"
           className="w-fit"
-          onClick={() => setDrafts((prev) => [...prev, { title: "", content: "", category: "GENERAL" }])}
+          onClick={() => setDrafts((prev) => [...prev, { title: "", content: "", category: "GENERAL", sourceUrl: "" }])}
         >
           <Plus className="h-3.5 w-3.5" />
           Add coding standard

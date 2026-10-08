@@ -18,10 +18,16 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from app.api.routes.implementation_runs import create_pull_request, review_implementation_run, start_implementation_run
+from app.api.routes.implementation_runs import (
+    create_pull_request,
+    register_pull_request,
+    review_implementation_run,
+    start_implementation_run,
+)
 from app.api.routes.projects import list_task_implementation_runs
 from app.models import (
     AuditLog,
+    ImplementationTaskStatus,
     Integration,
     IntegrationConnection,
     IntegrationProvider,
@@ -36,7 +42,12 @@ from app.models import (
     UserRole,
     WorkflowStatus,
 )
-from app.schemas.implementation_run import CreatePullRequestRequest, ReviewImplementationRunRequest, StartImplementationRunRequest
+from app.schemas.implementation_run import (
+    CreatePullRequestRequest,
+    RegisterPullRequestRequest,
+    ReviewImplementationRunRequest,
+    StartImplementationRunRequest,
+)
 from app.services import github_integration as github_api
 from app.services import implementation_agent
 from tests.conftest import make_approved_artifact, make_implementation_task, make_node
@@ -207,6 +218,35 @@ def test_blocked_when_a_pr_already_exists_for_the_run(db, project, actor, monkey
         create_pull_request(run.id, CreatePullRequestRequest(triggered_by_user_id=actor.id), db)
     assert exc_info.value.status_code == 409
     assert db.query(PullRequestLink).count() == 1
+
+
+def test_blocked_with_a_clear_message_when_the_run_made_no_file_changes(db, project, actor, monkeypatch):
+    """Regression: a run can legitimately have zero proposed_file_changes
+    (e.g. a full-stack story whose FRONTEND task genuinely needs no
+    frontend work for a backend/database-only story — a real case, not a
+    bug). Before this check, create_pull_request still tried to open a
+    GitHub PR for it, which GitHub rejects with a bare "422: Validation
+    Failed" (no commits between head and base) — a confusing error for
+    what is actually an expected, normal outcome."""
+    task, run = _accepted_run(db, project, actor)
+    # `run` here is the route's ImplementationRunRead response (a detached
+    # Pydantic model) — mutating it does nothing to the real row create_
+    # pull_request will read; fetch the actual ORM object to force a
+    # genuinely empty diff.
+    from app.models import ImplementationRun
+
+    orm_run = db.get(ImplementationRun, run.id)
+    orm_run.proposed_file_changes = []
+    db.flush()
+    calls = _mock_github(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc_info:
+        create_pull_request(run.id, CreatePullRequestRequest(triggered_by_user_id=actor.id), db)
+    assert exc_info.value.status_code == 409
+    assert "no file changes" in str(exc_info.value.detail).lower()
+    assert db.query(PullRequestLink).count() == 0
+    # Never even reaches GitHub — fails before any branch/PR API call.
+    assert calls == []
 
 
 # --- Happy path (requirements 2, 3, 5, 6, 7) -------------------------------------------
@@ -407,3 +447,99 @@ def test_token_never_appears_anywhere_after_pr_creation(db, project, actor, monk
     )
     assert "fake-token" not in dump
     assert "not-a-real-fernet-token" not in dump
+
+
+# --- register_pull_request — PRs opened from an external coding tool -------------------
+
+
+def _mock_github_read(monkeypatch, *, head_ref="feature/xyz", base_ref="main", pr_number=42):
+    import app.api.routes.implementation_runs as routes_module
+
+    monkeypatch.setattr(routes_module, "decrypt_repository_token", lambda repo: "fake-token")
+
+    def _get_pull_request(token, owner, repo, number, **kwargs):
+        return github_api.GitHubPullRequestDetail(
+            number=number, title="Add password reset endpoint", body="Implements the password reset flow.",
+            html_url=f"https://github.com/octocat/hello-world/pull/{number}", state="open",
+            head_ref=head_ref, base_ref=base_ref,
+        )
+
+    def _get_pull_request_files(token, owner, repo, number, **kwargs):
+        return [
+            github_api.GitHubPullRequestFile(filename="apps/api/app/api/routes/auth.py", status="modified", patch="@@ -1,2 +1,3 @@\n+added line"),
+        ]
+
+    monkeypatch.setattr(routes_module.github_api, "get_pull_request", _get_pull_request)
+    monkeypatch.setattr(routes_module.github_api, "get_pull_request_files", _get_pull_request_files)
+
+
+def test_register_pull_request_creates_completed_accepted_run_and_link(db, project, actor, monkeypatch):
+    task = _chain(db, project, actor)
+    _add_repository(db, project)
+    _mock_github_read(monkeypatch)
+
+    result = register_pull_request(RegisterPullRequestRequest(implementation_task_id=task.id, pr_number=42, triggered_by_user_id=actor.id), db)
+
+    assert result.status.value == "COMPLETED"
+    assert result.review_status.value == "ACCEPTED"
+    assert result.diff_text.strip() != ""
+    assert result.pull_request is not None
+    assert result.pull_request.pr_number == 42
+    assert result.pull_request.branch_name == "feature/xyz"
+    assert result.pull_request.base_branch == "main"
+    assert result.pull_request.created_by_agent is False
+
+    link = db.query(PullRequestLink).filter(PullRequestLink.implementation_task_id == task.id).first()
+    assert link is not None
+    assert link.created_by_agent is False
+    assert link.triggered_by_user_id == actor.id
+
+
+def test_register_pull_request_twice_is_idempotent_not_an_error(db, project, actor, monkeypatch):
+    task = _chain(db, project, actor)
+    _add_repository(db, project)
+    _mock_github_read(monkeypatch)
+    first = register_pull_request(RegisterPullRequestRequest(implementation_task_id=task.id, pr_number=42, triggered_by_user_id=actor.id), db)
+
+    second = register_pull_request(RegisterPullRequestRequest(implementation_task_id=task.id, pr_number=42, triggered_by_user_id=actor.id), db)
+
+    assert second.id == first.id
+    assert db.query(PullRequestLink).filter(PullRequestLink.implementation_task_id == task.id).count() == 1
+
+
+def test_register_pull_request_second_call_self_heals_a_task_stuck_from_before_the_status_fix(db, project, actor, monkeypatch):
+    """Regression: an earlier version of register_pull_request never flipped
+    ImplementationTask.status to COMPLETED, so a PR registered under that
+    version left its task stuck as "current" forever. Re-registering the
+    same PR must repair that in place rather than refusing with 409."""
+    task = _chain(db, project, actor)
+    _add_repository(db, project)
+    _mock_github_read(monkeypatch)
+    register_pull_request(RegisterPullRequestRequest(implementation_task_id=task.id, pr_number=42, triggered_by_user_id=actor.id), db)
+
+    task.status = ImplementationTaskStatus.IN_PROGRESS  # simulate the stuck pre-fix state
+    db.flush()
+
+    register_pull_request(RegisterPullRequestRequest(implementation_task_id=task.id, pr_number=42, triggered_by_user_id=actor.id), db)
+
+    assert task.status == ImplementationTaskStatus.COMPLETED
+
+
+def test_register_pull_request_requires_a_configured_repository(db, project, actor, monkeypatch):
+    task = _chain(db, project, actor)
+    _mock_github_read(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc_info:
+        register_pull_request(RegisterPullRequestRequest(implementation_task_id=task.id, pr_number=42, triggered_by_user_id=actor.id), db)
+    assert exc_info.value.status_code == 409
+
+
+def test_register_pull_request_never_leaks_the_token(db, project, actor, monkeypatch):
+    task = _chain(db, project, actor)
+    _add_repository(db, project)
+    _mock_github_read(monkeypatch)
+
+    result = register_pull_request(RegisterPullRequestRequest(implementation_task_id=task.id, pr_number=42, triggered_by_user_id=actor.id), db)
+
+    dump = json.dumps([result.model_dump(mode="json"), [row.extra_data for row in db.query(AuditLog).all()]])
+    assert "fake-token" not in dump

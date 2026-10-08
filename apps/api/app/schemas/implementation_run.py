@@ -7,11 +7,25 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import ImplementationRunReviewStatus, ImplementationRunStatus, PullRequestStatus
+from app.schemas.agent_run import ProviderOverride
 
 
 class StartImplementationRunRequest(BaseModel):
     implementation_task_id: uuid.UUID = Field(..., description="Existing, PENDING ImplementationTask.")
     triggered_by_user_id: uuid.UUID = Field(..., description="Existing user id — attributes this run.")
+    provider_override: ProviderOverride | None = Field(
+        default=None,
+        description=(
+            "Force this one run to use a specific LLM backend instead of the project's default "
+            "auto-selected one. 'claude_agent_sdk' requires the project to have a connected GitHub "
+            "repository (already required for Implementation itself); any other value requires that "
+            "provider's own API key to actually be configured in the backend's environment."
+        ),
+    )
+    model_override: str | None = Field(
+        default=None, max_length=200,
+        description="Force this one run to use a specific model within provider_override's provider (e.g. 'claude-opus-5'). Ignored unless provider_override is also set.",
+    )
 
 
 class ProposedFileChangeRead(BaseModel):
@@ -111,3 +125,14 @@ class CreatePullRequestRequest(BaseModel):
     base_branch: str | None = Field(
         default=None, description="Defaults to the repository's default_branch. Never itself written to."
     )
+
+
+class RegisterPullRequestRequest(BaseModel):
+    """For a task implemented outside this app (e.g. in Claude Code/Codex/
+    OpenCode/Cursor via the Implementation skill) — registers an already-
+    open GitHub PR against the task instead of generating one from an
+    ImplementationRun's own diff."""
+
+    implementation_task_id: uuid.UUID = Field(..., description="Existing ImplementationTask this PR implements.")
+    pr_number: int = Field(..., description="The already-open GitHub pull request's number, in this task's repository.")
+    triggered_by_user_id: uuid.UUID = Field(..., description="Existing user id — who is registering this PR.")

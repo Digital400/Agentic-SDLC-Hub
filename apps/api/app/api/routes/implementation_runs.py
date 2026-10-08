@@ -51,6 +51,7 @@ from app.models import (
 from app.schemas.implementation_run import (
     CreatePullRequestRequest,
     ImplementationRunRead,
+    RegisterPullRequestRequest,
     ReviewImplementationRunRequest,
     StartImplementationRunRequest,
 )
@@ -59,6 +60,8 @@ from app.services.audit import record_audit_log
 from app.services import github_integration as github_api
 from app.services.github_integration import GitHubIntegrationError
 from app.services.graph_engine import GraphEngineService
+from app.services.ai_generation import use_model_override, use_provider_override
+from app.services.claude_agent_harness import run_implementation_agent_via_sdk
 from app.services.implementation_agent import SUPPORTED_AREAS, run_implementation_agent
 from app.services.permissions import require_can_edit_stage
 from app.services.repo_context_builder import RepoContextBuilderService
@@ -111,10 +114,21 @@ def _get_pull_request_link(db: Session, run_id: uuid.UUID) -> PullRequestLink | 
 def _build_prior_story_task_context(db: Session, earlier_siblings: list[ImplementationTask]) -> str:
     """Full-stack-per-story: a summary of every earlier-ordered sibling
     task's latest Accepted run — what area, what it did, and which files
-    it touched — so the next area's agent builds on real, already-
-    committed work instead of guessing or recreating it. Empty for a
-    single-area story or the first task in a sequence (both the common
-    case — most stories still get exactly one task, unchanged)."""
+    it touched. BUG FIX: this used to be described (here and in the
+    prompt text it feeds) as "already-committed work" — false. A human
+    accepting a run only means they approved the PROPOSED diff; nothing
+    is ever pushed or merged until someone separately creates a pull
+    request (create_pull_request/Code Runner), which may not have
+    happened yet. Treating it as committed caused a real bug: a later
+    sibling task skipped its own acceptance criteria's files because an
+    earlier task's summary claimed they already existed, when they were
+    sitting unpushed in this app's own database the whole time. Both
+    prompt builders that consume this (claude_agent_harness.py's
+    _build_prompt and implementation_agent.py's _run_real_agent) now say
+    so explicitly and tell the agent to verify/not skip real work on that
+    basis alone. Empty for a single-area story or the first task in a
+    sequence (both the common case — most stories still get exactly one
+    task, unchanged)."""
     if not earlier_siblings:
         return ""
     blocks = []
@@ -425,7 +439,11 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
         .first()
     )
     if snapshot is None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Cannot start — create a repository snapshot first.")
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Cannot start — create a repository snapshot first (Settings → Integrations → GitHub, select this "
+            f"repository, then \"Create snapshot\"; repository: {repository.owner}/{repository.name}).",
+        )
 
     # Story Code Implementation Agent, precondition 4 — "Code runner
     # workspace can be created." A cheap, non-destructive check: the
@@ -471,19 +489,51 @@ def start_implementation_run(payload: StartImplementationRunRequest, db: Session
         },
     )
 
+    # provider_override/model_override (see StartImplementationRunRequest) —
+    # same per-run LLM choice the project-level/story-lane Run Agent panels
+    # already offer. A per-run override takes priority over the global
+    # CLAUDE_AGENT_SDK_ENABLED flag either way: explicitly choosing
+    # "claude_agent_sdk" uses it even if the flag is off; explicitly
+    # choosing any other provider skips the SDK branch even if the flag is
+    # on — identical reasoning to ai_generation.generate()'s own SDK gate.
+    override = payload.provider_override
+    use_sdk = (override == "claude_agent_sdk") if override is not None else get_settings().CLAUDE_AGENT_SDK_ENABLED
     try:
-        repo_context = RepoContextBuilderService(db).build(task=task, snapshot=snapshot, github_token=github_token)
-        standards_chunks = _fetch_standards_chunks(db, project, task)
-        engineering_setup = _fetch_engineering_setup_context(db, project)
-        if engineering_setup.snapshot:
-            run.engineering_setup_context_snapshot = engineering_setup.snapshot
-        result = run_implementation_agent(
-            task=task, repo_context=repo_context, story=story, lld_summary=lld_summary,
-            standards_chunks=standards_chunks, jira_issue_key=jira_issue_key,
-            implementation_plan_summary=implementation_plan_summary, test_scenarios_summary=test_scenarios_summary,
-            engineering_setup_context=engineering_setup.context_text,
-            prior_story_task_context=prior_story_task_context,
-        )
+        with use_provider_override(override), use_model_override(payload.model_override):
+            repo_context = RepoContextBuilderService(db).build(task=task, snapshot=snapshot, github_token=github_token)
+            standards_chunks = _fetch_standards_chunks(db, project, task)
+            engineering_setup = _fetch_engineering_setup_context(db, project)
+            if engineering_setup.snapshot:
+                run.engineering_setup_context_snapshot = engineering_setup.snapshot
+            # Phase 1 of the Claude Agent SDK harness (see
+            # app/services/claude_agent_harness.py) — opt-in, Implementation
+            # Agent only. Off by default: get_settings().CLAUDE_AGENT_SDK_ENABLED
+            # must be explicitly set, in which case this clones the task's real
+            # repository into a throwaway workspace and runs a real Claude Code
+            # agent session against it instead of the single-shot prompt below.
+            # A session failure (ClaudeAgentHarnessError) is deliberately NOT
+            # caught here — it falls through to this function's own broad
+            # except below and fails the run cleanly (retryable), rather than
+            # silently degrading to the heuristic scaffold: a team that opted
+            # into the real harness should see a real failure, not a quiet
+            # downgrade to TODO stubs.
+            if use_sdk:
+                result = run_implementation_agent_via_sdk(
+                    task=task, repository=repository, base_branch=snapshot.ref or repository.default_branch,
+                    story=story, lld_summary=lld_summary, jira_issue_key=jira_issue_key,
+                    implementation_plan_summary=implementation_plan_summary, test_scenarios_summary=test_scenarios_summary,
+                    engineering_setup_context=engineering_setup.context_text,
+                    prior_story_task_context=prior_story_task_context,
+                    model=payload.model_override,
+                )
+            else:
+                result = run_implementation_agent(
+                    task=task, repo_context=repo_context, story=story, lld_summary=lld_summary,
+                    standards_chunks=standards_chunks, jira_issue_key=jira_issue_key,
+                    implementation_plan_summary=implementation_plan_summary, test_scenarios_summary=test_scenarios_summary,
+                    engineering_setup_context=engineering_setup.context_text,
+                    prior_story_task_context=prior_story_task_context,
+                )
     except Exception as exc:  # noqa: BLE001 — anything unexpected fails this run cleanly, never a bare 500
         run.status = ImplementationRunStatus.FAILED
         run.error_message = str(exc)
@@ -726,6 +776,23 @@ def create_pull_request(
         )
     if _get_pull_request_link(db, run.id) is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, f"A pull request already exists for run {run_id}.")
+    if not run.proposed_file_changes:
+        # Without this, GitHub's own create-PR call would fail with a bare
+        # "422: Validation Failed" — it refuses a PR with zero commits
+        # between head and base, which is exactly what a 0-file run
+        # produces (the branch gets created but nothing is ever committed
+        # to it). A run can legitimately have no changes — e.g. a
+        # full-stack story whose FRONTEND task genuinely needs no frontend
+        # work (a backend/database-only story) — so this is a real,
+        # expected outcome, not a bug; it just needs a clear message
+        # instead of GitHub's opaque one.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Run {run_id} made no file changes, so there is nothing to open a pull request for. If this task "
+            "genuinely needs no changes for this story (e.g. a backend-only story with no frontend work), there "
+            "is no PR to create here — open one from a sibling task's run instead, if this story has one with "
+            "real changes.",
+        )
 
     # Every run against this task is the same piece of work regenerated,
     # not a separate change — and for a story-scoped task, every sibling
@@ -857,6 +924,152 @@ def create_pull_request(
         extra_data={
             "owner": repository.owner, "name": repository.name, "branch_name": branch_name, "base_branch": base_branch,
             "pr_number": pr.number, "pr_url": pr.html_url,
+        },
+    )
+
+    db.commit()
+    db.refresh(run)
+    db.refresh(link)
+    return ImplementationRunRead.from_orm_run(run, pull_request=link)
+
+
+@router.post("/register-pull-request", response_model=ImplementationRunRead, status_code=status.HTTP_201_CREATED)
+def register_pull_request(payload: RegisterPullRequestRequest, db: Session = Depends(get_db)) -> ImplementationRunRead:
+    """For a task implemented in an external coding tool (Claude Code,
+    Codex, OpenCode, Cursor — see the Implementation skill pack) rather
+    than this app's own Implementation Agent: the developer already
+    pushed a branch and opened a real PR by hand, and this records that
+    PR against the task instead of generating one from an
+    ImplementationRun's own diff.
+
+    Builds a representational, already-COMPLETED/ACCEPTED ImplementationRun
+    (diff_text populated from the PR's own real files/patches, fetched
+    from GitHub — never fabricated) so every downstream consumer that
+    reads an ImplementationRun (PR Review Agent, Testing Agent) sees the
+    same shape it always has, whether the diff came from this app's agent
+    or a human working locally. created_by_agent=False on the resulting
+    PullRequestLink is the one honest difference: no branch, commit, or PR
+    was created by this app for this row.
+    """
+    task = db.get(ImplementationTask, payload.implementation_task_id)
+    if task is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"implementation_task_id {payload.implementation_task_id} does not match an existing implementation task")
+    project = db.get(Project, task.project_id)
+    if project is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Task {task.id}'s project no longer exists.")
+
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+
+    implementation_node = None
+    if task.story_id is None:
+        implementation_node = (
+            db.query(WorkflowNode)
+            .filter(WorkflowNode.project_id == project.id, WorkflowNode.node_key == "implementation", WorkflowNode.story_id.is_(None))
+            .first()
+        )
+        if implementation_node is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Project {project.id}'s workflow has no implementation stage.")
+    require_can_edit_stage(triggered_by, "implementation")
+
+    existing = (
+        db.query(PullRequestLink)
+        .filter(PullRequestLink.implementation_task_id == task.id, PullRequestLink.pr_number == payload.pr_number)
+        .first()
+    )
+    if existing is not None:
+        # IDEMPOTENT, not an error — re-clicking "Register pull request" for
+        # a PR already registered against this task must be safe to repeat.
+        # This also self-heals a real bug: this endpoint used to not flip
+        # ImplementationTask.status to COMPLETED at all (see the fix below),
+        # so any PR registered before that fix shipped left its task stuck
+        # as "current" forever even though a real PR existed — this branch
+        # re-applies that flip for an existing registration instead of
+        # refusing a second click.
+        if task.status != ImplementationTaskStatus.COMPLETED:
+            task.status = ImplementationTaskStatus.COMPLETED
+            db.commit()
+        existing_run = db.get(ImplementationRun, existing.implementation_run_id)
+        return ImplementationRunRead.from_orm_run(existing_run, pull_request=existing)
+
+    repository = _resolve_repository_for_task(db, project, task)
+    if repository is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Cannot register a pull request — no GitHub repository is configured.")
+
+    try:
+        github_token = decrypt_repository_token(repository)
+    except HTTPException as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Cannot register a pull request — " + str(exc.detail)) from exc
+
+    try:
+        pr_detail = github_api.get_pull_request(github_token, repository.owner, repository.name, payload.pr_number)
+        pr_files = github_api.get_pull_request_files(github_token, repository.owner, repository.name, payload.pr_number)
+    except GitHubIntegrationError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Could not fetch pull request #{payload.pr_number} from GitHub: {exc}") from exc
+
+    diff_text = "\n".join(
+        f"diff --git a/{f.filename} b/{f.filename}\n{f.patch}" if f.patch else f"diff --git a/{f.filename} b/{f.filename}\n(binary or too large — no patch available)"
+        for f in pr_files
+    )
+
+    now = datetime.now(timezone.utc)
+    run = ImplementationRun(
+        project_id=project.id,
+        implementation_task_id=task.id,
+        story_id=task.story_id,
+        triggered_by_user_id=triggered_by.id,
+        agent_type=task.assigned_agent_type,
+        status=ImplementationRunStatus.COMPLETED,
+        proposed_file_changes=[{"path": f.filename, "change_type": f.status, "summary": "", "after_content": None} for f in pr_files],
+        diff_text=diff_text,
+        explanation=f"Implemented externally and registered from pull request #{pr_detail.number}.",
+        pr_description=pr_detail.body,
+        used_mock=False,
+        started_at=now,
+        completed_at=now,
+        review_status=ImplementationRunReviewStatus.ACCEPTED,
+        reviewed_by_user_id=triggered_by.id,
+        reviewed_at=now,
+        review_comment="Auto-accepted — this run represents an already-open, externally created pull request.",
+    )
+    db.add(run)
+    db.flush()
+
+    link = PullRequestLink(
+        project_id=project.id,
+        workflow_node_id=implementation_node.id if implementation_node is not None else None,
+        implementation_task_id=task.id,
+        implementation_run_id=run.id,
+        repository_id=repository.id,
+        story_id=task.story_id,
+        branch_name=pr_detail.head_ref or f"pr-{pr_detail.number}",
+        base_branch=pr_detail.base_ref or repository.default_branch,
+        pr_number=pr_detail.number,
+        pr_url=pr_detail.html_url,
+        created_by_agent=False,
+        triggered_by_user_id=triggered_by.id,
+        commit_message=pr_detail.title,
+    )
+    db.add(link)
+    db.flush()
+
+    # Full-stack-per-story sequencing (see review_implementation_run's own
+    # identical comment) — this is the signal _current_story_task (app/api/
+    # routes/stories.py) reads to know this area is done and the next
+    # sibling task (e.g. BACKEND after DATABASE) may start. Without this,
+    # a task implemented externally and registered here would sit ACCEPTED
+    # forever with its sibling chain never advancing — a real bug an
+    # earlier version of this endpoint had (it mirrored create_pull_request,
+    # which relies on review_implementation_run having already done this,
+    # but register_pull_request IS that run's review in one step).
+    task.status = ImplementationTaskStatus.COMPLETED
+
+    record_audit_log(
+        db, project_id=project.id, actor_user_id=triggered_by.id, action="implementation_run.pr_registered",
+        entity_type="PullRequestLink", entity_id=link.id,
+        extra_data={
+            "owner": repository.owner, "name": repository.name, "pr_number": pr_detail.number, "pr_url": pr_detail.html_url,
         },
     )
 

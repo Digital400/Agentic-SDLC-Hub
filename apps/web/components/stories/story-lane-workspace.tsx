@@ -8,9 +8,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { MarkdownPreview } from "@/components/documents/markdown-preview";
+import { ImplementationCodingToolPanel } from "@/components/stories/implementation-coding-tool-panel";
+import { StoryCodingToolPanel } from "@/components/stories/story-coding-tool-panel";
+import { ModelOverrideInput } from "@/components/model-override-input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { buildQuickPicks, parseQuickPickValue, quickPickValue, useProviderOptions } from "@/lib/use-provider-options";
 import {
   api,
   ApiCodeRun,
@@ -18,6 +22,7 @@ import {
   ApiImplementationRun,
   ApiImplementationTask,
   ApiPRReviewRun,
+  ApiProviderOverride,
   ApiPullRequestLink,
   ApiStory,
   ApiStoryArtifact,
@@ -141,9 +146,24 @@ export function StoryLaneWorkspace({
   const [testAgentType, setTestAgentType] = useState<ApiTestAgentType>("UNIT");
   const [busyNodeId, setBusyNodeId] = useState<string | null>(null);
   const [runBusy, setRunBusy] = useState(false);
+  // True only when Start Implementation failed specifically because this
+  // project's connected repository has no snapshot yet (see
+  // implementation_runs.py's own 409 for this exact case) — lets the error
+  // banner offer a one-click fix instead of just naming where to go.
+  const [needsSnapshot, setNeedsSnapshot] = useState(false);
+  const [snapshotBusy, setSnapshotBusy] = useState(false);
   const [codeRun, setCodeRun] = useState<ApiCodeRun | null>(null);
   const [codeRunPr, setCodeRunPr] = useState<ApiPullRequestLink | null>(null);
   const [codeRunBusy, setCodeRunBusy] = useState(false);
+  // Register a pull request opened from an external coding tool (Claude
+  // Code/Codex/OpenCode/Cursor via the Implementation skill) — an
+  // alternative to both the in-app agent PR and Code Runner above.
+  const [registerPrNumber, setRegisterPrNumber] = useState("");
+  const [registerBusy, setRegisterBusy] = useState(false);
+  // Tracks which task's "Reopen" is in flight — any task in the chain can
+  // be reopened, not just the current one (a sibling task can be COMPLETED
+  // while a later one is already current — see the badge chain below).
+  const [reopeningTaskId, setReopeningTaskId] = useState<string | null>(null);
   const [testRunBusy, setTestRunBusy] = useState(false);
   const [prReviewBusy, setPrReviewBusy] = useState(false);
   // UI rules 2/3/4 — human can edit/select suggested comments before
@@ -165,6 +185,21 @@ export function StoryLaneWorkspace({
   const [bugsDraft, setBugsDraft] = useState("");
   const [codeRunIdDraft, setCodeRunIdDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  // LLM override — one independent selection per draftable stage (see
+  // ModelOverrideInput/useProviderOptions, the same mechanism the
+  // project-level workflow graph's Run Agent panel uses), since drafting
+  // Story LLD, Implementation Plan, and Test Scenarios are three separate
+  // actions a user may want on three different backends.
+  const { options: providerOptions } = useProviderOptions(projectId);
+  const [lldProviderOverride, setLldProviderOverride] = useState<ApiProviderOverride | "">("");
+  const [lldModelOverride, setLldModelOverride] = useState("");
+  const [planProviderOverride, setPlanProviderOverride] = useState<ApiProviderOverride | "">("");
+  const [planModelOverride, setPlanModelOverride] = useState("");
+  const [scenariosProviderOverride, setScenariosProviderOverride] = useState<ApiProviderOverride | "">("");
+  const [scenariosModelOverride, setScenariosModelOverride] = useState("");
+  const [implProviderOverride, setImplProviderOverride] = useState<ApiProviderOverride | "">("");
+  const [implModelOverride, setImplModelOverride] = useState("");
 
   const storyLldNode = nodes.find((n) => n.node_key === "STORY_LLD") ?? null;
   const lldReviewNode = nodes.find((n) => n.node_key === "LLD_REVIEW") ?? null;
@@ -237,13 +272,44 @@ export function StoryLaneWorkspace({
     if (currentUserId === null || implementationTask === null) return;
     setRunBusy(true);
     setError(null);
+    setNeedsSnapshot(false);
     try {
-      await api.implementationRuns.start({ implementation_task_id: implementationTask.id, triggered_by_user_id: currentUserId });
+      await api.implementationRuns.start({
+        implementation_task_id: implementationTask.id, triggered_by_user_id: currentUserId,
+        provider_override: implProviderOverride || undefined, model_override: implModelOverride.trim() || undefined,
+      });
       await refresh();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Failed to start implementation.");
+      const message = err instanceof ApiError ? err.message : "Failed to start implementation.";
+      setError(message);
+      setNeedsSnapshot(message.includes("create a repository snapshot first"));
     } finally {
       setRunBusy(false);
+    }
+  }
+
+  // One-click fix for the "no repository snapshot yet" block above — finds
+  // this project's connected repository and creates a snapshot of its
+  // default branch directly from here, instead of sending the user off to
+  // Settings → Integrations → GitHub to do the exact same thing manually.
+  async function handleCreateSnapshotAndRetry() {
+    if (currentUserId === null) return;
+    setSnapshotBusy(true);
+    setError(null);
+    try {
+      const repositories = await api.projects.githubRepositories(projectId);
+      const repository = repositories[0];
+      if (!repository) {
+        setError("This project has no connected GitHub repository yet — connect one in Settings → Integrations → GitHub first.");
+        return;
+      }
+      await api.github.createSnapshot(repository.id, { triggered_by_id: currentUserId });
+      setNeedsSnapshot(false);
+      await handleStartImplementation();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to create the repository snapshot.");
+    } finally {
+      setSnapshotBusy(false);
     }
   }
 
@@ -305,6 +371,46 @@ export function StoryLaneWorkspace({
       setError(err instanceof ApiError ? err.message : "Failed to create the pull request from this code run.");
     } finally {
       setCodeRunBusy(false);
+    }
+  }
+
+  async function handleRegisterPullRequest() {
+    if (currentUserId === null || implementationTask === null) return;
+    const prNumber = Number.parseInt(registerPrNumber.trim(), 10);
+    if (!Number.isFinite(prNumber) || prNumber <= 0) {
+      setError("Enter the pull request's number (the # after the repo name on GitHub).");
+      return;
+    }
+    setRegisterBusy(true);
+    setError(null);
+    try {
+      await api.implementationRuns.registerPullRequest({
+        implementation_task_id: implementationTask.id, pr_number: prNumber, triggered_by_user_id: currentUserId,
+      });
+      setRegisterPrNumber("");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to register this pull request.");
+    } finally {
+      setRegisterBusy(false);
+    }
+  }
+
+  async function handleReopenTask(taskId: string) {
+    if (currentUserId === null) return;
+    const confirmed = window.confirm(
+      "Reopen this task? This puts it back to pending and rejects its currently accepted run (e.g. a mistakenly registered pull request) — any later sibling task that already started should be re-checked too.",
+    );
+    if (!confirmed) return;
+    setReopeningTaskId(taskId);
+    setError(null);
+    try {
+      await api.implementationTasks.reopen(taskId, { triggered_by_user_id: currentUserId, reason: "Reopened from the Implementation tab." });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to reopen this task.");
+    } finally {
+      setReopeningTaskId(null);
     }
   }
 
@@ -532,7 +638,10 @@ export function StoryLaneWorkspace({
     setBusyNodeId(storyLldNode.id);
     setError(null);
     try {
-      const result = await api.storyDelivery.draftStoryLld(storyLldNode.id, currentUserId, lldClarificationAnswer.trim() || undefined);
+      const result = await api.storyDelivery.draftStoryLld(storyLldNode.id, currentUserId, lldClarificationAnswer.trim() || undefined, {
+        providerOverride: lldProviderOverride || undefined,
+        modelOverride: lldModelOverride.trim() || undefined,
+      });
       if (result.needs_clarification) {
         setError("The agent needs more information before it can draft this story's LLD — see the generated notes.");
       } else {
@@ -573,7 +682,8 @@ export function StoryLaneWorkspace({
     setError(null);
     try {
       const result = await api.storyDelivery.draftImplementationPlan(
-        implementationPlanNode.id, currentUserId, implementationPlanClarificationAnswer.trim() || undefined
+        implementationPlanNode.id, currentUserId, implementationPlanClarificationAnswer.trim() || undefined,
+        { providerOverride: planProviderOverride || undefined, modelOverride: planModelOverride.trim() || undefined },
       );
       if (result.needs_clarification) {
         setError("The agent needs more information before it can draft this story's Implementation Plan — see the generated notes.");
@@ -625,7 +735,8 @@ export function StoryLaneWorkspace({
     setError(null);
     try {
       const result = await api.storyDelivery.draftTestScenarios(
-        testScenariosNode.id, currentUserId, testScenariosClarificationAnswer.trim() || undefined
+        testScenariosNode.id, currentUserId, testScenariosClarificationAnswer.trim() || undefined,
+        { providerOverride: scenariosProviderOverride || undefined, modelOverride: scenariosModelOverride.trim() || undefined },
       );
       if (result.needs_clarification) {
         setError("The agent needs more information before it can draft this story's Test Scenarios — see the generated notes.");
@@ -688,7 +799,17 @@ export function StoryLaneWorkspace({
         ))}
       </div>
 
-      {error && <p className="text-sm text-destructive">{error}</p>}
+      {error && (
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-sm text-destructive">{error}</p>
+          {needsSnapshot && (
+            <Button size="sm" variant="outline" onClick={handleCreateSnapshotAndRetry} disabled={snapshotBusy || currentUserId === null}>
+              {snapshotBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1 h-3.5 w-3.5" />}
+              Create repository snapshot &amp; retry
+            </Button>
+          )}
+        </div>
+      )}
 
       {tab === "lane" && (
         <Card>
@@ -773,6 +894,35 @@ export function StoryLaneWorkspace({
             )}
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
+            {storyLldNode && storyLldNode.status !== "LOCKED" && (
+              <div className="flex flex-wrap items-start gap-2 rounded-md border border-border bg-muted/20 p-2">
+                <Select
+                  value={lldProviderOverride ? quickPickValue(lldProviderOverride, lldModelOverride || null) : ""}
+                  onChange={(e) => {
+                    if (e.target.value === "") {
+                      setLldProviderOverride("");
+                      setLldModelOverride("");
+                      return;
+                    }
+                    const { provider, model } = parseQuickPickValue(e.target.value);
+                    setLldProviderOverride(provider);
+                    setLldModelOverride(model ?? "");
+                  }}
+                  className="min-w-[220px] flex-1 text-xs"
+                  title="Which LLM/model drafts this Story LLD — leave on Default to use the project's configured provider."
+                >
+                  <option value="">LLM: Default (project-configured)</option>
+                  {buildQuickPicks(providerOptions).map((p) => (
+                    <option key={p.value} value={p.value} disabled={!p.configured} title={p.unavailable_reason ?? undefined}>
+                      LLM: {p.label}
+                    </option>
+                  ))}
+                </Select>
+                <div className="min-w-[220px] flex-1">
+                  <ModelOverrideInput provider={lldProviderOverride} providerOptions={providerOptions} value={lldModelOverride} onChange={setLldModelOverride} />
+                </div>
+              </div>
+            )}
             {storyLldNode?.status === "LOCKED" ? (
               <p className="text-sm text-muted-foreground">
                 Story LLD is locked — Story Ready must complete first.
@@ -839,6 +989,11 @@ export function StoryLaneWorkspace({
                 No Story LLD has been drafted yet.
               </div>
             )}
+            {storyLldNode?.status !== "LOCKED" ? (
+              <StoryCodingToolPanel
+                projectId={projectId} storyId={story.id} stage="story_lld" stageTitle="Story LLD" currentUserId={currentUserId} onSynced={refresh}
+              />
+            ) : null}
           </CardContent>
         </Card>
       )}
@@ -869,6 +1024,35 @@ export function StoryLaneWorkspace({
             )}
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
+            {implementationPlanNode && implementationPlanNode.status !== "LOCKED" && (
+              <div className="flex flex-wrap items-start gap-2 rounded-md border border-border bg-muted/20 p-2">
+                <Select
+                  value={planProviderOverride ? quickPickValue(planProviderOverride, planModelOverride || null) : ""}
+                  onChange={(e) => {
+                    if (e.target.value === "") {
+                      setPlanProviderOverride("");
+                      setPlanModelOverride("");
+                      return;
+                    }
+                    const { provider, model } = parseQuickPickValue(e.target.value);
+                    setPlanProviderOverride(provider);
+                    setPlanModelOverride(model ?? "");
+                  }}
+                  className="min-w-[220px] flex-1 text-xs"
+                  title="Which LLM/model drafts this Implementation Plan — leave on Default to use the project's configured provider."
+                >
+                  <option value="">LLM: Default (project-configured)</option>
+                  {buildQuickPicks(providerOptions).map((p) => (
+                    <option key={p.value} value={p.value} disabled={!p.configured} title={p.unavailable_reason ?? undefined}>
+                      LLM: {p.label}
+                    </option>
+                  ))}
+                </Select>
+                <div className="min-w-[220px] flex-1">
+                  <ModelOverrideInput provider={planProviderOverride} providerOptions={providerOptions} value={planModelOverride} onChange={setPlanModelOverride} />
+                </div>
+              </div>
+            )}
             {implementationPlanNode?.status === "LOCKED" ? (
               <p className="text-sm text-muted-foreground">Implementation Plan is locked — Story LLD must be approved first.</p>
             ) : implementationPlan ? (
@@ -922,6 +1106,12 @@ export function StoryLaneWorkspace({
                 No Implementation Plan has been drafted yet.
               </div>
             )}
+            {implementationPlanNode?.status !== "LOCKED" ? (
+              <StoryCodingToolPanel
+                projectId={projectId} storyId={story.id} stage="story_implementation_plan" stageTitle="Implementation Plan"
+                currentUserId={currentUserId} onSynced={refresh}
+              />
+            ) : null}
           </CardContent>
         </Card>
       )}
@@ -952,6 +1142,35 @@ export function StoryLaneWorkspace({
             )}
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
+            {testScenariosNode && testScenariosNode.status !== "LOCKED" && (
+              <div className="flex flex-wrap items-start gap-2 rounded-md border border-border bg-muted/20 p-2">
+                <Select
+                  value={scenariosProviderOverride ? quickPickValue(scenariosProviderOverride, scenariosModelOverride || null) : ""}
+                  onChange={(e) => {
+                    if (e.target.value === "") {
+                      setScenariosProviderOverride("");
+                      setScenariosModelOverride("");
+                      return;
+                    }
+                    const { provider, model } = parseQuickPickValue(e.target.value);
+                    setScenariosProviderOverride(provider);
+                    setScenariosModelOverride(model ?? "");
+                  }}
+                  className="min-w-[220px] flex-1 text-xs"
+                  title="Which LLM/model drafts these Test Scenarios — leave on Default to use the project's configured provider."
+                >
+                  <option value="">LLM: Default (project-configured)</option>
+                  {buildQuickPicks(providerOptions).map((p) => (
+                    <option key={p.value} value={p.value} disabled={!p.configured} title={p.unavailable_reason ?? undefined}>
+                      LLM: {p.label}
+                    </option>
+                  ))}
+                </Select>
+                <div className="min-w-[220px] flex-1">
+                  <ModelOverrideInput provider={scenariosProviderOverride} providerOptions={providerOptions} value={scenariosModelOverride} onChange={setScenariosModelOverride} />
+                </div>
+              </div>
+            )}
             {testScenariosNode?.status === "LOCKED" ? (
               <p className="text-sm text-muted-foreground">Test Scenarios is locked — Implementation must complete first.</p>
             ) : testScenarios ? (
@@ -1005,6 +1224,12 @@ export function StoryLaneWorkspace({
                 No Test Scenarios have been drafted yet.
               </div>
             )}
+            {testScenariosNode?.status !== "LOCKED" ? (
+              <StoryCodingToolPanel
+                projectId={projectId} storyId={story.id} stage="story_test_scenarios" stageTitle="Test Scenarios"
+                currentUserId={currentUserId} onSynced={refresh}
+              />
+            ) : null}
           </CardContent>
         </Card>
       )}
@@ -1049,6 +1274,21 @@ export function StoryLaneWorkspace({
                           {t.area}
                           {t.id === implementationTask.id && t.status !== "COMPLETED" ? " (current)" : ""}
                         </Badge>
+                        {/* A sibling task can be COMPLETED while a later one is
+                            already current — e.g. a mistakenly registered PR.
+                            Reopen is reachable here, not just on the current
+                            task's own run panel below. */}
+                        {t.status === "COMPLETED" && (
+                          <button
+                            type="button"
+                            onClick={() => handleReopenTask(t.id)}
+                            disabled={reopeningTaskId === t.id}
+                            className="text-muted-foreground underline-offset-2 hover:underline disabled:opacity-50"
+                            title={`Reopen ${t.area}`}
+                          >
+                            {reopeningTaskId === t.id ? "reopening…" : "reopen"}
+                          </button>
+                        )}
                         {i < implementationTasks.length - 1 && <span className="text-muted-foreground">→</span>}
                       </span>
                     ))}
@@ -1057,6 +1297,124 @@ export function StoryLaneWorkspace({
                 <div className="text-xs text-muted-foreground">
                   {implementationTask.title} · {implementationTask.area} · {implementationTask.assigned_agent_type}
                 </div>
+
+                <div className="flex flex-wrap items-start gap-2 rounded-md border border-border bg-muted/20 p-2">
+                  <Select
+                    value={implProviderOverride ? quickPickValue(implProviderOverride, implModelOverride || null) : ""}
+                    onChange={(e) => {
+                      if (e.target.value === "") {
+                        setImplProviderOverride("");
+                        setImplModelOverride("");
+                        return;
+                      }
+                      const { provider, model } = parseQuickPickValue(e.target.value);
+                      setImplProviderOverride(provider);
+                      setImplModelOverride(model ?? "");
+                    }}
+                    className="min-w-[220px] flex-1 text-xs"
+                    title="Which LLM/model runs this implementation — leave on Default to use the project's configured provider."
+                  >
+                    <option value="">LLM: Default (project-configured)</option>
+                    {buildQuickPicks(providerOptions).map((p) => (
+                      <option key={p.value} value={p.value} disabled={!p.configured} title={p.unavailable_reason ?? undefined}>
+                        LLM: {p.label}
+                      </option>
+                    ))}
+                  </Select>
+                  <div className="min-w-[220px] flex-1">
+                    <ModelOverrideInput provider={implProviderOverride} providerOptions={providerOptions} value={implModelOverride} onChange={setImplModelOverride} />
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-3 rounded-md border border-border p-3">
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-muted-foreground">What to build</p>
+                    <p className="text-sm whitespace-pre-wrap">{implementationTask.description || "(no description recorded)"}</p>
+                  </div>
+                  {implementationTask.linked_lld_section && (
+                    <p className="text-xs">
+                      <span className="font-medium text-muted-foreground">LLD section: </span>
+                      {implementationTask.linked_lld_section} — see the LLD tab for its full content.
+                    </p>
+                  )}
+                  {implementationTask.expected_paths.length > 0 && (
+                    <div>
+                      <p className="mb-1 text-xs font-medium text-muted-foreground">Expected files</p>
+                      <ul className="text-xs font-mono">
+                        {implementationTask.expected_paths.map((p) => (
+                          <li key={p}>{p}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {implementationTask.acceptance_criteria.length > 0 && (
+                    <div>
+                      <p className="mb-1 text-xs font-medium text-muted-foreground">Acceptance criteria</p>
+                      <ul className="list-inside list-disc text-xs">
+                        {implementationTask.acceptance_criteria.map((c, i) => (
+                          <li key={i}>{c}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {implementationTask.test_expectation && (
+                    <p className="text-xs">
+                      <span className="font-medium text-muted-foreground">Testing: </span>
+                      {implementationTask.test_expectation}
+                    </p>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Full context also lives on the <span className="font-medium">LLD</span>, <span className="font-medium">Implementation Plan</span>, and{" "}
+                    <span className="font-medium">Test Scenarios</span> tabs above, plus this project&apos;s coding standards under Settings → Engineering Setup.
+                  </p>
+                </div>
+
+                {!latestRun?.pull_request ? (
+                  <div className="flex flex-col gap-2">
+                    <ImplementationCodingToolPanel projectId={projectId} taskId={implementationTask.id} currentUserId={currentUserId} />
+                    <div className="flex flex-col gap-2 rounded-md border border-dashed border-border p-3">
+                      <p className="text-xs font-medium text-muted-foreground">Already have a pull request open for this task? Register it:</p>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-muted-foreground">PR #</span>
+                        <input
+                          value={registerPrNumber}
+                          onChange={(e) => setRegisterPrNumber(e.target.value)}
+                          placeholder="42"
+                          inputMode="numeric"
+                          className="h-8 w-24 rounded-md border border-input bg-background px-2 text-xs"
+                        />
+                        <Button size="sm" variant="outline" onClick={handleRegisterPullRequest} disabled={registerBusy || currentUserId === null}>
+                          {registerBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <GitPullRequest className="mr-1 h-3.5 w-3.5" />}
+                          Register pull request
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  // Still available even once a PR is registered — re-clicking
+                  // is safe (idempotent) and is how a task whose status got
+                  // stuck can be nudged to re-check/advance without having to
+                  // find a different way back into this form.
+                  <div className="flex flex-col gap-2 rounded-md border border-dashed border-border p-3">
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Registered as PR #{latestRun.pull_request.pr_number}. Not advancing to the next task? Re-register it to refresh its status:
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted-foreground">PR #</span>
+                      <input
+                        value={registerPrNumber || String(latestRun.pull_request.pr_number)}
+                        onChange={(e) => setRegisterPrNumber(e.target.value)}
+                        placeholder={String(latestRun.pull_request.pr_number)}
+                        inputMode="numeric"
+                        className="h-8 w-24 rounded-md border border-input bg-background px-2 text-xs"
+                      />
+                      <Button size="sm" variant="outline" onClick={handleRegisterPullRequest} disabled={registerBusy || currentUserId === null}>
+                        {registerBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <GitPullRequest className="mr-1 h-3.5 w-3.5" />}
+                        Re-register / refresh status
+                      </Button>
+                    </div>
+                  </div>
+                )}
 
                 {latestRun && (
                   <div className="flex flex-col gap-3">
@@ -1068,6 +1426,16 @@ export function StoryLaneWorkspace({
                         {latestRun.review_status}
                       </Badge>
                       {latestRun.used_mock && <span className="text-xs text-muted-foreground">(mock provider)</span>}
+                      {implementationTask.status === "COMPLETED" && (
+                        <Button
+                          size="sm" variant="outline" className="ml-auto"
+                          onClick={() => handleReopenTask(implementationTask.id)}
+                          disabled={reopeningTaskId === implementationTask.id}
+                        >
+                          {reopeningTaskId === implementationTask.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                          Reopen this task
+                        </Button>
+                      )}
                     </div>
 
                     {latestRun.error_message ? (
@@ -1131,7 +1499,18 @@ export function StoryLaneWorkspace({
                           </div>
                         )}
 
-                        {latestRun.review_status === "ACCEPTED" && !latestRun.pull_request && (
+                        {/* A run can legitimately have zero proposed_file_changes — e.g. this
+                            area genuinely needs no work for this story (see the run's own
+                            explanation/risks above). GitHub refuses to open a PR with no commits,
+                            so offering the button here would just fail; show why instead. */}
+                        {latestRun.review_status === "ACCEPTED" && !latestRun.pull_request && latestRun.proposed_file_changes.length === 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            This run made no file changes, so there is nothing to open a pull request for — see
+                            its own explanation above for why. If a sibling task in this story has real changes,
+                            create the pull request from there instead.
+                          </p>
+                        )}
+                        {latestRun.review_status === "ACCEPTED" && !latestRun.pull_request && latestRun.proposed_file_changes.length > 0 && (
                           <Button size="sm" onClick={handleCreatePullRequest} disabled={runBusy} className="w-fit">
                             <GitPullRequest className="mr-1 h-3.5 w-3.5" /> Create Pull Request
                           </Button>
@@ -1150,7 +1529,7 @@ export function StoryLaneWorkspace({
                         {/* CodeRunnerService — local-git alternative: apply the accepted patch
                             through a real isolated clone, run configured tests, commit, push,
                             then create the GitHub PR from that already-pushed branch. */}
-                        {latestRun.review_status === "ACCEPTED" && !latestRun.pull_request && !codeRunPr && (
+                        {latestRun.review_status === "ACCEPTED" && !latestRun.pull_request && !codeRunPr && latestRun.proposed_file_changes.length > 0 && (
                           <div className="flex flex-col gap-2 rounded-md border border-dashed border-border p-3">
                             <p className="text-xs font-medium text-muted-foreground">Or run via Code Runner (real isolated clone, tests, commit, push):</p>
                             <div className="flex items-center gap-2">

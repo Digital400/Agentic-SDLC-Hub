@@ -38,7 +38,7 @@ from app.models import (
     WorkflowNode,
     WorkflowStatus,
 )
-from app.services.ai_generation import generate
+from app.services.ai_generation import generate, use_model_override, use_provider_override
 from app.services.story_delivery import advance_lane
 
 # Requirement 1 — the new artifact type this module produces.
@@ -61,6 +61,7 @@ STORY_LLD_SECTIONS = (
     "Scope",
     "Out of Scope",
     "Related HLD Sections",
+    "File/Folder Structure",
     "API Changes",
     "Database Changes",
     "Frontend Changes",
@@ -92,10 +93,25 @@ def _get_approved_hld(db: Session, project: Project) -> Artifact:
     """Requirement 3's third precondition — HLD is approved. Project-level,
     same document every story's lane shares (see
     app/services/story_lane_templates.py's retired predecessor for the
-    prior art on this exact lookup shape)."""
-    hld_node = db.query(WorkflowNode).filter(WorkflowNode.project_id == project.id, WorkflowNode.node_key == "hld").first()
+    prior art on this exact lookup shape).
+
+    BUG FIX: this used to look only for a node keyed "hld" — the default
+    (new-project) template's full High-Level Design. The existing-project-
+    feature template (see workflows/existing-project-feature-workflow.json)
+    has no such node at all; its architecture document is "hld_delta"
+    instead. A story on that template could therefore never pass this
+    precondition, no matter what was approved — "The High-Level Design
+    must be approved" even with HLD Delta long since approved. A project
+    only ever has one of the two (they belong to mutually exclusive
+    templates), so checking both by name and using whichever exists is
+    correct and never ambiguous."""
+    hld_node = (
+        db.query(WorkflowNode)
+        .filter(WorkflowNode.project_id == project.id, WorkflowNode.node_key.in_(["hld", "hld_delta"]))
+        .first()
+    )
     if hld_node is None:
-        raise StoryLldError(f"Project {project.id}'s workflow has no hld stage.")
+        raise StoryLldError(f"Project {project.id}'s workflow has no hld or hld_delta stage.")
     artifact = (
         db.query(Artifact)
         .filter(Artifact.workflow_node_id == hld_node.id, Artifact.status == ArtifactStatus.APPROVED)
@@ -103,12 +119,38 @@ def _get_approved_hld(db: Session, project: Project) -> Artifact:
         .first()
     )
     if artifact is None or artifact.current_version is None:
-        raise StoryLldError("The High-Level Design must be approved before Story LLD can start.")
+        raise StoryLldError(f"The {hld_node.name} must be approved before Story LLD can start.")
     return artifact
 
 
+def get_approved_hld_or_none(db: Session, project: Project) -> tuple[str, Artifact | None]:
+    """Non-raising counterpart to _get_approved_hld, for callers (e.g.
+    app/services/story_coding_tool_sync.py's input snapshot) that want to
+    show "not approved yet" rather than fail outright. Returns
+    (the stage's display name, the approved Artifact or None) — reusing
+    the exact same "hld" or "hld_delta" lookup so the two paths can never
+    drift apart the way they once did (see this module's BUG FIX note)."""
+    hld_node = (
+        db.query(WorkflowNode)
+        .filter(WorkflowNode.project_id == project.id, WorkflowNode.node_key.in_(["hld", "hld_delta"]))
+        .first()
+    )
+    if hld_node is None:
+        return "High-Level Design", None
+    artifact = (
+        db.query(Artifact)
+        .filter(Artifact.workflow_node_id == hld_node.id, Artifact.status == ArtifactStatus.APPROVED)
+        .order_by(Artifact.updated_at.desc())
+        .first()
+    )
+    if artifact is None or artifact.current_version is None:
+        return hld_node.name, None
+    return hld_node.name, artifact
+
+
 def run_story_lld_agent(
-    db: Session, *, node: StoryDeliveryNode, triggered_by: User, clarification_answers: str | None = None
+    db: Session, *, node: StoryDeliveryNode, triggered_by: User, clarification_answers: str | None = None,
+    provider_override: str | None = None, model_override: str | None = None,
 ) -> StoryLldResult:
     """Requirement 3's three preconditions, checked in order, before
     anything else runs:
@@ -157,7 +199,16 @@ def run_story_lld_agent(
         allowed_actions=["draft"],
         status=WorkflowStatus.READY,
         context_token_budget=12000,
-        output_token_budget=3072,
+        # 6144, not the 3072 this stage shipped with originally — the
+        # section set now also requires Mermaid diagrams (API Changes'
+        # sequenceDiagram, Database Changes' erDiagram, Frontend Changes'
+        # classDiagram/flowchart) plus code-level contracts (real type/
+        # interface/class blocks, table definitions, file paths — see
+        # app/db/seed.py's RICH_DEFAULT_PROMPTS["story_lld"]), which made
+        # the old budget truncate real drafts mid-document in practice,
+        # not just theoretically (confirmed: a developer hit this with the
+        # "Output truncated" warning on Claude Sonnet 5 before this fix).
+        output_token_budget=6144,
         full_content_artifact_types=["hld_document"],
         order_index=0,
         position_x=0,
@@ -168,24 +219,25 @@ def run_story_lld_agent(
         node.status = StoryDeliveryNodeStatus.IN_PROGRESS
         node.started_at = node.started_at or datetime.now(timezone.utc)
 
-    result = generate(
-        project=project,
-        node=virtual_node,
-        action=AgentPromptRole.DRAFT,
-        active_prompt=active_prompt,
-        approved_artifact_content={"hld_document": hld_content},
-        approved_artifact_summaries={"hld_document": hld_artifact.current_version.agent_context_summary or hld_content},
-        freeform_context={
-            "story_title": story.title,
-            "user_story": story.user_story,
-            "business_value": story.business_value,
-            "acceptance_criteria": "; ".join(story.acceptance_criteria) or "None stated.",
-            **({"clarification_answers": clarification_answers} if clarification_answers else {}),
-        },
-        context_token_budget=virtual_node.context_token_budget,
-        output_token_budget=virtual_node.output_token_budget,
-        full_content_artifact_types={"hld_document"},
-    )
+    with use_provider_override(provider_override), use_model_override(model_override):
+        result = generate(
+            project=project,
+            node=virtual_node,
+            action=AgentPromptRole.DRAFT,
+            active_prompt=active_prompt,
+            approved_artifact_content={"hld_document": hld_content},
+            approved_artifact_summaries={"hld_document": hld_artifact.current_version.agent_context_summary or hld_content},
+            freeform_context={
+                "story_title": story.title,
+                "user_story": story.user_story,
+                "business_value": story.business_value,
+                "acceptance_criteria": "; ".join(story.acceptance_criteria) or "None stated.",
+                **({"clarification_answers": clarification_answers} if clarification_answers else {}),
+            },
+            context_token_budget=virtual_node.context_token_budget,
+            output_token_budget=virtual_node.output_token_budget,
+            full_content_artifact_types={"hld_document"},
+        )
 
     # BUG FIX: needs_clarification used to return story_artifact=None here
     # — result.content_markdown already contains the model's actual

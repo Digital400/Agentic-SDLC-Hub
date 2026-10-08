@@ -1,10 +1,21 @@
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.enums import AgentPromptRole, AgentRunStatus, LoopStatus, LoopStepType
+
+# Mirrors app/services/ai_generation.py's ProviderOverride — kept as a
+# separate Literal here rather than imported, so this schema module (a thin
+# request/response contract) doesn't reach into the services layer just for
+# a type. Keep the two lists in sync by hand if a new backend is added.
+ProviderOverride = Literal["claude_agent_sdk", "anthropic", "gemini", "openrouter", "nvidia", "huggingface", "ollama"]
+
+# Hard ceiling on all freeform text in one run request (roughly 30–40k words).
+# Longer-than-budget input below this is condensed, not rejected — see
+# app/services/intake_text_condenser.py.
+MAX_INPUT_CHARS = 200_000
 
 
 class AgentRunCreate(BaseModel):
@@ -14,6 +25,68 @@ class AgentRunCreate(BaseModel):
     input_artifact_ids: list[uuid.UUID] = Field(default_factory=list, description="Must all exist.")
     triggered_by_user_id: uuid.UUID = Field(..., description="Existing user id — attributes the resulting artifact version.")
     input_context: dict[str, Any] = Field(default_factory=dict, description="Freeform extra context, e.g. a stakeholder request.")
+    provider_override: ProviderOverride | None = Field(
+        default=None,
+        description=(
+            "Force this one run to use a specific LLM backend instead of the project's default "
+            "auto-selected one (see app/services/ai_generation.py's get_active_provider). "
+            "'claude_agent_sdk' requires the project to have a connected GitHub repository; any other "
+            "value requires that provider's own API key to actually be configured in the backend's "
+            "environment, or the run fails with a clear error naming which one."
+        ),
+    )
+    model_override: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Force this one run to use a specific model within the chosen provider (e.g. "
+            "'claude-opus-5' for anthropic/claude_agent_sdk, or a specific repo id for huggingface) "
+            "instead of that provider's configured default. Ignored if provider_override is left on "
+            "the project default. An invalid/unavailable model name fails the run with that provider's "
+            "own error, exactly as a hand-edited configuration default would."
+        ),
+    )
+
+    @field_validator("input_context")
+    @classmethod
+    def _input_not_too_large(cls, value: dict[str, Any]) -> dict[str, Any]:
+        total = sum(len(v) for v in value.values() if isinstance(v, str))
+        if total > MAX_INPUT_CHARS:
+            raise ValueError(
+                f"The input is too long ({total:,} characters; the maximum is {MAX_INPUT_CHARS:,}, "
+                "roughly 30,000 words). Split it, or remove repeated sections, and try again."
+            )
+        return value
+
+
+class ProviderOptionRead(BaseModel):
+    """One row of GET /agent-runs/providers — what the frontend's LLM
+    dropdown (see provider_override above) actually offers for this
+    backend/project, built from real config instead of a hardcoded list a
+    user has no way to tell apart from what's actually usable."""
+
+    value: ProviderOverride
+    label: str
+    # The real configured model name (e.g. "claude-sonnet-5",
+    # "Qwen/Qwen2.5-Coder-32B-Instruct") — None only for claude_agent_sdk,
+    # which has no single "model" setting of its own (it's a full agent
+    # session, not a text-completion call).
+    model: str | None
+    # Whether this option would actually work right now if picked — an API
+    # key being set (or, for claude_agent_sdk, the flag being on AND, when
+    # project_id was given, that project having a connected repository).
+    # Still offered even when False (never silently hidden), with
+    # unavailable_reason explaining why, so a user isn't left guessing why
+    # a run failed after picking it.
+    configured: bool
+    unavailable_reason: str | None = None
+    # Curated, known-good model ids for this provider (e.g. the Claude
+    # family for anthropic/claude_agent_sdk) — suggestions, not a closed
+    # list: the frontend still lets a user type any model id via
+    # model_override, since providers like Hugging Face/OpenRouter/NVIDIA
+    # have far too large a catalog to enumerate here. Empty for a provider
+    # with no curated suggestions (the user types the id freehand).
+    available_models: list[str] = []
 
 
 class AgentRunRead(BaseModel):

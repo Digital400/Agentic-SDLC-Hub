@@ -46,6 +46,16 @@ class UpdateImplementationTaskRepositoryRequest(BaseModel):
     )
 
 
+class ReopenImplementationTaskRequest(BaseModel):
+    """Body for POST /implementation-tasks/{id}/reopen — undoes a mistaken
+    "completed" state (most commonly: the wrong, already-merged pull
+    request was registered against this task — see
+    app/api/routes/implementation_tasks.py's reopen_task)."""
+
+    triggered_by_user_id: uuid.UUID = Field(..., description="Existing user id — who is correcting this.")
+    reason: str | None = Field(default=None, description="Shown on the superseded run's review comment and in the audit log.")
+
+
 class GenerateImplementationPlanRequest(BaseModel):
     triggered_by_user_id: uuid.UUID = Field(
         ..., description="Existing user id — attributes the generated plan's artifact version."

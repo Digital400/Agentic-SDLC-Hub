@@ -14,6 +14,8 @@ import pytest
 
 from app.api.routes.github_integration import (
     connect_github,
+    create_remote_repository,
+    remote_repository_exists,
     create_repository,
     create_repository_snapshot,
     disconnect_github,
@@ -22,7 +24,7 @@ from app.api.routes.github_integration import (
     set_primary_repository,
 )
 from app.models import AuditLog, Integration, IntegrationConnection, IntegrationProvider, IntegrationStatus, Repository, RepositoryFileIndex
-from app.schemas.github_integration import ConnectGitHubRequest, CreateRepositoryRequest, CreateSnapshotRequest
+from app.schemas.github_integration import ConnectGitHubRequest, CreateRemoteRepositoryRequest, CreateRepositoryRequest, CreateSnapshotRequest
 from app.services import github_integration as github_api
 from app.services.github_integration import (
     MAX_PREVIEWABLE_FILE_SIZE_BYTES,
@@ -602,3 +604,74 @@ def test_removing_a_non_primary_repository_leaves_the_primary_untouched(db, proj
 
     refreshed_first = db.get(Repository, first.id)
     assert refreshed_first.is_primary is True
+
+
+# --- create_repository (project wizard's "Create a new repository") ----------------------
+
+
+def test_create_repository_posts_an_empty_private_repo_by_default():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"], seen["path"], seen["body"] = request.method, request.url.path, json.loads(request.content)
+        return httpx.Response(201, json={
+            "owner": {"login": "octocat"}, "name": "new-app", "full_name": "octocat/new-app",
+            "default_branch": "main", "description": None, "private": True,
+            "html_url": "https://github.com/octocat/new-app",
+        })
+
+    repo = github_api.create_repository(REAL_TOKEN, "new-app", transport=_transport(handler))
+
+    assert (seen["method"], seen["path"]) == ("POST", "/user/repos")
+    assert seen["body"] == {"name": "new-app", "private": True, "auto_init": False}
+    assert repo.full_name == "octocat/new-app" and repo.is_private is True
+
+
+def test_create_remote_repository_route_returns_summary_and_audits(db, actor, monkeypatch):
+    monkeypatch.setattr(github_api, "verify_token", lambda token, **kwargs: GitHubUser(login="octocat", scopes=["repo"]))
+    connection = connect_github(ConnectGitHubRequest(access_token=REAL_TOKEN, connected_by_id=actor.id), db)
+    monkeypatch.setattr(
+        github_api, "create_repository",
+        lambda token, name, **kwargs: GitHubRepoSummary(
+            owner="octocat", name=name, full_name=f"octocat/{name}", default_branch="main",
+            description=None, is_private=True, html_url=f"https://github.com/octocat/{name}",
+        ),
+    )
+
+    result = create_remote_repository(connection.id, CreateRemoteRepositoryRequest(name="new-app", actor_user_id=actor.id), db)
+
+    assert result.full_name == "octocat/new-app"
+    assert db.query(AuditLog).filter(AuditLog.action == "github.repository_created").count() == 1
+    assert REAL_TOKEN not in str(db.query(AuditLog).all()[-1].extra_data)
+
+
+def test_create_remote_repository_name_taken_is_a_409(db, actor, monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(github_api, "verify_token", lambda token, **kwargs: GitHubUser(login="octocat", scopes=["repo"]))
+    connection = connect_github(ConnectGitHubRequest(access_token=REAL_TOKEN, connected_by_id=actor.id), db)
+
+    def boom(token, name, **kwargs):
+        raise GitHubIntegrationError("GitHub API returned 422: name already exists on this account", status_code=422)
+
+    monkeypatch.setattr(github_api, "create_repository", boom)
+    with pytest.raises(HTTPException) as exc:
+        create_remote_repository(connection.id, CreateRemoteRepositoryRequest(name="dup"), db)
+    assert exc.value.status_code == 409
+
+
+def test_remote_repository_exists_true_and_false(db, actor, monkeypatch):
+    monkeypatch.setattr(github_api, "verify_token", lambda token, **kwargs: GitHubUser(login="octocat", scopes=["repo"]))
+    connection = connect_github(ConnectGitHubRequest(access_token=REAL_TOKEN, connected_by_id=actor.id), db)
+
+    monkeypatch.setattr(
+        github_api, "get_repository",
+        lambda token, owner, repo, **kwargs: GitHubRepo(default_branch="main", description=None, html_url="u", is_private=True),
+    )
+    assert remote_repository_exists(connection.id, "taken", db)["exists"] is True
+
+    def missing(token, owner, repo, **kwargs):
+        raise GitHubIntegrationError("GitHub API returned 404: Not Found", status_code=404)
+
+    monkeypatch.setattr(github_api, "get_repository", missing)
+    assert remote_repository_exists(connection.id, "free", db) == {"exists": False, "owner": "octocat", "name": "free"}

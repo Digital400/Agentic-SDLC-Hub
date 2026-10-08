@@ -34,6 +34,7 @@ from app.models import (
 )
 from app.schemas.github_integration import (
     ConnectGitHubRequest,
+    CreateRemoteRepositoryRequest,
     CreateRepositoryRequest,
     CreateSnapshotRequest,
     GitHubRepoSummaryRead,
@@ -203,6 +204,61 @@ def list_connection_repositories(connection_id: uuid.UUID, db: Session = Depends
         )
         for r in repos
     ]
+
+
+@router.get("/connections/{connection_id}/repositories/exists")
+def remote_repository_exists(
+    connection_id: uuid.UUID, name: str = Query(..., min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._-]+$"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Does a repository with this name already exist under the
+    connection's own account? Backs the wizard's live name check for
+    "Create a new repository" (a real GitHub lookup, not the capped list)."""
+    connection = _get_connection_or_404(db, connection_id)
+    if connection.status != IntegrationStatus.CONNECTED or not connection.github_username:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This GitHub connection isn't CONNECTED.")
+    token = decrypt_secret(connection.access_token_encrypted)
+    try:
+        github_api.get_repository(token, connection.github_username, name)
+    except GitHubIntegrationError as exc:
+        if exc.status_code == 404:
+            return {"exists": False, "owner": connection.github_username, "name": name}
+        raise _github_error_to_http(exc) from exc
+    return {"exists": True, "owner": connection.github_username, "name": name}
+
+
+@router.post("/connections/{connection_id}/repositories", response_model=GitHubRepoSummaryRead, status_code=status.HTTP_201_CREATED)
+def create_remote_repository(
+    connection_id: uuid.UUID, payload: CreateRemoteRepositoryRequest, db: Session = Depends(get_db)
+) -> GitHubRepoSummaryRead:
+    """Create a brand-new empty repository on GitHub under this
+    connection's account (the project wizard's "Create a new repository").
+    The one route here that creates something on GitHub; it does not link
+    it to a project — the caller then saves it via POST /github/repositories."""
+    connection = _get_connection_or_404(db, connection_id)
+    if connection.status != IntegrationStatus.CONNECTED:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This GitHub connection isn't CONNECTED.")
+    token = decrypt_secret(connection.access_token_encrypted)
+    try:
+        repo = github_api.create_repository(token, payload.name, description=payload.description, private=payload.private)
+    except GitHubIntegrationError as exc:
+        if exc.status_code == 422:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"Could not create repository '{payload.name}': {exc}") from exc
+        raise _github_error_to_http(exc) from exc
+
+    record_audit_log(
+        db,
+        actor_user_id=payload.actor_user_id,
+        action="github.repository_created",
+        entity_type="IntegrationConnection",
+        entity_id=connection.id,
+        extra_data={"owner": repo.owner, "name": repo.name, "private": repo.is_private},
+    )
+    db.commit()
+    return GitHubRepoSummaryRead(
+        owner=repo.owner, name=repo.name, full_name=repo.full_name, default_branch=repo.default_branch,
+        description=repo.description, is_private=repo.is_private, html_url=repo.html_url,
+    )
 
 
 # 2. Save a project's repo configuration ----------------------------------------------

@@ -235,11 +235,16 @@ export function ArtifactEditor({
     }
   }
 
+  const showClarification = needsClarification && editable;
+
   return (
     // Fixed viewport height + 3 side-by-side columns only makes sense once
     // there's room for all three — below lg the section nav, content, and
     // agent/comments rail stack instead and the page scrolls normally.
-    <div className="flex flex-col lg:h-[calc(100vh-8.5rem)]">
+    // While the (tall) clarification panel is showing, the page scrolls
+    // normally instead — inside a fixed-height box it would squeeze the three
+    // columns below it down to nothing.
+    <div className={`flex flex-col ${showClarification ? "" : "lg:h-[calc(100vh-8.5rem)]"}`}>
       {/* Header + toolbar */}
       <div className="mb-4 flex flex-col gap-3 border-b border-border pb-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -409,12 +414,13 @@ export function ArtifactEditor({
           </p>
         ) : null}
 
-        {needsClarification && editable ? (
+        {showClarification ? (
           <ClarificationPanel
             projectId={doc.projectId}
             workflowNodeId={doc.workflowNodeId}
             freeformInputKeys={doc.freeformInputKeys}
             triggeredByUserId={createdById}
+            clarificationMarkdown={joinSectionsIntoMarkdown(sections)}
             onApplied={handleAgentApplied}
           />
         ) : null}
@@ -422,7 +428,7 @@ export function ArtifactEditor({
 
       {/* Three-panel layout — column below lg, row at lg+ (see the outer
           container's comment above). */}
-      <div className="flex min-h-0 flex-1 flex-col gap-4 lg:flex-row">
+      <div className={`flex min-h-0 flex-1 flex-col gap-4 lg:flex-row ${showClarification ? "lg:h-[calc(100vh-8.5rem)] lg:min-h-[32rem]" : ""}`}>
         <aside className="max-h-56 w-full shrink-0 overflow-hidden rounded-lg border border-border lg:h-auto lg:max-h-none lg:w-56">
           <SectionNav
             sections={sections}
@@ -486,6 +492,7 @@ export function ArtifactEditor({
             documentHasRealSections={docHasRealSections}
             freeformInputKeys={doc.freeformInputKeys}
             triggeredByUserId={createdById}
+            versionKey={String(currentVersionNumber)}
             onApplied={handleAgentApplied}
           />
           <CommentsPanel comments={doc.comments} />

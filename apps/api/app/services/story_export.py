@@ -72,6 +72,13 @@ class Story:
     technical_areas: list[str] = field(default_factory=list)
     story_points_estimate: str = ""
     jira_issue_type: str = ""
+    # Requirement: "PR review must be doable by one human" — the agent's own
+    # best/typical/worst-case minutes estimate for reviewing this story's
+    # pull request (see app/db/seed.py's story_crafting prompt rule 7), kept
+    # as the raw string the agent wrote (e.g. "5 / 15 / 30") the same way
+    # story_points_estimate is — parsed into a plain worst-case int only at
+    # Story-row sync time (see review_time.py's parse_worst_case_minutes).
+    estimated_pr_review_time: str = ""
     suggested_subtasks: list[str] = field(default_factory=list)
     release_readiness_criteria: list[str] = field(default_factory=list)
 
@@ -129,6 +136,7 @@ def parse_story_backlog(content_markdown: str) -> list[Story]:
                 technical_areas=_as_list(fields.get("technical areas involved", "")),
                 story_points_estimate=fields.get("story points estimate", ""),
                 jira_issue_type=fields.get("jira issue type", ""),
+                estimated_pr_review_time=fields.get("estimated pr review time", ""),
                 suggested_subtasks=_as_checklist(fields.get("suggested subtasks", "")),
                 release_readiness_criteria=_as_checklist(fields.get("release readiness criteria", "")),
             )

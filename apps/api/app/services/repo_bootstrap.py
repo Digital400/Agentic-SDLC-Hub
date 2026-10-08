@@ -332,9 +332,99 @@ def _nextjs_scaffold(project: Project) -> list[ScaffoldFile]:
     "typescript": "5.5.4",
     "tailwindcss": "3.4.10",
     "postcss": "8.4.41",
-    "autoprefixer": "10.4.20"
+    "autoprefixer": "10.4.20",
+    "eslint": "8.57.0",
+    "eslint-config-next": "14.2.35",
+    "eslint-config-airbnb-typescript": "18.0.0",
+    "eslint-config-prettier": "9.1.0",
+    "eslint-plugin-prettier": "5.2.1",
+    "eslint-plugin-import": "2.29.1",
+    "eslint-plugin-jsx-a11y": "6.9.0",
+    "eslint-plugin-simple-import-sort": "12.1.1",
+    "eslint-plugin-sonarjs": "1.0.4",
+    "eslint-import-resolver-typescript": "3.6.3",
+    "@typescript-eslint/parser": "7.18.0",
+    "@typescript-eslint/eslint-plugin": "7.18.0",
+    "prettier": "3.3.3"
   }}
 }}
+"""
+    eslintrc = """{
+  "root": true,
+  "parser": "@typescript-eslint/parser",
+  "extends": [
+    "airbnb-typescript",
+    "next/core-web-vitals",
+    "next",
+    "prettier",
+    "plugin:prettier/recommended",
+    "plugin:@typescript-eslint/recommended",
+    "plugin:import/recommended",
+    "plugin:import/errors",
+    "plugin:import/warnings",
+    "plugin:import/typescript",
+    "plugin:jsx-a11y/recommended",
+    "eslint-config-prettier",
+    "plugin:sonarjs/recommended-legacy"
+  ],
+  "plugins": ["simple-import-sort", "import", "sonarjs"],
+  "rules": {
+    "@typescript-eslint/no-explicit-any": "off",
+    "react-hooks/exhaustive-deps": "off",
+    "@next/next/no-img-element": "warn",
+    "@next/next/no-html-link-for-pages": "off",
+    "simple-import-sort/exports": "error",
+    "simple-import-sort/imports": "error",
+    "@typescript-eslint/no-unused-vars": "warn",
+    "import/no-unresolved": "error",
+    "react/no-unescaped-entities": "error",
+    "jsx-a11y/label-has-associated-control": "warn",
+    "@typescript-eslint/no-shadow": "error",
+    "import/no-named-as-default": "warn",
+    "sonarjs/cognitive-complexity": ["warn", 15],
+    "sonarjs/no-duplicate-string": "warn",
+    "sonarjs/no-nested-switch": "error",
+    "sonarjs/no-redundant-jump": "error",
+    "sonarjs/no-duplicated-branches": "warn",
+    "sonarjs/prefer-immediate-return": "error",
+    "sonarjs/prefer-read-only-props": "error",
+    "sonarjs/no-ignored-exceptions": "error",
+    "sonarjs/todo-tag": "warn",
+    "sonarjs/deprecation": "warn",
+    "sonarjs/different-types-comparison": "error",
+    "sonarjs/no-nested-template-literals": "warn",
+    "sonarjs/no-nested-conditional": "error",
+    "sonarjs/argument-type": "off",
+    "sonarjs/no-undefined-argument": "warn",
+    "sonarjs/no-redundant-boolean": "error",
+    "sonarjs/function-return-type": "off",
+    "sonarjs/no-selector-parameter": "error",
+    "sonarjs/no-redundant-optional": "error",
+    "sonarjs/no-identical-expressions": "error",
+    "sonarjs/no-nested-functions": "error",
+    "sonarjs/null-dereference": "off",
+    "sonarjs/pseudo-random": "error",
+    "sonarjs/no-dead-store": "error",
+    "sonarjs/slow-regex": "warn",
+    "sonarjs/no-unused-vars": "error",
+    "sonarjs/jsx-no-leaked-render": "error"
+  },
+  "parserOptions": {
+    "project": "./tsconfig.json",
+    "tsconfigRootDir": "./",
+    "sourceType": "module",
+    "ecmaVersion": 2024,
+    "ecmaFeatures": { "jsx": true }
+  },
+  "settings": {
+    "next": { "rootDir": "./" },
+    "react": { "version": "detect" },
+    "import/resolver": {
+      "typescript": { "alwaysTryTypes": true, "project": "./tsconfig.json" },
+      "node": { "extensions": [".ts", ".tsx", ".js", ".jsx", ".json"] }
+    }
+  }
+}
 """
     tsconfig = """{
   "compilerOptions": {
@@ -359,6 +449,7 @@ def _nextjs_scaffold(project: Project) -> list[ScaffoldFile]:
 """
     return [
         ScaffoldFile("frontend/package.json", package_json),
+        ScaffoldFile("frontend/.eslintrc.json", eslintrc),
         ScaffoldFile("frontend/tsconfig.json", tsconfig),
         ScaffoldFile(
             "frontend/next.config.mjs",

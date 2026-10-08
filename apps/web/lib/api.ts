@@ -211,6 +211,8 @@ export interface ApiCodingStandardInput {
   title: string;
   content: string;
   category?: ApiCodingStandardCategory;
+  // Confluence / SharePoint (or any http(s)) reference link; never fetched.
+  source_url?: string | null;
 }
 
 export interface ApiGuardrailInput {
@@ -255,7 +257,7 @@ export interface ApiEngineeringSetup {
   updated_at: string;
   repository_config: { id: string; option: ApiGithubSetupOption; repository_id: string | null; new_repo_name: string | null; branch_naming_pattern: string; target_branch: string } | null;
   jira_config: { id: string; option: ApiJiraSetupOption; jira_project_link_id: string | null } | null;
-  coding_standards: { id: string; title: string; content: string; category: ApiCodingStandardCategory; order_index: number }[];
+  coding_standards: { id: string; title: string; content: string; category: ApiCodingStandardCategory; source_url: string | null; order_index: number }[];
   guardrails: { id: string; rule_text: string; order_index: number }[];
   documentation_config: { id: string; target: ApiDocumentationTarget } | null;
   command_config: { id: string; build_command: string | null; test_commands: string[]; lint_command: string | null } | null;
@@ -547,6 +549,10 @@ export interface ApiStory {
   definition_of_done: string[];
   suggested_owner_role: string | null;
   story_points: number | null;
+  // The agent's own best/typical/worst-case PR review time estimate, and
+  // the worst-case minutes parsed from it — see app/services/review_time.py.
+  estimated_pr_review_time: string;
+  estimated_review_worst_case_minutes: number | null;
   business_value: string;
   technical_areas: string[];
   jira_issue_type: string;
@@ -568,6 +574,35 @@ export interface ApiStory {
   jira_status: string;
   jira_issue_key: string | null;
   jira_issue_url: string | null;
+}
+
+// Recommended implementation order — see app/services/story_sequencing.py.
+export interface ApiStoryOrderResponse {
+  waves: { stories: ApiStory[] }[];
+  // story_id -> leftover Dependencies text that didn't match any known
+  // story title (a likely typo or renamed/deleted story).
+  unresolved_dependencies: Record<string, string>;
+  // Stories whose Dependencies form a cycle — reported, never guessed at.
+  circular: ApiStory[];
+}
+
+// Comparing an already-synced story against the CURRENT approved backlog —
+// sync-from-backlog never updates an existing story, so this is the
+// explicit, human-reviewed way a correction reaches one. See
+// app/api/routes/stories.py's get_story_backlog_diff/apply_story_backlog_diff.
+export interface ApiStoryFieldChange {
+  field: string;
+  current: string;
+  proposed: string;
+}
+
+export interface ApiStoryBacklogDiff {
+  story_id: string;
+  found_in_backlog: boolean;
+  source_version_number: number;
+  changes: ApiStoryFieldChange[];
+  up_to_date: boolean;
+  lane_active: boolean;
 }
 
 // Story delivery lane — dedicated per-story graph, see
@@ -1419,6 +1454,38 @@ export type ApiLoopStatus =
   | "COMPLETED_NO_CRITICAL_ISSUES"
   | "WAITING_FOR_CLARIFICATION";
 
+// Mirrors apps/api/app/schemas/agent_run.py's ProviderOverride.
+// "claude_agent_sdk" requires the project to have a connected GitHub
+// repository; every other value requires that provider's own API key to
+// actually be configured in the backend's environment.
+export type ApiProviderOverride = "claude_agent_sdk" | "anthropic" | "gemini" | "openrouter" | "nvidia" | "huggingface" | "ollama";
+
+// Shared shape for "force this one run to use a specific LLM" across every
+// endpoint that accepts it — project-level agent runs (agentRuns.start) and
+// each per-story delivery-lane draft (storyDelivery.draftStoryLld /
+// draftImplementationPlan / draftTestScenarios).
+export interface LlmOverride {
+  providerOverride?: ApiProviderOverride;
+  modelOverride?: string;
+}
+
+// Mirrors apps/api/app/schemas/agent_run.py's ProviderOptionRead — see GET
+// /agent-runs/providers. `model` is the real configured model name (e.g.
+// "Qwen/Qwen2.5-Coder-32B-Instruct"), not a hardcoded guess; `configured`
+// says whether this option would actually work right now.
+export interface ApiProviderOption {
+  value: ApiProviderOverride;
+  label: string;
+  model: string | null;
+  configured: boolean;
+  unavailable_reason: string | null;
+  // Curated suggestions for model_override (e.g. the Claude family for
+  // anthropic/claude_agent_sdk) — not a closed list, just quick picks; any
+  // model id can still be typed. Empty for a provider with no curated
+  // suggestions (Gemini/OpenRouter/NVIDIA/Hugging Face/Ollama).
+  available_models: string[];
+}
+
 export interface ApiAgentRun {
   id: string;
   project_id: string;
@@ -1466,6 +1533,174 @@ export interface ApiAgentRun {
 }
 
 // "Improve section" — see app/services/section_improve_agent.py.
+export type ApiCodingTool = "claude_code" | "codex" | "opencode" | "cursor";
+
+export interface ApiSkillPack {
+  tool: ApiCodingTool;
+  tool_label: string;
+  stage: string;
+  files: { path: string; purpose: string; managed: boolean; content: string }[];
+  usage: string[];
+  notes: string[];
+}
+
+export interface ApiInstallSkillsResponse {
+  branch_name: string | null;
+  base_branch: string;
+  pull_request_url: string | null;
+  committed: string[];
+  skipped: { path: string; reason: string }[];
+  message: string;
+}
+
+export interface ApiSyncStoryInputsResponse {
+  branch_name: string | null;
+  base_branch: string;
+  pull_request_url: string | null;
+  committed: string[];
+  // Display names of upstream documents that aren't ready yet (e.g.
+  // ["Story LLD"]) — committed as a placeholder; empty means everything
+  // this stage needs is actually available right now.
+  not_ready: string[];
+  message: string;
+}
+
+// The Stories list's "Prepare for coding tool" bulk action — one click
+// across many stories instead of opening each one's own workspace. See
+// apps/api/app/api/routes/coding_tools.py's bulk_prepare_coding_tool.
+export interface ApiBulkPrepareStoryResult {
+  story_id: string;
+  story_title: string;
+  status: "prepared" | "skipped";
+  lane_created: boolean;
+  committed_paths: string[];
+  not_ready: string[];
+  reason: string | null;
+}
+
+export interface ApiBulkPrepareCodingToolResponse {
+  branch_name: string | null;
+  base_branch: string;
+  pull_request_url: string | null;
+  results: ApiBulkPrepareStoryResult[];
+  message: string;
+}
+
+// The Stories list's "Run Story LLD" bulk button — drafts every selected
+// story's Story LLD in one click. See app/api/routes/stories.py's
+// bulk_run_story_lld.
+export interface ApiBulkRunStoryLldStoryResult {
+  story_id: string;
+  story_title: string;
+  status: "drafted" | "already_drafted" | "needs_clarification" | "skipped";
+  lane_created: boolean;
+  reason: string | null;
+}
+
+export interface ApiBulkRunStoryLldResponse {
+  results: ApiBulkRunStoryLldStoryResult[];
+  remaining: ApiBulkRunStoryLldStoryResult[];
+  message: string;
+}
+
+// The Stories list's "Approve & Unlock Next" bulk action — a real,
+// role-checked human approval across many stories at once, never a
+// silent bypass. See app/api/routes/stories.py's bulk_approve_lane_node.
+export interface ApiBulkApproveLaneNodeStoryResult {
+  story_id: string;
+  story_title: string;
+  status: "approved" | "already_approved" | "skipped";
+  reason: string | null;
+}
+
+export interface ApiBulkApproveLaneNodeResponse {
+  results: ApiBulkApproveLaneNodeStoryResult[];
+  message: string;
+}
+
+// Story-wise bulk code Implementation — one real agent run per selected
+// story, for that story's own next runnable task. See
+// app/api/routes/stories.py's bulk_start_implementation.
+export interface ApiBulkStartImplementationStoryResult {
+  story_id: string;
+  story_title: string;
+  status: "started" | "awaiting_review" | "all_complete" | "skipped";
+  task_area: string | null;
+  task_title: string | null;
+  implementation_run_id: string | null;
+  run_status: string | null;
+  reason: string | null;
+}
+
+export interface ApiBulkStartImplementationResponse {
+  results: ApiBulkStartImplementationStoryResult[];
+  message: string;
+}
+
+export interface ApiSyncStoryStageResponse {
+  story_artifact_id: string;
+  version_number: number;
+  node_status: string;
+  ref: string;
+  path: string;
+  generated_by: string | null;
+  created: boolean;
+}
+
+// The Stories list's "Pull Latest from GitHub" bulk action — the reverse
+// of bulkPrepare. See app/api/routes/coding_tools.py's bulk_sync_story_stage.
+export interface ApiBulkSyncStoryStageStoryResult {
+  story_id: string;
+  story_title: string;
+  status: "synced" | "skipped";
+  version_number: number | null;
+  reason: string | null;
+}
+
+export interface ApiBulkSyncStoryStageResponse {
+  ref: string;
+  results: ApiBulkSyncStoryStageStoryResult[];
+  message: string;
+}
+
+export interface ApiSyncStageResponse {
+  artifact_id: string;
+  artifact_version_id: string;
+  version_number: number;
+  artifact_status: string;
+  workflow_node_status: string;
+  ref: string;
+  file_sha: string;
+  path: string;
+  generated_by: string | null;
+  created_artifact: boolean;
+}
+
+export interface ApiSectionChange {
+  title: string;
+  kind: "added" | "removed" | "changed";
+  added_lines: string[];
+  removed_lines: string[];
+  added_line_count: number;
+  removed_line_count: number;
+}
+
+export interface ApiChangeSummary {
+  from_version: number | null;
+  to_version: number;
+  headline: string;
+  is_first_version: boolean;
+  changes: ApiSectionChange[];
+  change_note: string | null;
+}
+
+export interface ApiAskQuestionResponse {
+  answer: string;
+  sources: string[];
+  used_mock: boolean;
+  truncated: boolean;
+}
+
 export interface ApiImproveSectionResponse {
   agent_run: ApiAgentRun;
   needs_clarification: boolean;
@@ -1571,8 +1806,21 @@ export const api = {
     // "Improve section" — see app/services/section_improve_agent.py. Only
     // works on a DRAFT artifact; every section besides `section_title` is
     // guaranteed unchanged. Never creates/touches a Review.
-    improveSection: (id: string, body: { section_title: string; instruction: string; triggered_by_user_id: string }) =>
-      post<ApiImproveSectionResponse>(`/artifacts/${id}/improve-section`, body),
+    improveSection: (
+      id: string,
+      body: { section_title: string; instruction?: string; triggered_by_user_id: string; mode?: "improve" | "regenerate" },
+    ) => post<ApiImproveSectionResponse>(`/artifacts/${id}/improve-section`, body),
+    // Read-only: what changed between two versions (default: previous vs current).
+    changes: (id: string, params?: { from_version?: number; to_version?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.from_version !== undefined) qs.set("from_version", String(params.from_version));
+      if (params?.to_version !== undefined) qs.set("to_version", String(params.to_version));
+      const suffix = qs.toString();
+      return get<ApiChangeSummary>(`/artifacts/${id}/changes${suffix ? `?${suffix}` : ""}`);
+    },
+    // Read-only: ask a question about this document; never modifies it.
+    ask: (id: string, body: { question: string; triggered_by_user_id: string }) =>
+      post<ApiAskQuestionResponse>(`/artifacts/${id}/ask`, body),
     // "GitHub integration" (rule scope) — a local preview of the PR
     // title/description/checklist a human pastes into a real GitHub PR;
     // no real GitHub connection exists — see app/services/github_export.py.
@@ -1606,7 +1854,7 @@ export const api = {
   // Implementation Agent execution (diff/patch preview only) — see
   // app/api/routes/implementation_runs.py.
   implementationRuns: {
-    start: (body: { implementation_task_id: string; triggered_by_user_id: string }) =>
+    start: (body: { implementation_task_id: string; triggered_by_user_id: string; provider_override?: ApiProviderOverride; model_override?: string }) =>
       post<ApiImplementationRun>("/implementation-runs", body),
     get: (id: string) => get<ApiImplementationRun>(`/implementation-runs/${id}`),
     review: (id: string, body: { decision: "ACCEPTED" | "REJECTED"; reviewed_by_user_id: string; comment?: string | null }) =>
@@ -1615,12 +1863,22 @@ export const api = {
     // the run is ACCEPTED. Never targets the repository's default branch.
     createPullRequest: (id: string, body: { triggered_by_user_id: string; base_branch?: string | null }) =>
       post<ApiImplementationRun>(`/implementation-runs/${id}/create-pull-request`, body),
+    // For a task implemented outside this app (Claude Code/Codex/OpenCode/
+    // Cursor via the Implementation skill) — records an already-open PR
+    // against the task instead of generating one from an agent's own diff.
+    registerPullRequest: (body: { implementation_task_id: string; pr_number: number; triggered_by_user_id: string }) =>
+      post<ApiImplementationRun>("/implementation-runs/register-pull-request", body),
   },
 
   // Multi-repo support — see app/api/routes/implementation_tasks.py.
   implementationTasks: {
     updateRepository: (taskId: string, repositoryId: string | null) =>
       patch<ApiImplementationTask>(`/implementation-tasks/${taskId}/repository`, { repository_id: repositoryId }),
+    // Undoes a mistaken COMPLETED status (most commonly: the wrong pull
+    // request was registered) — puts the task back to PENDING and rejects
+    // the run its mistaken PR was attached to.
+    reopen: (taskId: string, body: { triggered_by_user_id: string; reason?: string | null }) =>
+      post<ApiImplementationTask>(`/implementation-tasks/${taskId}/reopen`, body),
   },
 
   // Project Engineering Setup — the Create Project wizard's own data. See
@@ -1716,11 +1974,61 @@ export const api = {
   // GitHub integration foundation — read-only repo scan. `access_token`
   // in `connect` is the only place a token ever appears in a request;
   // every response type here is token-free (see ApiIntegrationConnection).
+  // Use your own AI coding tool for a stage — see apps/api/app/services/coding_tool_skills.py.
+  codingTools: {
+    preview: (projectId: string, tool: ApiCodingTool, stage: string) =>
+      get<ApiSkillPack>(`/projects/${projectId}/coding-tools/skills/preview?tool=${tool}&stage=${encodeURIComponent(stage)}`),
+    install: (projectId: string, body: { tool: ApiCodingTool; stage: string; triggered_by_user_id: string }) =>
+      post<ApiInstallSkillsResponse>(`/projects/${projectId}/coding-tools/skills/install`, body),
+    sync: (projectId: string, body: { stage: string; triggered_by_user_id: string; ref?: string | null }) =>
+      post<ApiSyncStageResponse>(`/projects/${projectId}/coding-tools/sync`, body),
+    // Per-story delivery lane stages (Story LLD, Implementation Plan, Test
+    // Scenarios) — the skill files are installed once, generically, via
+    // preview/install above; these two are the genuinely per-story actions.
+    syncStoryInputs: (projectId: string, storyId: string, body: { stage: string; triggered_by_user_id: string; base_branch?: string | null }) =>
+      post<ApiSyncStoryInputsResponse>(`/projects/${projectId}/coding-tools/stories/${storyId}/sync-inputs`, body),
+    syncStoryStage: (projectId: string, storyId: string, body: { stage: string; triggered_by_user_id: string; ref?: string | null }) =>
+      post<ApiSyncStoryStageResponse>(`/projects/${projectId}/coding-tools/stories/${storyId}/sync`, body),
+    // Stories list's bulk action: for every selected story, create its
+    // delivery lane if missing and snapshot its `stage` inputs — all
+    // landing on ONE shared branch/PR, not one per story.
+    bulkPrepare: (
+      projectId: string,
+      body: { story_ids: string[]; stage: string; triggered_by_user_id: string; base_branch?: string | null },
+    ) => post<ApiBulkPrepareCodingToolResponse>(`/projects/${projectId}/coding-tools/stories/bulk-prepare`, body),
+    // Reverse direction — for every selected story, re-read
+    // docs/sdlc/stories/<slug>/<stage>.md and save it as a new version
+    // (e.g. after a human or external coding tool refined what
+    // bulkPrepare originally pushed).
+    bulkSync: (
+      projectId: string,
+      body: { story_ids: string[]; stage: string; triggered_by_user_id: string; ref?: string | null },
+    ) => post<ApiBulkSyncStoryStageResponse>(`/projects/${projectId}/coding-tools/stories/bulk-sync`, body),
+    // Implementation's own per-task input snapshot — its skill pack (stage
+    // "implementation") installs once per repo via install() above; this is
+    // the genuinely per-task action (one story can have several sibling
+    // tasks: DATABASE/BACKEND/FRONTEND).
+    syncImplementationTaskInputs: (projectId: string, taskId: string, body: { triggered_by_user_id: string; base_branch?: string | null }) =>
+      post<ApiSyncStoryInputsResponse>(`/projects/${projectId}/coding-tools/implementation-tasks/${taskId}/sync-inputs`, body),
+  },
+
   github: {
     connect: (body: ApiConnectGitHubRequest) => post<ApiIntegrationConnection>("/github/connections", body),
     listConnections: () => get<ApiIntegrationConnection[]>("/github/connections"),
     disconnect: (connectionId: string) => post<ApiIntegrationConnection>(`/github/connections/${connectionId}/disconnect`),
     listRepositoryOptions: (connectionId: string) => get<ApiGitHubRepoSummary[]>(`/github/connections/${connectionId}/repositories`),
+    // Creates a brand-new EMPTY repository on GitHub under this connection's
+    // account (project wizard's "Create a new repository"); link it to a
+    // project afterwards with saveRepository.
+    // Does a repository with this name already exist under the connection's own account?
+    remoteRepositoryExists: (connectionId: string, name: string) =>
+      get<{ exists: boolean; owner: string; name: string }>(
+        `/github/connections/${connectionId}/repositories/exists?name=${encodeURIComponent(name)}`,
+      ),
+    createRemoteRepository: (
+      connectionId: string,
+      body: { name: string; description?: string | null; private?: boolean; actor_user_id?: string | null },
+    ) => post<ApiGitHubRepoSummary>(`/github/connections/${connectionId}/repositories`, body),
     saveRepository: (body: ApiCreateRepositoryRequest) => post<ApiRepository>("/github/repositories", body),
     getRepository: (repositoryId: string) => get<ApiRepository>(`/github/repositories/${repositoryId}`),
     setPrimaryRepository: (repositoryId: string) => post<ApiRepository>(`/github/repositories/${repositoryId}/set-primary`),
@@ -1755,6 +2063,9 @@ export const api = {
     connect: (body: ApiConnectJiraRequest) => post<ApiJiraConnection>("/jira/connections", body),
     listConnections: () => get<ApiJiraConnection[]>("/jira/connections"),
     disconnect: (connectionId: string) => post<ApiJiraConnection>(`/jira/connections/${connectionId}/disconnect`),
+    // Every Jira project this account can see — backs a project picker so a
+    // key is chosen from what actually exists rather than typed by hand.
+    listProjectOptions: (connectionId: string) => get<{ key: string; name: string }[]>(`/jira/connections/${connectionId}/projects`),
     saveProject: (body: { project_id: string; connection_id: string; jira_project_key: string }) =>
       post<ApiJiraProjectLink>("/jira/projects", body),
     pushPreview: (projectId: string) => get<ApiJiraPushPreview>(`/jira/projects/${projectId}/push-preview`),
@@ -1872,12 +2183,27 @@ export const api = {
 
   agentRuns: {
     get: (id: string) => get<ApiAgentRun>(`/agent-runs/${id}`),
+    // project_id is optional — pass it so claude_agent_sdk's `configured`
+    // also reflects whether THIS project has a connected repository, not
+    // just the backend's global CLAUDE_AGENT_SDK_ENABLED flag.
+    listProviders: (projectId?: string) =>
+      get<ApiProviderOption[]>(`/agent-runs/providers${projectId ? `?project_id=${projectId}` : ""}`),
     start: (body: {
       project_id: string;
       workflow_node_id: string;
       action: string;
       triggered_by_user_id: string;
       input_context?: Record<string, unknown>;
+      // Force this one run to use a specific LLM backend instead of the
+      // project's default auto-selected one — see
+      // apps/api/app/schemas/agent_run.py's ProviderOverride. Omit to keep
+      // today's default (auto-detected provider / Claude Agent SDK if
+      // CLAUDE_AGENT_SDK_ENABLED and the project has a repo).
+      provider_override?: ApiProviderOverride;
+      // Force a specific model within provider_override's provider (e.g.
+      // "claude-opus-5") instead of that provider's configured default.
+      // Ignored unless provider_override is also set.
+      model_override?: string;
     }) => post<ApiAgentRun>("/agent-runs", body),
     saveToArtifact: (id: string) =>
       post<{ agent_run: ApiAgentRun; artifact_id: string; artifact_version_id: string; artifact_status: string; workflow_node_status: string }>(
@@ -1917,6 +2243,30 @@ export const api = {
       post<ApiStory>(`/stories/${storyId}/assign`, { owner_user_id: ownerUserId, assigned_by_id: assignedById }),
     createLane: (storyId: string, triggeredByUserId: string) =>
       post<ApiStory>(`/stories/${storyId}/lane`, { triggered_by_user_id: triggeredByUserId }),
+    // The Stories list's "Run Story LLD" bulk button — drafts every
+    // selected story's Story LLD in one click, creating a lane and
+    // completing Story Ready along the way where needed.
+    bulkRunStoryLld: (projectId: string, body: { story_ids: string[]; triggered_by_user_id: string }) =>
+      post<ApiBulkRunStoryLldResponse>(`/projects/${projectId}/stories/bulk-run-story-lld`, body),
+    // "Approve & Unlock Next" bulk action — a real, role-checked human
+    // approval of one review gate (LLD_REVIEW / IMPLEMENTATION_PLAN /
+    // TEST_SCENARIOS) across many stories at once.
+    bulkApproveLaneNode: (projectId: string, body: { node_key: string; story_ids: string[]; triggered_by_user_id: string }) =>
+      post<ApiBulkApproveLaneNodeResponse>(`/projects/${projectId}/stories/bulk-approve-lane-node`, body),
+    // Story-wise bulk code Implementation — one real agent run per story,
+    // for that story's own next runnable task. Never creates/merges a PR.
+    bulkStartImplementation: (projectId: string, body: { story_ids: string[]; triggered_by_user_id: string }) =>
+      post<ApiBulkStartImplementationResponse>(`/projects/${projectId}/stories/bulk-start-implementation`, body),
+    // Which stories can start now, and in what order the rest unblock —
+    // derived from stories' own Dependencies text. See
+    // app/services/story_sequencing.py.
+    recommendedOrder: (projectId: string) => get<ApiStoryOrderResponse>(`/projects/${projectId}/stories/recommended-order`),
+    // sync-from-backlog never updates an already-synced story — these two
+    // are the explicit, human-reviewed way a correction made in a
+    // regenerated/re-approved backlog can still reach one.
+    backlogDiff: (storyId: string) => get<ApiStoryBacklogDiff>(`/stories/${storyId}/backlog-diff`),
+    applyBacklogDiff: (storyId: string, body: { triggered_by_user_id: string; fields?: string[] | null }) =>
+      post<ApiStory>(`/stories/${storyId}/apply-backlog-diff`, body),
     // 404s when no lane has been created yet — callers should catch
     // ApiError with status 404.
     getLane: (storyId: string) => get<ApiStoryDeliveryLane>(`/stories/${storyId}/lane`),
@@ -1947,20 +2297,29 @@ export const api = {
       nodeId: string,
       body: { status: string; actor_user_id: string; blocked_reason?: string; assigned_user_id?: string }
     ) => patch<ApiStoryDeliveryNode>(`/delivery-lane-nodes/${nodeId}`, body),
-    draftStoryLld: (nodeId: string, triggeredByUserId: string, clarificationAnswers?: string) =>
+    draftStoryLld: (nodeId: string, triggeredByUserId: string, clarificationAnswers?: string, llm?: LlmOverride) =>
       post<{ needs_clarification: boolean; story_artifact: ApiStoryArtifact | null; node_status: string }>(
         `/delivery-lane-nodes/${nodeId}/draft-story-lld`,
-        { triggered_by_user_id: triggeredByUserId, clarification_answers: clarificationAnswers || undefined }
+        {
+          triggered_by_user_id: triggeredByUserId, clarification_answers: clarificationAnswers || undefined,
+          provider_override: llm?.providerOverride, model_override: llm?.modelOverride,
+        }
       ),
-    draftImplementationPlan: (nodeId: string, triggeredByUserId: string, clarificationAnswers?: string) =>
+    draftImplementationPlan: (nodeId: string, triggeredByUserId: string, clarificationAnswers?: string, llm?: LlmOverride) =>
       post<{ needs_clarification: boolean; story_artifact: ApiStoryArtifact | null; node_status: string }>(
         `/delivery-lane-nodes/${nodeId}/draft-implementation-plan`,
-        { triggered_by_user_id: triggeredByUserId, clarification_answers: clarificationAnswers || undefined }
+        {
+          triggered_by_user_id: triggeredByUserId, clarification_answers: clarificationAnswers || undefined,
+          provider_override: llm?.providerOverride, model_override: llm?.modelOverride,
+        }
       ),
-    draftTestScenarios: (nodeId: string, triggeredByUserId: string, clarificationAnswers?: string) =>
+    draftTestScenarios: (nodeId: string, triggeredByUserId: string, clarificationAnswers?: string, llm?: LlmOverride) =>
       post<{ needs_clarification: boolean; story_artifact: ApiStoryArtifact | null; node_status: string }>(
         `/delivery-lane-nodes/${nodeId}/draft-test-scenarios`,
-        { triggered_by_user_id: triggeredByUserId, clarification_answers: clarificationAnswers || undefined }
+        {
+          triggered_by_user_id: triggeredByUserId, clarification_answers: clarificationAnswers || undefined,
+          provider_override: llm?.providerOverride, model_override: llm?.modelOverride,
+        }
       ),
   },
 

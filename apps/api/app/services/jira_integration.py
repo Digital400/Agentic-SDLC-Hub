@@ -141,6 +141,31 @@ def get_project(
     return JiraProject(key=data["key"], name=data.get("name", data["key"]), id=data["id"])
 
 
+def list_projects(
+    base_url: str, email: str, api_token: str, *, transport: httpx.BaseTransport | None = None, max_projects: int = 200
+) -> list[JiraProject]:
+    """GET /rest/api/3/project/search — every project this account can see,
+    paginated. A read, used only to populate a project picker (see
+    app/api/routes/jira_integration.py's list_connection_projects) so a
+    project's key is chosen from what actually exists rather than typed by
+    hand. Capped at `max_projects` (default 200) for the same reason
+    github_integration.py's list_repositories caps itself."""
+    projects: list[JiraProject] = []
+    start_at = 0
+    page_size = 50
+    while len(projects) < max_projects:
+        data = _request(
+            "GET", f"/rest/api/{_API_VERSION}/project/search", base_url=base_url, email=email, api_token=api_token,
+            params={"startAt": start_at, "maxResults": page_size, "orderBy": "name"}, transport=transport,
+        ).json()
+        values = data.get("values", [])
+        projects.extend(JiraProject(key=item["key"], name=item.get("name", item["key"]), id=item["id"]) for item in values)
+        if data.get("isLast", True) or not values:
+            break
+        start_at += page_size
+    return projects[:max_projects]
+
+
 def create_issue(
     base_url: str,
     email: str,

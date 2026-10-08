@@ -16,7 +16,7 @@ export type AgentRunStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
 /** An artifact's own review lifecycle — distinct from WorkflowStatus, which
  * tracks its owning WorkflowNode's broader lifecycle. */
 export type ArtifactStatus = "DRAFT" | "READY_FOR_REVIEW" | "APPROVED" | "NEEDS_CHANGES" | "REJECTED";
-export type KnowledgeSourceType = "PROJECT_ARTIFACT" | "UPLOADED_DOCUMENT" | "EXTERNAL_LINK";
+export type KnowledgeSourceType = "PROJECT_ARTIFACT" | "UPLOADED_DOCUMENT" | "EXTERNAL_LINK" | "MANUAL_ENTRY";
 /** A knowledge source's ingestion lifecycle — a real upload (see
  * apps/api/app/services/document_ingestion.py) goes straight to INDEXED,
  * since every chunk is embedded before the upload call returns. */

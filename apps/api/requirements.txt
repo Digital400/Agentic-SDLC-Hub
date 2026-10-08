@@ -7,7 +7,9 @@ python-multipart==0.0.32
 # verified the app still boots and serves real data on 2.13.5 (fastapi
 # 0.111's own pydantic v2 support isn't version-pinned tightly).
 pydantic==2.13.5
-pydantic-settings==2.3.4
+# Bumped from 2.3.4 — mcp (claude-agent-sdk's dependency, below) requires
+# pydantic-settings>=2.5.2; verified the app still boots on 2.15.0.
+pydantic-settings==2.15.0
 sqlalchemy==2.0.31
 alembic==1.13.2
 anthropic==1.2.0
@@ -39,5 +41,22 @@ xhtml2pdf==0.2.16
 # app/services/document_ingestion.py) — .txt/.md files are read directly;
 # this covers .pdf uploads. Pure Python, no native deps.
 pypdf==5.1.0
+# Claude Agent SDK — runs the Claude Code harness (real tool use: file
+# read/write/edit, bash) as a library, for app/services/claude_agent_harness.py.
+# Pulls in `mcp` (the Model Context Protocol SDK) as a transitive dependency,
+# which — on its current/default version range — requires starlette>=0.49.1,
+# a hard conflict with fastapi==0.111.0's own starlette<0.38.0,>=0.37.2 pin
+# (the whole app fails to import under starlette>=0.38: FastAPI's own
+# Router.__init__ call breaks — verified directly). mcp==1.23.0 is the
+# OLDEST version claude-agent-sdk's own `mcp<3.0.0,>=1.23.0` range allows,
+# and is the only version in that range whose own requirement is the much
+# looser `starlette>=0.27` — pin mcp here explicitly for that reason; do not
+# let it float. The three lines below are mcp 1.23.0's own pinned
+# requirements, listed explicitly so a resolver never silently pulls a newer
+# mcp (and its starlette>=0.49.1) back in via some other future dependency.
+claude-agent-sdk==0.2.163
+mcp==1.23.0
+starlette==0.37.2
+pyjwt==2.15.1
 # Test-only dependency — apps/api/tests/.
 pytest==8.3.3

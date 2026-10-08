@@ -125,6 +125,25 @@ class Settings(BaseSettings):
     # directly (e.g. via a package.json script resolved on PATH).
     CODE_RUNNER_ALLOWED_TEST_EXECUTABLES: list[str] = ["pytest", "npm", "yarn", "pnpm", "npx", "playwright", "go", "mvn", "gradle"]
 
+    # app/services/claude_agent_harness.py — opt-in: when False (the
+    # default), run_implementation_agent's existing single-shot prompt path
+    # is unchanged. When True, an Implementation Agent run instead drives a
+    # real Claude Agent SDK session (the actual Claude Code harness — file
+    # read/write/edit, bash, multi-turn self-correction) against a real,
+    # throwaway clone of the task's repository. Requires the `claude` CLI
+    # binary on PATH and an authenticated profile/ANTHROPIC_API_KEY
+    # reachable to it — see that module's own docstring for the full
+    # precondition list and its disclosed scope (Implementation Agent only
+    # for now, not every agent in this codebase).
+    CLAUDE_AGENT_SDK_ENABLED: bool = False
+    # Hard caps — this harness runs a real, metered agent loop, not a single
+    # bounded API call, so both exist as defense in depth against a
+    # runaway/looping session. max_budget_usd is the Agent SDK's own
+    # enforced ceiling (the session stops itself); max_turns is a second,
+    # independent backstop.
+    CLAUDE_AGENT_SDK_MAX_TURNS: int = 30
+    CLAUDE_AGENT_SDK_MAX_BUDGET_USD: float = 3.0
+
     class Config:
         # Absolute path, not the bare relative ".env" this used to be —
         # pydantic-settings resolves a relative env_file against the

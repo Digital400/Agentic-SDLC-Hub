@@ -23,6 +23,7 @@ from app.api.routes import (
     projects,
     prompts,
     releases,
+    coding_tools,
     repo_bootstrap,
     repository_file_edit,
     reviews,
@@ -71,6 +72,7 @@ app.include_router(agent_definitions.router)
 app.include_router(knowledge.router)
 app.include_router(integrations.router)
 app.include_router(github_integration.router)
+app.include_router(coding_tools.router)
 app.include_router(repo_bootstrap.router)
 app.include_router(repository_file_edit.router)
 app.include_router(jira_integration.router)

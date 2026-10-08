@@ -40,7 +40,7 @@ from app.models import (
     WorkflowNode,
     WorkflowStatus,
 )
-from app.services.ai_generation import generate
+from app.services.ai_generation import generate, use_model_override, use_provider_override
 from app.services.story_implementation_plan_agent import STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE
 from app.services.story_lld_agent import STORY_LLD_ARTIFACT_TYPE
 
@@ -112,7 +112,8 @@ def get_latest_story_test_scenarios(db: Session, story_id) -> StoryArtifact | No
 
 
 def run_story_test_scenarios_agent(
-    db: Session, *, node: StoryDeliveryNode, triggered_by: User, clarification_answers: str | None = None
+    db: Session, *, node: StoryDeliveryNode, triggered_by: User, clarification_answers: str | None = None,
+    provider_override: str | None = None, model_override: str | None = None,
 ) -> StoryTestScenariosResult:
     """Preconditions:
       1. story delivery lane exists — `node.lane` is always non-null by
@@ -159,7 +160,10 @@ def run_story_test_scenarios_agent(
         allowed_actions=["draft"],
         status=WorkflowStatus.READY,
         context_token_budget=12000,
-        output_token_budget=3072,
+        # 4096, not the original 3072 — modest safety margin for 10
+        # sections across every acceptance criterion; no diagrams required
+        # here, so a smaller bump than story_lld/implementation_plan's.
+        output_token_budget=4096,
         full_content_artifact_types=["story_lld", "story_implementation_plan"],
         order_index=0,
         position_x=0,
@@ -170,24 +174,25 @@ def run_story_test_scenarios_agent(
         node.status = StoryDeliveryNodeStatus.IN_PROGRESS
         node.started_at = node.started_at or datetime.now(timezone.utc)
 
-    result = generate(
-        project=project,
-        node=virtual_node,
-        action=AgentPromptRole.DRAFT,
-        active_prompt=active_prompt,
-        approved_artifact_content={"story_lld": story_lld_content, "story_implementation_plan": implementation_plan_content},
-        approved_artifact_summaries={"story_lld": story_lld_content, "story_implementation_plan": implementation_plan_content},
-        freeform_context={
-            "story_title": story.title,
-            "user_story": story.user_story,
-            "acceptance_criteria": "; ".join(story.acceptance_criteria) or "None stated.",
-            "technical_areas": ", ".join(story.technical_areas) or "Not stated — infer UI/API relevance from the LLD.",
-            **({"clarification_answers": clarification_answers} if clarification_answers else {}),
-        },
-        context_token_budget=virtual_node.context_token_budget,
-        output_token_budget=virtual_node.output_token_budget,
-        full_content_artifact_types={"story_lld", "story_implementation_plan"},
-    )
+    with use_provider_override(provider_override), use_model_override(model_override):
+        result = generate(
+            project=project,
+            node=virtual_node,
+            action=AgentPromptRole.DRAFT,
+            active_prompt=active_prompt,
+            approved_artifact_content={"story_lld": story_lld_content, "story_implementation_plan": implementation_plan_content},
+            approved_artifact_summaries={"story_lld": story_lld_content, "story_implementation_plan": implementation_plan_content},
+            freeform_context={
+                "story_title": story.title,
+                "user_story": story.user_story,
+                "acceptance_criteria": "; ".join(story.acceptance_criteria) or "None stated.",
+                "technical_areas": ", ".join(story.technical_areas) or "Not stated — infer UI/API relevance from the LLD.",
+                **({"clarification_answers": clarification_answers} if clarification_answers else {}),
+            },
+            context_token_budget=virtual_node.context_token_budget,
+            output_token_budget=virtual_node.output_token_budget,
+            full_content_artifact_types={"story_lld", "story_implementation_plan"},
+        )
 
     # BUG FIX: needs_clarification used to return story_artifact=None here
     # — result.content_markdown already contains the model's actual

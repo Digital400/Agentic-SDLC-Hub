@@ -2,14 +2,22 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Loader2, MessageCircleQuestion, PlayCircle, RefreshCw, Sparkles, ListChecks } from "lucide-react";
+import { Loader2, PlayCircle, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, type ApiProviderOverride } from "@/lib/api";
+import { buildQuickPicks, parseQuickPickValue, quickPickValue, useProviderOptions } from "@/lib/use-provider-options";
+import { ModelOverrideInput } from "@/components/model-override-input";
 import { runAgentAndApply } from "@/lib/run-agent";
+import { AskQuestionsAction, RegenerateSectionAction, SummarizeChangesAction } from "@/components/documents/document-assist-actions";
+import { LargeTextInput } from "@/components/documents/large-text-input";
+import { ValidationVerdictCard } from "@/components/documents/validation-verdict-card";
+import { readVerdict, type ValidationVerdict } from "@/lib/validation-verdict";
+import { usePreviousRunInput } from "@/lib/use-previous-run-input";
+import { clearDraft, describeCondensation, exceedsInputLimit, readCondensation } from "@/lib/intake-text";
 
 type AgentAction = "draft" | "improve" | "validate";
 
@@ -25,9 +33,9 @@ export interface AgentRunOutcome {
 }
 
 // Real "Run Agent" flow (see lib/run-agent.ts) — "Improve section" is also
-// real (see app/services/section_improve_agent.py); "Regenerate section",
-// "Ask questions", and "Summarize changes" stay disabled. See
-// docs/mvp-plan.md for what's still ahead there.
+// real (see app/services/section_improve_agent.py), and so are "Regenerate
+// section", "Ask questions" and "Summarize changes" (see
+// document-assist-actions.tsx).
 export function AgentActionsPanel({
   activeSectionTitle,
   projectId,
@@ -38,6 +46,7 @@ export function AgentActionsPanel({
   documentHasRealSections,
   freeformInputKeys,
   triggeredByUserId,
+  versionKey,
   onApplied,
 }: {
   activeSectionTitle: string | null;
@@ -56,13 +65,33 @@ export function AgentActionsPanel({
   documentHasRealSections: boolean;
   freeformInputKeys: string[];
   triggeredByUserId: string | null;
+  /** Changes whenever the document gets a new version, so "Summarize changes" refreshes. */
+  versionKey: string;
   onApplied: (outcome: AgentRunOutcome) => void;
 }) {
   const [action, setAction] = useState<AgentAction>("draft");
+  // Empty string = "project default" (auto-selected provider / Claude Agent
+  // SDK if enabled) — the usual case, so this stays unset unless the user
+  // deliberately picks a specific backend for this one run.
+  const [providerOverride, setProviderOverride] = useState<ApiProviderOverride | "">("");
+  const [modelOverride, setModelOverride] = useState("");
+  const { options: providerOptions } = useProviderOptions(projectId);
   const [freeformValues, setFreeformValues] = useState<Record<string, string>>({});
+  // Pre-fill with what was submitted on the previous run so the box is never
+  // misleadingly empty for a stage that has already been run.
+  const previousInput = usePreviousRunInput(projectId, workflowNodeId, freeformInputKeys);
+  useEffect(() => {
+    if (previousInput.loading) return;
+    setFreeformValues((prev) => {
+      const next = { ...prev };
+      for (const key of freeformInputKeys) if (!next[key]?.trim() && previousInput.values[key]) next[key] = previousInput.values[key];
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only when the loaded values change
+  }, [previousInput.loading, previousInput.values]);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<
-    { kind: "failed"; message: string } | { kind: "completed"; runId: string; retrievedCount: number } | null
+    { kind: "failed"; message: string } | { kind: "completed"; runId: string; retrievedCount: number; condensedNote: string | null; verdict: ValidationVerdict | null } | null
   >(null);
 
   const [improvingSection, setImprovingSection] = useState(false);
@@ -76,11 +105,6 @@ export function AgentActionsPanel({
   // it, "Apply" just resubmitted the exact same instruction the agent had
   // already said wasn't enough, with no way to actually answer it.
   const [sectionClarificationAnswer, setSectionClarificationAnswer] = useState("");
-
-  const documentActions = [
-    { icon: MessageCircleQuestion, label: "Ask questions" },
-    { icon: ListChecks, label: "Summarize changes" },
-  ];
 
   // Switching sections mid-instruction would silently apply to the wrong
   // one — close the panel and clear any stale instruction/result instead.
@@ -156,6 +180,8 @@ export function AgentActionsPanel({
         action,
         triggeredByUserId,
         inputContext: freeformValues,
+        providerOverride: providerOverride || undefined,
+        modelOverride: modelOverride.trim() || undefined,
       });
 
       if (run.status !== "COMPLETED" || saved === null) {
@@ -163,7 +189,15 @@ export function AgentActionsPanel({
         return;
       }
 
-      setResult({ kind: "completed", runId: run.id, retrievedCount: run.retrieved_sources?.length ?? 0 });
+      for (const key of freeformInputKeys) clearDraft(`${projectId}:${workflowNodeId}:${key}`);
+      const condensation = readCondensation(run.token_budget_report);
+      setResult({
+        kind: "completed",
+        runId: run.id,
+        retrievedCount: run.retrieved_sources?.length ?? 0,
+        condensedNote: condensation ? describeCondensation(condensation) : null,
+        verdict: readVerdict(run),
+      });
       onApplied({ artifactStatus: saved.artifactStatus, workflowNodeStatus: saved.workflowNodeStatus });
     } catch (err) {
       setResult({ kind: "failed", message: err instanceof ApiError ? err.message : "Failed to run the agent." });
@@ -192,18 +226,43 @@ export function AgentActionsPanel({
             ))}
           </Select>
 
+          <Select
+            value={providerOverride ? quickPickValue(providerOverride, modelOverride || null) : ""}
+            onChange={(e) => {
+              if (e.target.value === "") {
+                setProviderOverride("");
+                setModelOverride("");
+                return;
+              }
+              const { provider, model } = parseQuickPickValue(e.target.value);
+              setProviderOverride(provider);
+              setModelOverride(model ?? "");
+            }}
+            className="mb-2 text-xs"
+            title="Which LLM/model runs this one call — leave on Default to use the project's configured provider. A known model (e.g. claude-sonnet-5) is its own row; anything else can still be typed in the Model field below."
+          >
+            <option value="">LLM: Default (project-configured)</option>
+            {buildQuickPicks(providerOptions).map((p) => (
+              <option key={p.value} value={p.value} disabled={!p.configured} title={p.unavailable_reason ?? undefined}>
+                LLM: {p.label}
+              </option>
+            ))}
+          </Select>
+
+          <ModelOverrideInput provider={providerOverride} providerOptions={providerOptions} value={modelOverride} onChange={setModelOverride} />
+
           {freeformInputKeys.map((key) => (
-            <Textarea
+            <LargeTextInput
               key={key}
-              placeholder={key.replace(/_/g, " ")}
+              label={key}
+              storageKey={`${projectId}:${workflowNodeId}:${key}`}
               value={freeformValues[key] ?? ""}
-              onChange={(e) => setFreeformValues((prev) => ({ ...prev, [key]: e.target.value }))}
-              rows={2}
-              className="mb-2 text-xs"
+              onChange={(v) => setFreeformValues((prev) => ({ ...prev, [key]: v }))}
+              disabled={running}
             />
           ))}
 
-          <Button size="sm" className="w-full" onClick={handleRun} disabled={running}>
+          <Button size="sm" className="w-full" onClick={handleRun} disabled={running || exceedsInputLimit(freeformValues)}>
             {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlayCircle className="h-3.5 w-3.5" />}
             {running ? "Running…" : "Run Agent"}
           </Button>
@@ -216,6 +275,12 @@ export function AgentActionsPanel({
               <Link href={`/agent-runs/${result.runId}`} className="underline">
                 view run
               </Link>
+            </p>
+          ) : null}
+          {result?.kind === "completed" && result.verdict ? <ValidationVerdictCard verdict={result.verdict} /> : null}
+          {result?.kind === "completed" && result.condensedNote ? (
+            <p className="mt-2 rounded-md border border-amber-400/60 bg-amber-50 p-2 text-xs dark:border-amber-900 dark:bg-amber-950/30">
+              {result.condensedNote}
             </p>
           ) : null}
         </div>
@@ -279,19 +344,22 @@ export function AgentActionsPanel({
           ) : null}
         </div>
 
-        <Button variant="outline" size="sm" className="justify-start" disabled>
-          <RefreshCw className="h-3.5 w-3.5" />
-          Regenerate section
-        </Button>
-        {documentActions.map((action) => (
-          <Button key={action.label} variant="outline" size="sm" className="justify-start" disabled>
-            <action.icon className="h-3.5 w-3.5" />
-            {action.label}
-          </Button>
-        ))}
-        <p className="mt-1 text-xs text-muted-foreground">
-          &ldquo;Regenerate section&rdquo; and Q&amp;A agent actions aren&apos;t available yet — see docs/mvp-plan.md.
-        </p>
+        <RegenerateSectionAction
+          artifactId={artifactId}
+          sectionTitle={activeSectionTitle}
+          enabled={artifactEditable && documentHasRealSections}
+          disabledReason={
+            !artifactEditable
+              ? "Only a DRAFT document can be regenerated."
+              : !documentHasRealSections
+                ? "This document has no named sections — use Run Agent (Draft) above instead."
+                : null
+          }
+          triggeredByUserId={triggeredByUserId}
+          onApplied={onApplied}
+        />
+        <SummarizeChangesAction artifactId={artifactId} refreshKey={versionKey} />
+        <AskQuestionsAction artifactId={artifactId} triggeredByUserId={triggeredByUserId} />
       </CardContent>
     </Card>
   );

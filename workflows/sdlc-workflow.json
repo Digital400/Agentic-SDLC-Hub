@@ -71,7 +71,8 @@
       "position": { "x": 660, "y": 0 },
       "fullContentArtifactTypes": ["solution_options_doc"],
       "ragTopK": 8,
-      "maxRagTokens": 3000
+      "maxRagTokens": 3000,
+      "outputTokenBudget": 8192
     },
     {
       "id": "story_crafting",

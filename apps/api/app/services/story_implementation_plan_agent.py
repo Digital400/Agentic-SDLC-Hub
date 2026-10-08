@@ -40,7 +40,7 @@ from app.models import (
     WorkflowNode,
     WorkflowStatus,
 )
-from app.services.ai_generation import generate
+from app.services.ai_generation import generate, use_model_override, use_provider_override
 from app.services.story_lld_agent import STORY_LLD_ARTIFACT_TYPE
 
 # Add requirement — the new artifact type this module produces.
@@ -99,7 +99,8 @@ def _get_approved_story_lld(db: Session, story: Story) -> StoryArtifact:
 
 
 def run_story_implementation_plan_agent(
-    db: Session, *, node: StoryDeliveryNode, triggered_by: User, clarification_answers: str | None = None
+    db: Session, *, node: StoryDeliveryNode, triggered_by: User, clarification_answers: str | None = None,
+    provider_override: str | None = None, model_override: str | None = None,
 ) -> StoryImplementationPlanResult:
     """Preconditions, checked in order:
       1. story delivery lane exists — `node.lane` is always non-null by
@@ -151,7 +152,11 @@ def run_story_implementation_plan_agent(
         allowed_actions=["draft"],
         status=WorkflowStatus.READY,
         context_token_budget=12000,
-        output_token_budget=3072,
+        # 4096, not the original 3072 — Step-by-Step Coding Plan now also
+        # requires a Mermaid build-order flowchart for a non-trivial plan
+        # (see app/db/seed.py's RICH_DEFAULT_PROMPTS["story_implementation_plan"]),
+        # same reasoning as story_lld_agent.py's own budget bump.
+        output_token_budget=4096,
         full_content_artifact_types=["story_lld"],
         order_index=0,
         position_x=0,
@@ -162,23 +167,24 @@ def run_story_implementation_plan_agent(
         node.status = StoryDeliveryNodeStatus.IN_PROGRESS
         node.started_at = node.started_at or datetime.now(timezone.utc)
 
-    result = generate(
-        project=project,
-        node=virtual_node,
-        action=AgentPromptRole.DRAFT,
-        active_prompt=active_prompt,
-        approved_artifact_content={"story_lld": story_lld_content},
-        approved_artifact_summaries={"story_lld": story_lld_content},
-        freeform_context={
-            "story_title": story.title,
-            "user_story": story.user_story,
-            "acceptance_criteria": "; ".join(story.acceptance_criteria) or "None stated.",
-            **({"clarification_answers": clarification_answers} if clarification_answers else {}),
-        },
-        context_token_budget=virtual_node.context_token_budget,
-        output_token_budget=virtual_node.output_token_budget,
-        full_content_artifact_types={"story_lld"},
-    )
+    with use_provider_override(provider_override), use_model_override(model_override):
+        result = generate(
+            project=project,
+            node=virtual_node,
+            action=AgentPromptRole.DRAFT,
+            active_prompt=active_prompt,
+            approved_artifact_content={"story_lld": story_lld_content},
+            approved_artifact_summaries={"story_lld": story_lld_content},
+            freeform_context={
+                "story_title": story.title,
+                "user_story": story.user_story,
+                "acceptance_criteria": "; ".join(story.acceptance_criteria) or "None stated.",
+                **({"clarification_answers": clarification_answers} if clarification_answers else {}),
+            },
+            context_token_budget=virtual_node.context_token_budget,
+            output_token_budget=virtual_node.output_token_budget,
+            full_content_artifact_types={"story_lld"},
+        )
 
     # BUG FIX: needs_clarification used to return story_artifact=None here
     # — result.content_markdown already contains the model's actual

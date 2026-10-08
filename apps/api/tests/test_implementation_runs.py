@@ -220,6 +220,69 @@ def test_successful_run_persists_expected_output_and_updates_task_status(db, pro
     assert "implementation_run.completed" in actions
 
 
+# --- Claude Agent SDK harness dispatch (opt-in — see app/services/claude_agent_harness.py) --
+
+
+def test_claude_agent_sdk_harness_is_used_when_enabled(db, project, actor, monkeypatch):
+    """When get_settings().CLAUDE_AGENT_SDK_ENABLED is on, start_implementation_run
+    must call run_implementation_agent_via_sdk (the real Claude Code harness
+    against a real workspace) instead of the single-shot prompt path —
+    cloning the repository at the snapshot's own ref."""
+    implementation, task = _chain(db, project, actor)
+    del implementation
+    repository, snapshot = _add_repository(db, project)
+    dev = _developer(db)
+
+    import app.api.routes.implementation_runs as routes_module
+    from app.services.implementation_agent import ImplementationAgentResult, ProposedFileChange
+
+    captured = {}
+
+    def _fake_harness(*, task, repository, base_branch, story, lld_summary, **kwargs):
+        captured["repository_id"] = repository.id
+        captured["base_branch"] = base_branch
+        return ImplementationAgentResult(
+            proposed_file_changes=[ProposedFileChange(path="apps/api/app/api/routes/auth.py", change_type="modify", summary="x", after_content="x")],
+            diff_text="diff", explanation="Implemented via the real harness.", test_command="pytest", risks=[], used_mock=False,
+        )
+
+    monkeypatch.setattr(routes_module, "run_implementation_agent_via_sdk", _fake_harness)
+
+    from app.core.config import Settings
+
+    real_settings = Settings()
+    real_settings.CLAUDE_AGENT_SDK_ENABLED = True
+    monkeypatch.setattr(routes_module, "get_settings", lambda: real_settings)
+
+    run = start_implementation_run(StartImplementationRunRequest(implementation_task_id=task.id, triggered_by_user_id=dev.id), db)
+
+    assert run.explanation == "Implemented via the real harness."
+    assert run.used_mock is False
+    assert captured["repository_id"] == repository.id
+    assert captured["base_branch"] == snapshot.ref
+
+
+def test_claude_agent_sdk_harness_is_not_used_by_default(db, project, actor, monkeypatch):
+    implementation, task = _chain(db, project, actor)
+    del implementation
+    _add_repository(db, project)
+    dev = _developer(db)
+
+    import app.api.routes.implementation_runs as routes_module
+
+    called = {"harness": False}
+
+    def _fake_harness(**kwargs):
+        called["harness"] = True
+        raise AssertionError("should not be called when CLAUDE_AGENT_SDK_ENABLED is False")
+
+    monkeypatch.setattr(routes_module, "run_implementation_agent_via_sdk", _fake_harness)
+
+    start_implementation_run(StartImplementationRunRequest(implementation_task_id=task.id, triggered_by_user_id=dev.id), db)
+
+    assert called["harness"] is False
+
+
 def test_no_github_token_ever_appears_in_the_run_or_its_audit_log(db, project, actor):
     implementation, task = _chain(db, project, actor)
     del implementation

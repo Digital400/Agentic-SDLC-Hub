@@ -398,3 +398,23 @@ def test_update_engineering_setup_enforces_role_permissions(db, project, actor):
     with pytest.raises(HTTPException) as exc_info:
         update_engineering_setup(project.id, UpdateEngineeringSetupRequest(updated_by_id=viewer.id, guardrails=[]), db)
     assert exc_info.value.status_code == 403
+
+
+def test_coding_standard_source_url_is_stored_and_validated(db, project, actor):
+    request = _full_setup_request(created_by_id=actor.id)
+    request.coding_standards = [
+        CodingStandardInput(title="Naming", content="camelCase.", source_url="  https://acme.atlassian.net/wiki/spaces/ENG/pages/1  "),
+        CodingStandardInput(title="Security", content="No secrets.", source_url="https://acme.sharepoint.com/sites/eng/doc.docx"),
+        CodingStandardInput(title="Plain", content="No link.", source_url=""),
+    ]
+    result = create_engineering_setup(project.id, request, db)
+
+    urls = {s.title: s.source_url for s in result.coding_standards}
+    assert urls == {
+        "Naming": "https://acme.atlassian.net/wiki/spaces/ENG/pages/1",
+        "Security": "https://acme.sharepoint.com/sites/eng/doc.docx",
+        "Plain": None,
+    }
+
+    with pytest.raises(ValueError):
+        CodingStandardInput(title="Bad", content="x", source_url="javascript:alert(1)")

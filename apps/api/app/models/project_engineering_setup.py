@@ -143,6 +143,9 @@ class ProjectCodingStandard(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         default=CodingStandardCategory.GENERAL,
         nullable=False,
     )
+    # Optional reference link (Confluence page, SharePoint document, ...).
+    # Recorded and cited to agents only — the page is never fetched.
+    source_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     order_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     setup: Mapped["ProjectEngineeringSetup"] = relationship("ProjectEngineeringSetup", back_populates="coding_standards")

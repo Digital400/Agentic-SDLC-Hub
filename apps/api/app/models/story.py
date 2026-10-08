@@ -87,6 +87,18 @@ class Story(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # integer, but a human estimate is always the field of record; this
     # app never recomputes it once set.
     story_points: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The agent's own "Estimated PR Review Time" field, raw (e.g. "5 / 15 /
+    # 30 (pair recommended for the migration step)") — see
+    # app/services/review_time.py, the one place that parses/validates it.
+    # Kept as free text like story_points_estimate's own raw source; the
+    # worst-case minutes below are derived from it once, at sync time, the
+    # same way story_points is derived from Story Points Estimate.
+    estimated_pr_review_time: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    # Parsed worst-case minutes from the field above — null when it couldn't
+    # be parsed as a number. This is the value the app itself checks against
+    # the 30-minute cap; a human can edit it directly via PATCH /stories/{id}
+    # if they disagree with the agent's own estimate.
+    estimated_review_worst_case_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # The remaining fields below all come straight from the agent's output
     # (see app/services/story_export.py's Story dataclass) — set once at
     # sync time, editable afterward like every other copied backlog field.

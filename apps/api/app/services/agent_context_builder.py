@@ -137,7 +137,8 @@ def _coding_standards_and_guardrails_sections(setup: ProjectEngineeringSetup, sn
         standards_snapshot = []
         for standard in setup.coding_standards:
             summarized = _summarize_if_long(standard.content)
-            grouped.setdefault(standard.category, []).append(f"**{standard.title}:** {summarized}")
+            reference = f" (Source: {standard.source_url})" if standard.source_url else ""
+            grouped.setdefault(standard.category, []).append(f"**{standard.title}:** {summarized}{reference}")
             standards_snapshot.append({
                 "title": standard.title,
                 "category": standard.category.value,

@@ -239,6 +239,20 @@ def create_pull_request_from_code_run(
     existing = db.query(PullRequestLink).filter(PullRequestLink.code_run_id == code_run.id).first()
     if existing is not None:
         raise StoryCodeImplementationError(f"CodeRun {code_run.id} already has a pull request: {existing.pr_url}")
+    if not implementation_run.proposed_file_changes:
+        # Same reasoning as implementation_runs.py's own create_pull_request
+        # guard: GitHub refuses a PR with zero commits between head and
+        # base, which is exactly what an empty-diff run produces even
+        # after CodeRunnerService reports PUSHED (apply_changes is a no-op
+        # when there's nothing to apply — the branch still gets created and
+        # "pushed," just with no real commit on it). A real, expected
+        # outcome (e.g. a FRONTEND task with no frontend work for a
+        # backend-only story) — needs a clear message, not GitHub's opaque
+        # 422.
+        raise StoryCodeImplementationError(
+            f"CodeRun {code_run.id}'s underlying run made no file changes, so there is nothing to open a pull "
+            "request for."
+        )
 
     lane = story.delivery_lane
     plan_artifact = (

@@ -1,9 +1,26 @@
 import uuid
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import SprintStatus, SprintStoryStatus, StoryJiraSyncStatus, StoryStatus, StoryType
+from app.schemas.agent_run import ProviderOverride
+
+# Shared by every Draft*Request below (Story LLD, Implementation Plan, Test
+# Scenarios) — see app/schemas/agent_run.py's own fields on AgentRunCreate
+# for the project-level equivalent. Documented once here rather than
+# repeating the same two docstrings three times.
+_PROVIDER_OVERRIDE_DOC = (
+    "Force this one draft to use a specific LLM backend instead of the project's default "
+    "auto-selected one (see app/services/ai_generation.py's get_active_provider). 'claude_agent_sdk' "
+    "requires the project to have a connected GitHub repository; any other value requires that "
+    "provider's own API key to actually be configured in the backend's environment."
+)
+_MODEL_OVERRIDE_DOC = (
+    "Force this one draft to use a specific model within provider_override's provider (e.g. "
+    "'claude-opus-5'). Ignored unless provider_override is also set."
+)
 
 
 class SyncStoriesFromBacklogRequest(BaseModel):
@@ -49,6 +66,8 @@ class StoryRead(BaseModel):
     definition_of_done: list[str]
     suggested_owner_role: str | None
     story_points: int | None
+    estimated_pr_review_time: str
+    estimated_review_worst_case_minutes: int | None
     business_value: str
     technical_areas: list[str]
     jira_issue_type: str
@@ -108,6 +127,8 @@ class StoryUpdate(BaseModel):
     definition_of_done: list[str] | None = None
     suggested_owner_role: str | None = None
     story_points: int | None = Field(default=None, ge=0, le=100)
+    estimated_pr_review_time: str | None = Field(default=None, max_length=120)
+    estimated_review_worst_case_minutes: int | None = Field(default=None, ge=0, le=1000)
     business_value: str | None = None
     technical_areas: list[str] | None = None
     jira_issue_type: str | None = Field(default=None, max_length=50)
@@ -186,6 +207,8 @@ class DraftStoryLldRequest(BaseModel):
     # the agent isn't just asked the identical question again. Optional;
     # omitted (or blank) on a first attempt.
     clarification_answers: str | None = None
+    provider_override: ProviderOverride | None = Field(default=None, description=_PROVIDER_OVERRIDE_DOC)
+    model_override: str | None = Field(default=None, max_length=200, description=_MODEL_OVERRIDE_DOC)
 
 
 class StoryArtifactRead(BaseModel):
@@ -210,9 +233,109 @@ class DraftStoryLldResponse(BaseModel):
     node_status: str
 
 
+class BulkRunStoryLldRequest(BaseModel):
+    """The Stories list's "Run Story LLD" bulk button — one click across
+    many stories instead of opening each one's own workspace and clicking
+    Draft. For each story: create its delivery lane if missing, auto-
+    complete Story Ready if it's still the only thing blocking STORY_LLD,
+    then draft the Story LLD. See app/api/routes/stories.py's
+    bulk_run_story_lld."""
+
+    story_ids: list[uuid.UUID] = Field(..., min_length=1)
+    triggered_by_user_id: uuid.UUID
+
+
+class BulkRunStoryLldStoryResult(BaseModel):
+    story_id: uuid.UUID
+    story_title: str
+    status: Literal["drafted", "already_drafted", "needs_clarification", "skipped"]
+    lane_created: bool = False
+    # Set for "needs_clarification" (why — the agent's own questions are in
+    # the drafted StoryArtifact itself, not repeated here) and "skipped"
+    # (why this story couldn't even start, e.g. HLD not approved yet).
+    reason: str | None = None
+
+
+class BulkRunStoryLldResponse(BaseModel):
+    results: list[BulkRunStoryLldStoryResult]
+    # The subset of `results` that still needs a human's attention before
+    # this story can move on — every "needs_clarification" and "skipped"
+    # entry, surfaced separately so nothing is missed in the full list.
+    remaining: list[BulkRunStoryLldStoryResult]
+    message: str
+
+
+class BulkApproveLaneNodeRequest(BaseModel):
+    """The Stories list's bulk "Approve & Unlock Next" action — a human
+    with the right role (Tech Lead for LLD_REVIEW, assignee/Tech Lead for
+    IMPLEMENTATION_PLAN, QA/Tech Lead for TEST_SCENARIOS) explicitly
+    approves one review gate across many stories at once, instead of
+    clicking through each story's own workspace. This is still a real,
+    role-checked, audited human approval for every story — it reuses
+    app/api/routes/stories.py's own update_lane_node_status and its
+    existing role/precondition checks unchanged; it only saves the clicks,
+    it never bypasses the gate. See bulk_approve_lane_node."""
+
+    node_key: str = Field(..., description="One of LLD_REVIEW, IMPLEMENTATION_PLAN, TEST_SCENARIOS.")
+    story_ids: list[uuid.UUID] = Field(..., min_length=1)
+    triggered_by_user_id: uuid.UUID
+
+
+class BulkApproveLaneNodeStoryResult(BaseModel):
+    story_id: uuid.UUID
+    story_title: str
+    status: Literal["approved", "already_approved", "skipped"]
+    # Set for "skipped" — not ready yet, missing a precondition
+    # (e.g. no Implementation Plan drafted), or the caller's role isn't
+    # allowed to approve this gate.
+    reason: str | None = None
+
+
+class BulkApproveLaneNodeResponse(BaseModel):
+    results: list[BulkApproveLaneNodeStoryResult]
+    message: str
+
+
+class BulkStartImplementationRequest(BaseModel):
+    """Story-wise bulk code Implementation — for every selected story,
+    starts a real Implementation Agent run for that story's own NEXT
+    runnable task. A story's own tasks still run strictly in order
+    (DATABASE -> BACKEND -> FRONTEND, see start_implementation_run's own
+    sequencing gate) — this never starts more than one task per story per
+    call, and it never creates or merges a pull request; that stays a
+    deliberate, reviewed, per-run action. See
+    app/api/routes/stories.py's bulk_start_implementation."""
+
+    story_ids: list[uuid.UUID] = Field(..., min_length=1)
+    triggered_by_user_id: uuid.UUID
+    provider_override: ProviderOverride | None = Field(default=None, description=_PROVIDER_OVERRIDE_DOC)
+    model_override: str | None = Field(default=None, max_length=200, description=_MODEL_OVERRIDE_DOC)
+
+
+class BulkStartImplementationStoryResult(BaseModel):
+    story_id: uuid.UUID
+    story_title: str
+    status: Literal["started", "awaiting_review", "all_complete", "skipped"]
+    task_area: str | None = None
+    task_title: str | None = None
+    implementation_run_id: uuid.UUID | None = None
+    run_status: str | None = None
+    # Set for "skipped" (a real precondition failed — e.g. Implementation
+    # Plan not accepted yet, no repository connected) and "awaiting_review"
+    # (the next task already has a run a human hasn't reviewed yet).
+    reason: str | None = None
+
+
+class BulkStartImplementationResponse(BaseModel):
+    results: list[BulkStartImplementationStoryResult]
+    message: str
+
+
 class DraftStoryImplementationPlanRequest(BaseModel):
     triggered_by_user_id: uuid.UUID
     clarification_answers: str | None = None
+    provider_override: ProviderOverride | None = Field(default=None, description=_PROVIDER_OVERRIDE_DOC)
+    model_override: str | None = Field(default=None, max_length=200, description=_MODEL_OVERRIDE_DOC)
 
 
 class DraftStoryImplementationPlanResponse(BaseModel):
@@ -224,6 +347,8 @@ class DraftStoryImplementationPlanResponse(BaseModel):
 class DraftStoryTestScenariosRequest(BaseModel):
     triggered_by_user_id: uuid.UUID
     clarification_answers: str | None = None
+    provider_override: ProviderOverride | None = Field(default=None, description=_PROVIDER_OVERRIDE_DOC)
+    model_override: str | None = Field(default=None, max_length=200, description=_MODEL_OVERRIDE_DOC)
 
 
 class DraftStoryTestScenariosResponse(BaseModel):
@@ -333,3 +458,58 @@ class GeneratePlanRequest(BaseModel):
     # Only used by generate-release-plan (release_planning requires human
     # approval); ignored by generate-plan (sprint_planning does not).
     reviewer_id: uuid.UUID | None = None
+
+
+# --- Recommended implementation order (see app/services/story_sequencing.py) ----------------
+
+
+class StoryOrderWave(BaseModel):
+    """Stories with no ordering constraint between them — can be worked in
+    parallel. Waves are returned in recommended order; a story in wave 2
+    depends (directly or transitively) on something in wave 1."""
+
+    stories: list[StoryRead]
+
+
+class StoryOrderResponse(BaseModel):
+    waves: list[StoryOrderWave]
+    # story_id -> the leftover text from its Dependencies field that didn't
+    # match any known story title (a likely typo, or a renamed/deleted
+    # story) — present only when something didn't resolve.
+    unresolved_dependencies: dict[uuid.UUID, str]
+    # Stories whose Dependencies form a cycle and so have no valid order —
+    # reported rather than silently dropped or arbitrarily ordered.
+    circular: list[StoryRead]
+
+
+# --- Re-checking a story against the current approved backlog (see -------------------------
+# app/api/routes/stories.py's get_story_backlog_diff/apply_story_backlog_diff) ---------------
+
+
+class StoryFieldChange(BaseModel):
+    field: str
+    current: str
+    proposed: str
+
+
+class StoryBacklogDiffRead(BaseModel):
+    story_id: uuid.UUID
+    # False when this story's title no longer appears in the current
+    # approved backlog at all (renamed, or removed) — `changes` is then
+    # always empty; there is nothing here to apply.
+    found_in_backlog: bool
+    source_version_number: int
+    changes: list[StoryFieldChange]
+    up_to_date: bool
+    # True when this story already has an active delivery lane — applying
+    # a change (e.g. to Acceptance Criteria) after work has started may
+    # make an already-drafted LLD/Implementation Plan stale. Shown so a
+    # human can decide, never blocked automatically.
+    lane_active: bool
+
+
+class ApplyStoryBacklogDiffRequest(BaseModel):
+    triggered_by_user_id: uuid.UUID
+    # Field names to apply (as named in StoryFieldChange.field) — omit to
+    # apply every changed field.
+    fields: list[str] | None = None

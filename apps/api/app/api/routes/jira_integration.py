@@ -38,6 +38,7 @@ from app.models import (
     User,
 )
 from app.schemas.jira_integration import (
+    JiraProjectSummaryRead,
     BulkPreviewStoriesToJiraRequest,
     BulkStoryJiraPreviewResponse,
     BulkStoryJiraSyncResponse,
@@ -225,6 +226,24 @@ def disconnect_jira(connection_id: uuid.UUID, db: Session = Depends(get_db)) -> 
     db.commit()
     db.refresh(connection)
     return JiraConnectionRead.from_orm_connection(connection, base_url=config.get("base_url", ""), email=config.get("email", ""))
+
+
+@router.get("/connections/{connection_id}/projects", response_model=list[JiraProjectSummaryRead])
+def list_connection_projects(connection_id: uuid.UUID, db: Session = Depends(get_db)) -> list[JiraProjectSummaryRead]:
+    """Every Jira project the connected account can see — backs the
+    project-configuration form's picker, so a project's key is chosen from
+    what actually exists rather than typed by hand (mirrors
+    app/api/routes/github_integration.py's list_connection_repositories)."""
+    connection = _get_connection_or_404(db, connection_id)
+    if connection.status != IntegrationStatus.CONNECTED:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This Jira connection isn't CONNECTED.")
+    config = _config(connection.integration)
+    token = decrypt_jira_token(connection)
+    try:
+        projects = jira_api.list_projects(config.get("base_url", ""), config.get("email", ""), token)
+    except JiraIntegrationError as exc:
+        raise _jira_error_to_http(exc) from exc
+    return [JiraProjectSummaryRead(key=p.key, name=p.name) for p in projects]
 
 
 # 2. Save a project's Jira project configuration ---------------------------------------

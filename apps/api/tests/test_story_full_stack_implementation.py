@@ -125,18 +125,27 @@ def _add_repository(db, project):
     return repository
 
 
-def _story_with_plan(db, project, actor, *, plan_markdown: str):
+def _story_with_plan(db, project, actor, *, plan_markdown: str, title: str = "Add loyalty points"):
     """Walks a fresh story's lane all the way through IMPLEMENTATION_PLAN
     completion — the point _ensure_story_implementation_tasks actually
     runs — with a caller-supplied plan document, so each test controls
-    exactly which areas the plan calls for."""
-    story_crafting_node = make_node(db, project, node_key="story_crafting", order_index=0, output_artifact_type="story_backlog")
-    make_approved_artifact(db, project, story_crafting_node, actor, content="## Story: X\n")
-    hld_node = make_node(db, project, node_key="hld", order_index=1, output_artifact_type="hld_document")
-    make_approved_artifact(db, project, hld_node, actor, content=SAMPLE_HLD)
+    exactly which areas the plan calls for. Reuses the project's own
+    story_crafting/hld nodes across repeat calls (one project, several
+    stories) instead of re-creating them — WorkflowNode has a unique
+    (project_id, node_key, story_id) constraint."""
+    from app.models import WorkflowNode
+
+    story_crafting_node = db.query(WorkflowNode).filter(WorkflowNode.project_id == project.id, WorkflowNode.node_key == "story_crafting").first()
+    if story_crafting_node is None:
+        story_crafting_node = make_node(db, project, node_key="story_crafting", order_index=0, output_artifact_type="story_backlog")
+        make_approved_artifact(db, project, story_crafting_node, actor, content="## Story: X\n")
+    hld_node = db.query(WorkflowNode).filter(WorkflowNode.project_id == project.id, WorkflowNode.node_key == "hld").first()
+    if hld_node is None:
+        hld_node = make_node(db, project, node_key="hld", order_index=1, output_artifact_type="hld_document")
+        make_approved_artifact(db, project, hld_node, actor, content=SAMPLE_HLD)
 
     story = create_story(
-        StoryCreate(project_id=project.id, title="Add loyalty points", mode=StoryType.VERTICAL, user_story="As a user...", created_by_id=actor.id),
+        StoryCreate(project_id=project.id, title=title, mode=StoryType.VERTICAL, user_story="As a user...", created_by_id=actor.id),
         db,
     )
     create_story_lane(story.id, CreateStoryLaneRequest(triggered_by_user_id=actor.id), db)
@@ -332,3 +341,129 @@ def test_get_story_implementation_tasks_returns_the_full_ordered_set(db, project
     story = _story_with_plan(db, project, actor, plan_markdown=FULL_STACK_PLAN)
     tasks = get_story_implementation_tasks(story.id, db)
     assert [t.area for t in tasks] == [ImplementationTaskArea.DATABASE, ImplementationTaskArea.BACKEND, ImplementationTaskArea.FRONTEND]
+
+
+# --- register_pull_request must advance the sequence too (regression) ---------------------
+#
+# A real bug: registering an externally created PR (app/api/routes/
+# implementation_runs.py's register_pull_request) built its own ACCEPTED
+# ImplementationRun directly, bypassing review_implementation_run — the
+# ONLY place that used to flip ImplementationTask.status to COMPLETED.
+# Without that, _current_story_task (and get_story_implementation_task)
+# never advanced past the task that was actually implemented externally;
+# the UI kept showing it as "(current)" forever even though its PR existed.
+
+
+def test_register_pull_request_advances_to_the_next_sibling_task(db, project, actor, monkeypatch):
+    story = _story_with_plan(db, project, actor, plan_markdown=FULL_STACK_PLAN)
+    _add_repository(db, project)
+    database_task, backend_task, frontend_task = _tasks(db, story)
+
+    from app.api.routes.implementation_runs import register_pull_request
+    from app.schemas.implementation_run import RegisterPullRequestRequest
+    from app.services import github_integration as github_api
+    import app.api.routes.implementation_runs as routes_module
+
+    monkeypatch.setattr(routes_module, "decrypt_repository_token", lambda repo: "fake-token")
+    monkeypatch.setattr(
+        routes_module.github_api, "get_pull_request",
+        lambda token, owner, repo, number, **kw: github_api.GitHubPullRequestDetail(
+            number=number, title="Add points balance", body="", html_url=f"https://github.com/octocat/hello-world/pull/{number}",
+            state="open", head_ref="feature/points", base_ref="main",
+        ),
+    )
+    monkeypatch.setattr(
+        routes_module.github_api, "get_pull_request_files",
+        lambda token, owner, repo, number, **kw: [github_api.GitHubPullRequestFile(filename="db/migration.sql", status="added", patch="+CREATE TABLE")],
+    )
+
+    assert get_story_implementation_task(story.id, db).id == database_task.id
+
+    register_pull_request(RegisterPullRequestRequest(implementation_task_id=database_task.id, pr_number=101, triggered_by_user_id=actor.id), db)
+
+    assert database_task.status == ImplementationTaskStatus.COMPLETED
+    assert get_story_implementation_task(story.id, db).id == backend_task.id
+
+
+# --- Story-wise bulk Implementation (Stories list) -------------------------------------------
+
+
+def test_bulk_start_implementation_starts_the_next_runnable_task_for_each_story(db, project, actor):
+    from app.api.routes.stories import bulk_start_implementation
+    from app.schemas.story import BulkStartImplementationRequest
+
+    _add_repository(db, project)
+    story_a = _story_with_plan(db, project, actor, plan_markdown=BACKEND_ONLY_PLAN, title="Story A")
+    story_b = _story_with_plan(db, project, actor, plan_markdown=BACKEND_ONLY_PLAN, title="Story B")
+
+    response = bulk_start_implementation(project.id, BulkStartImplementationRequest(story_ids=[story_a.id, story_b.id], triggered_by_user_id=actor.id), db)
+
+    assert {r.status for r in response.results} == {"started"}
+    assert all(r.task_area == "BACKEND" and r.implementation_run_id is not None for r in response.results)
+
+
+def test_bulk_start_implementation_reports_awaiting_review_for_a_pending_run(db, project, actor):
+    """A task that already has a run awaiting human review must not get a
+    second, competing run started for it."""
+    from app.api.routes.stories import bulk_start_implementation
+    from app.schemas.story import BulkStartImplementationRequest
+
+    _add_repository(db, project)
+    story = _story_with_plan(db, project, actor, plan_markdown=BACKEND_ONLY_PLAN)
+    task = _tasks(db, story)[0]
+    start_implementation_run(StartImplementationRunRequest(implementation_task_id=task.id, triggered_by_user_id=actor.id), db)
+
+    response = bulk_start_implementation(project.id, BulkStartImplementationRequest(story_ids=[story.id], triggered_by_user_id=actor.id), db)
+
+    assert response.results[0].status == "awaiting_review"
+    assert response.results[0].reason is not None
+
+
+def test_bulk_start_implementation_advances_to_the_next_area_once_accepted(db, project, actor):
+    """Once DATABASE is run and Accepted, the next bulk call must move on
+    to BACKEND for that same story — never re-running DATABASE, never
+    skipping ahead past it."""
+    from app.api.routes.stories import bulk_start_implementation
+    from app.schemas.story import BulkStartImplementationRequest
+
+    _add_repository(db, project)
+    story = _story_with_plan(db, project, actor, plan_markdown=FULL_STACK_PLAN)
+    database_task = _tasks(db, story)[0]
+    _run_and_accept(db, database_task, actor)
+
+    response = bulk_start_implementation(project.id, BulkStartImplementationRequest(story_ids=[story.id], triggered_by_user_id=actor.id), db)
+
+    assert response.results[0].status == "started"
+    assert response.results[0].task_area == "BACKEND"
+
+
+def test_bulk_start_implementation_reports_all_complete_once_every_task_is_accepted(db, project, actor):
+    from app.api.routes.stories import bulk_start_implementation
+    from app.schemas.story import BulkStartImplementationRequest
+
+    _add_repository(db, project)
+    story = _story_with_plan(db, project, actor, plan_markdown=BACKEND_ONLY_PLAN)
+    task = _tasks(db, story)[0]
+    _run_and_accept(db, task, actor)
+
+    response = bulk_start_implementation(project.id, BulkStartImplementationRequest(story_ids=[story.id], triggered_by_user_id=actor.id), db)
+
+    assert response.results[0].status == "all_complete"
+
+
+def test_bulk_start_implementation_skips_a_story_with_no_tasks_without_failing_the_batch(db, project, actor):
+    from app.api.routes.stories import bulk_start_implementation, create_story
+    from app.schemas.story import BulkStartImplementationRequest, StoryCreate
+
+    _add_repository(db, project)
+    story_a = _story_with_plan(db, project, actor, plan_markdown=BACKEND_ONLY_PLAN)
+    bare_story = create_story(
+        StoryCreate(project_id=project.id, title="No plan yet", mode=StoryType.VERTICAL, user_story="As a user...", created_by_id=actor.id), db,
+    )
+
+    response = bulk_start_implementation(project.id, BulkStartImplementationRequest(story_ids=[story_a.id, bare_story.id], triggered_by_user_id=actor.id), db)
+
+    by_id = {r.story_id: r for r in response.results}
+    assert by_id[story_a.id].status == "started"
+    assert by_id[bare_story.id].status == "skipped"
+    assert by_id[bare_story.id].reason is not None

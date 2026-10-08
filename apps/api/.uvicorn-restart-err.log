@@ -1,0 +1,78 @@
+INFO:     Will watch for changes in these directories: ['D:\\Projects\\DIgi Projects\\Agentic-SDLC-Hub\\apps\\api']
+INFO:     Uvicorn running on http://127.0.0.1:8050 (Press CTRL+C to quit)
+INFO:     Started reloader process [35376] using WatchFiles
+INFO:     Started server process [35760]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+Agent response header was not valid JSON; treating the whole response as content.
+WARNING:  WatchFiles detected changes in 'app\api\routes\implementation_runs.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [35760]
+INFO:     Started server process [33268]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'tests\test_pull_request_creation.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [33268]
+INFO:     Started server process [28776]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'tests\test_pull_request_creation.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [28776]
+WARNING:  WatchFiles detected changes in 'tests\test_pull_request_creation.py'. Reloading...
+INFO:     Started server process [26876]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [26876]
+INFO:     Started server process [34316]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'app\services\story_code_implementation.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for connections to close. (CTRL+C to force quit)
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [34316]
+INFO:     Started server process [26328]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+WARNING:  WatchFiles detected changes in 'app\services\claude_agent_harness.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [26328]
+WARNING:  WatchFiles detected changes in 'app\services\implementation_agent.py', 'app\services\claude_agent_harness.py', 'app\api\routes\implementation_runs.py'. Reloading...
+INFO:     Started server process [13736]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [13736]
+INFO:     Started server process [38616]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+Coding standard summarization failed (Provider output was truncated at the 200-token output budget before finishing — the response is incomplete, not just short. Increase output_token_budget for this call.); falling back to truncation.
+Coding standard summarization failed (Provider output was truncated at the 200-token output budget before finishing — the response is incomplete, not just short. Increase output_token_budget for this call.); falling back to truncation.
+Coding standard summarization failed (Provider output was truncated at the 200-token output budget before finishing — the response is incomplete, not just short. Increase output_token_budget for this call.); falling back to truncation.
+Coding standard summarization failed (Provider output was truncated at the 200-token output budget before finishing — the response is incomplete, not just short. Increase output_token_budget for this call.); falling back to truncation.
+Coding standard summarization failed (Provider output was truncated at the 200-token output budget before finishing — the response is incomplete, not just short. Increase output_token_budget for this call.); falling back to truncation.
+Coding standard summarization failed (Provider output was truncated at the 200-token output budget before finishing — the response is incomplete, not just short. Increase output_token_budget for this call.); falling back to truncation.
+Coding standard summarization failed (Provider output was truncated at the 200-token output budget before finishing — the response is incomplete, not just short. Increase output_token_budget for this call.); falling back to truncation.
+Coding standard summarization failed (Provider output was truncated at the 200-token output budget before finishing — the response is incomplete, not just short. Increase output_token_budget for this call.); falling back to truncation.
+Coding standard summarization failed (Provider output was truncated at the 200-token output budget before finishing — the response is incomplete, not just short. Increase output_token_budget for this call.); falling back to truncation.
+Coding standard summarization failed (Provider output was truncated at the 200-token output budget before finishing — the response is incomplete, not just short. Increase output_token_budget for this call.); falling back to truncation.
+Coding standard summarization failed (Provider output was truncated at the 200-token output budget before finishing — the response is incomplete, not just short. Increase output_token_budget for this call.); falling back to truncation.
+Coding standard summarization failed (Provider output was truncated at the 200-token output budget before finishing — the response is incomplete, not just short. Increase output_token_budget for this call.); falling back to truncation.

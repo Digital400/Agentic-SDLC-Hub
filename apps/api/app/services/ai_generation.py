@@ -56,11 +56,13 @@ This instruction is provider-agnostic — both `_build_system_prompt` and
 providers.
 """
 
+import contextvars
 import json
 import logging
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 import anthropic
 import httpx
@@ -94,6 +96,13 @@ _MODEL_PRICING_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-sonnet-5": (2.00, 10.00),
     "claude-haiku-4-5": (1.00, 5.00),
 }
+
+# Public re-export of this dict's keys — the curated model-override
+# suggestions GET /agent-runs/providers offers for anthropic/claude_agent_sdk
+# (see app/api/routes/agent_runs.py's list_provider_options). Exposed as its
+# own constant rather than having that route reach into the leading-
+# underscore pricing dict directly.
+KNOWN_CLAUDE_MODELS: tuple[str, ...] = tuple(_MODEL_PRICING_PER_MTOK)
 
 # Ollama's own Python client wraps httpx and accepts no timeout by
 # default — an unresponsive/still-loading local Ollama would otherwise
@@ -130,6 +139,66 @@ _HUGGINGFACE_REQUEST_TIMEOUT_SECONDS = 300.0
 _OPENAI_COMPATIBLE_CONNECTIVITY_TIMEOUT_SECONDS = 5.0
 
 AIProvider = Literal["anthropic", "gemini", "openrouter", "nvidia", "huggingface", "ollama", "mock"]
+
+# A per-run override of which backend to use, set by the caller (see
+# app/api/routes/agent_runs.py's start_agent_run, from
+# AgentRunCreate.provider_override) instead of letting get_active_provider's
+# auto-detection chain / the global CLAUDE_AGENT_SDK_ENABLED flag decide.
+# A contextvar, not a parameter threaded through every generate() caller —
+# generate() is invoked from many places (agent_runs.py directly,
+# loop_engine.py's multiple iterations, revision_agent.py,
+# section_improve_agent.py, story_lld_agent.py, ...) and all of them must
+# honor one run's chosen backend without each needing a new parameter.
+# "claude_agent_sdk" is not a real AIProvider value (it's a separate
+# pre-check in generate(), below) — it's included here so a caller can
+# explicitly request it for one run, same as any other value.
+ProviderOverride = Literal["claude_agent_sdk", "anthropic", "gemini", "openrouter", "nvidia", "huggingface", "ollama"]
+_provider_override_var: contextvars.ContextVar[ProviderOverride | None] = contextvars.ContextVar(
+    "provider_override", default=None
+)
+
+
+@contextmanager
+def use_provider_override(value: ProviderOverride | None) -> Iterator[None]:
+    """Scopes `value` as the backend every generate()/get_active_provider()
+    call underneath sees, for the duration of the `with` block — reset
+    automatically on exit (including on an exception), so one run's choice
+    never leaks into an unrelated later call on the same worker thread."""
+    token = _provider_override_var.set(value)
+    try:
+        yield
+    finally:
+        _provider_override_var.reset(token)
+
+
+# A per-run override of which MODEL to use within the chosen provider — e.g.
+# "claude-opus-5" instead of whatever Settings.AI_MODEL is configured to, or
+# a specific Hugging Face repo id instead of Settings.HUGGINGFACE_MODEL.
+# Independent of provider_override above: a model override only takes
+# effect once a provider (real or claude_agent_sdk) is actually in use, and
+# is simply ignored by a provider it doesn't name (there is no cross-provider
+# model namespace to validate against here — an invalid id still reaches the
+# real API and fails there, exactly as a hand-edited Settings.*_MODEL would).
+_model_override_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("model_override", default=None)
+
+
+@contextmanager
+def use_model_override(value: str | None) -> Iterator[None]:
+    """Scopes `value` the same way use_provider_override does, for the
+    model name every `_generate_with_*` function and the Claude Agent SDK
+    harness reads instead of that provider's configured default."""
+    token = _model_override_var.set(value)
+    try:
+        yield
+    finally:
+        _model_override_var.reset(token)
+
+
+def get_model_override() -> str | None:
+    """The effective per-run model override, if any — read by every
+    `_generate_with_*` function below and by `_generate_with_claude_agent_sdk`
+    (which passes it through to ClaudeAgentOptions.model)."""
+    return _model_override_var.get()
 
 
 class AIGenerationError(Exception):
@@ -204,7 +273,18 @@ def get_active_provider() -> AIProvider:
     5. Hugging Face's Inference Providers router (if HUGGINGFACE_API_KEY is set and reachable)
     6. Ollama (if running locally, no API key needed)
     7. Mock (deterministic fallback)
+
+    A per-run override (see `use_provider_override`) skips this whole
+    chain and goes straight to the requested provider — the caller chose
+    it explicitly for this run, so no reachability re-check or priority
+    fallback applies. ("claude_agent_sdk" isn't a value this function
+    returns; generate() checks for it separately, before ever calling
+    this.)
     """
+    override = _provider_override_var.get()
+    if override is not None and override != "claude_agent_sdk":
+        return override
+
     settings = get_settings()
     if settings.ANTHROPIC_API_KEY:
         return "anthropic"
@@ -482,15 +562,38 @@ def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> fl
     return round((prompt_tokens * input_rate + completion_tokens * output_rate) / 1_000_000, 6)
 
 
+# Extended thinking's tokens count against the SAME `max_tokens` ceiling as
+# the actual visible completion — not a separate budget. A dense,
+# structured drafting task (Story LLD's diagrams/contracts, HLD's C4
+# diagrams/tables, ...) can lead Claude Sonnet 5 to burn a large share of a
+# generous-looking output_token_budget on reasoning before it ever starts
+# writing — confirmed in practice: raising output_token_budget from 3072 to
+# 6144 alone did not stop "Output truncated" on Story LLD.
+#
+# `thinking: {"type": "enabled", "budget_tokens": N}` (an explicit, bounded
+# thinking budget separate from max_tokens) would be the clean fix, but
+# newer models (confirmed: claude-sonnet-5) reject it outright — "enabled"
+# is unsupported; the API's own error message says to use "adaptive" plus
+# `output_config.effort` instead. "low" effort biases the model toward
+# spending less of the shared max_tokens ceiling on thinking, leaving more
+# of output_token_budget for the actual document — this is a bias, not a
+# hard cap like budget_tokens would be, so `truncated` below still matters:
+# a document that's still too large for output_token_budget is reported
+# truncated, not silently cut off.
+_ANTHROPIC_THINKING_EFFORT = "low"
+
+
 def _generate_with_anthropic(system_prompt: str, user_content: str, output_token_budget: int) -> AgentGenerationResult:
     settings = get_settings()
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    model = get_model_override() or settings.AI_MODEL
 
     try:
         response = client.messages.create(
-            model=settings.AI_MODEL,
+            model=model,
             max_tokens=output_token_budget,
             thinking={"type": "adaptive"},
+            output_config={"effort": _ANTHROPIC_THINKING_EFFORT},
             system=system_prompt,
             messages=[{"role": "user", "content": user_content}],
         )
@@ -511,7 +614,7 @@ def _generate_with_anthropic(system_prompt: str, user_content: str, output_token
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
-        cost=_estimate_cost(settings.AI_MODEL, prompt_tokens, completion_tokens),
+        cost=_estimate_cost(model, prompt_tokens, completion_tokens),
         used_mock=False,
         truncated=response.stop_reason == "max_tokens",
     )
@@ -592,7 +695,7 @@ def _generate_with_openrouter(system_prompt: str, user_content: str, output_toke
             f"{settings.OPENROUTER_BASE_URL}/chat/completions",
             headers={"Authorization": f"Bearer {settings.OPENROUTER_API_KEY}", "Accept": "application/json"},
             json={
-                "model": settings.OPENROUTER_MODEL,
+                "model": get_model_override() or settings.OPENROUTER_MODEL,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
@@ -656,7 +759,7 @@ def _generate_with_nvidia(system_prompt: str, user_content: str, output_token_bu
             f"{settings.NVIDIA_BASE_URL}/chat/completions",
             headers={"Authorization": f"Bearer {settings.NVIDIA_API_KEY}", "Accept": "application/json"},
             json={
-                "model": settings.NVIDIA_MODEL,
+                "model": get_model_override() or settings.NVIDIA_MODEL,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
@@ -718,7 +821,7 @@ def _generate_with_huggingface(system_prompt: str, user_content: str, output_tok
             f"{settings.HUGGINGFACE_BASE_URL}/chat/completions",
             headers={"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}", "Accept": "application/json"},
             json={
-                "model": settings.HUGGINGFACE_MODEL,
+                "model": get_model_override() or settings.HUGGINGFACE_MODEL,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
@@ -767,7 +870,7 @@ def _generate_with_gemini(system_prompt: str, user_content: str, output_token_bu
 
     try:
         response = client.models.generate_content(
-            model=settings.GEMINI_MODEL,
+            model=get_model_override() or settings.GEMINI_MODEL,
             contents=user_content,
             config=genai_types.GenerateContentConfig(
                 system_instruction=system_prompt,
@@ -820,7 +923,7 @@ def _generate_with_ollama(system_prompt: str, user_content: str, output_token_bu
     try:
         # Ollama's chat API accepts messages in a similar format to OpenAI
         response = client.chat(
-            model=settings.OLLAMA_MODEL,
+            model=get_model_override() or settings.OLLAMA_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
@@ -934,6 +1037,59 @@ def generate(
         current_draft_content=current_draft_content,
     )
 
+    system_prompt = _build_system_prompt(active_prompt)
+    user_content = budget_result.assembled_text()
+
+    # Claude Agent SDK harness (see app/services/claude_agent_harness.py) —
+    # opt-in, read-only grounding against the project's real connected
+    # repository. Checked BEFORE the mock branch below, deliberately: the
+    # Agent SDK authenticates via the `claude` CLI's own credentials, not
+    # necessarily this app's ANTHROPIC_API_KEY, so a deployment that wants
+    # only the Agent SDK (no separate text-completion key configured) must
+    # not have get_active_provider() == "mock" silently skip it. Only
+    # attempted when a repository actually exists (no benefit otherwise —
+    # nothing to read); a session failure here falls back to the normal
+    # provider chain below (logged, not raised) — this function's existing
+    # resilience contract (an outage never blocks a stage run) applies here
+    # exactly the same way it already does for OpenRouter/NVIDIA/Hugging
+    # Face reachability failures elsewhere in this module.
+    #
+    # A per-run override (see `use_provider_override`) takes priority over
+    # the global CLAUDE_AGENT_SDK_ENABLED flag either way: explicitly
+    # choosing "claude_agent_sdk" for this run uses it even if the flag is
+    # off; explicitly choosing any other provider skips this branch
+    # entirely even if the flag is on, so get_active_provider() below sees
+    # exactly the provider the caller asked for.
+    override = _provider_override_var.get()
+    use_claude_agent_sdk = (override == "claude_agent_sdk") if override is not None else get_settings().CLAUDE_AGENT_SDK_ENABLED
+    if use_claude_agent_sdk:
+        from app.services.claude_agent_harness import ClaudeAgentHarnessError, resolve_project_repository
+
+        repository, base_branch = resolve_project_repository(project)
+        if repository is not None:
+            try:
+                result = _generate_with_claude_agent_sdk(system_prompt, user_content, repository=repository, base_branch=base_branch)
+            except ClaudeAgentHarnessError as exc:
+                logger.warning("Claude Agent SDK document session failed (%s); falling back to the configured provider.", exc)
+                if override == "claude_agent_sdk":
+                    # The caller explicitly asked for this run to use the
+                    # Agent SDK — silently falling back to a different
+                    # backend would mean the LLM they picked never actually
+                    # ran. Raise instead of falling through to the generic
+                    # provider chain below.
+                    raise AIGenerationError(f"Claude Agent SDK session failed: {exc}") from exc
+            else:
+                result.estimated_context_tokens = budget_result.estimated_tokens
+                result.token_budget_report = budget_result.to_report_dict()
+                if result.truncated and not result.needs_clarification:
+                    result.content_markdown = _append_truncation_warning(result.content_markdown, output_token_budget)
+                return result
+        elif override == "claude_agent_sdk":
+            raise AIGenerationError(
+                "Claude Agent SDK was selected for this run, but this project has no connected GitHub "
+                "repository for it to read — connect one first, or pick a different provider for this run."
+            )
+
     if provider == "mock":
         # Local import avoids a hard dependency the other direction (mock
         # generation has no reason to know about real generation).
@@ -960,9 +1116,6 @@ def generate(
             estimated_context_tokens=budget_result.estimated_tokens,
             token_budget_report=budget_result.to_report_dict(),
         )
-
-    system_prompt = _build_system_prompt(active_prompt)
-    user_content = budget_result.assembled_text()
 
     if provider == "gemini":
         result = _generate_with_gemini(system_prompt, user_content, output_token_budget)
@@ -997,6 +1150,38 @@ def _append_truncation_warning(content_markdown: str, output_token_budget: int) 
         f"({output_token_budget} tokens) before the agent finished — content after this point is "
         "missing, not just short. Increase this stage's `outputTokenBudget` in the workflow template "
         "(see app/services/workflow_templates.py) or narrow the requested scope, then regenerate."
+    )
+
+
+def _generate_with_claude_agent_sdk(system_prompt: str, user_content: str, *, repository, base_branch: str) -> AgentGenerationResult:
+    """Dispatched from generate() only — see its own comment for when and
+    why. Delegates the actual session mechanics to
+    app/services/claude_agent_harness.py's run_document_session (read-only:
+    Read/Glob/Grep against a real clone of `repository`@`base_branch`, no
+    Write/Edit/Bash), then interprets the result under this module's own
+    two-part clarification contract exactly the way _generate_with_anthropic
+    does — same _parse_response/format_clarification_output calls, so a
+    document drafted this way is indistinguishable downstream from one
+    drafted by any other provider."""
+    from app.services.claude_agent_harness import run_document_session
+
+    session_result = run_document_session(
+        system_prompt=system_prompt, user_content=user_content, repository=repository, base_branch=base_branch,
+        model=get_model_override(),
+    )
+    needs_clarification, questions, body = _parse_response(session_result.text)
+    content_markdown = format_clarification_output(questions) if needs_clarification else body
+
+    return AgentGenerationResult(
+        content_markdown=content_markdown,
+        needs_clarification=needs_clarification,
+        clarification_questions=questions,
+        prompt_tokens=session_result.prompt_tokens,
+        completion_tokens=session_result.completion_tokens,
+        total_tokens=session_result.prompt_tokens + session_result.completion_tokens,
+        cost=session_result.cost,
+        used_mock=False,
+        truncated=session_result.truncated,
     )
 
 

@@ -11,7 +11,7 @@
  * clicking "Run Agent" expects one outcome, not a two-step wizard.
  */
 
-import { api, type ApiAgentRun } from "@/lib/api";
+import { api, type ApiAgentRun, type ApiProviderOverride } from "@/lib/api";
 
 export interface RunAgentParams {
   projectId: string;
@@ -19,6 +19,10 @@ export interface RunAgentParams {
   action: "draft" | "improve" | "validate";
   triggeredByUserId: string;
   inputContext?: Record<string, unknown>;
+  /** Force this one run to use a specific LLM backend — see ApiProviderOverride. Omit for the project default. */
+  providerOverride?: ApiProviderOverride;
+  /** Force a specific model within providerOverride's provider (e.g. "claude-opus-5"). Ignored unless providerOverride is also set. */
+  modelOverride?: string;
 }
 
 export interface RunAgentResult {
@@ -39,12 +43,33 @@ export async function runAgentAndApply(params: RunAgentParams): Promise<RunAgent
     action: params.action,
     triggered_by_user_id: params.triggeredByUserId,
     input_context: params.inputContext ?? {},
+    provider_override: params.providerOverride,
+    model_override: params.providerOverride ? params.modelOverride || undefined : undefined,
   });
 
   if (run.status !== "COMPLETED") {
     // A blocked/failed run is a real, expected outcome (e.g. a required
     // upstream artifact isn't approved yet) — see run.error_message.
     return { run, saved: null };
+  }
+
+  if (params.action === "validate") {
+    // Validation judges the current draft; it produces no new content to save.
+    // The server has already moved the artifact/node as appropriate.
+    const artifactId = run.output_artifact_id;
+    if (artifactId === null) return { run, saved: null };
+    const artifact = await api.artifacts.get(artifactId);
+    const nodeStatus =
+      artifact.status === "READY_FOR_REVIEW" ? "WAITING_FOR_REVIEW" : artifact.status === "APPROVED" ? "COMPLETED" : "READY";
+    return {
+      run,
+      saved: {
+        artifactId,
+        artifactVersionId: artifact.current_version_id ?? "",
+        artifactStatus: artifact.status,
+        workflowNodeStatus: nodeStatus,
+      },
+    };
   }
 
   const result = await api.agentRuns.saveToArtifact(run.id);

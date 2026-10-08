@@ -300,11 +300,23 @@ def _run_real_agent(
         f"# Test Scenarios\n{test_scenarios_summary or '(not available)'}\n\n"
         # Full-stack-per-story sequencing (see app/api/routes/stories.py's
         # _ensure_story_implementation_tasks): this story may have earlier
-        # tasks (DATABASE before BACKEND before FRONTEND) whose code is
-        # ALREADY committed to this same feature branch — build on it
-        # (use the real column/endpoint/etc. it added), never redeclare or
-        # recreate it.
-        f"# Already-accepted earlier tasks for this same story\n{prior_story_task_context or '(none — this is the first/only task for this story)'}\n\n"
+        # tasks (DATABASE before BACKEND before FRONTEND) whose changes a
+        # human has reviewed and accepted — BUG FIX: this used to claim
+        # that work was "ALREADY committed to this same feature branch,"
+        # which is false (this path has no repository access at all —
+        # see module docstring's HARD RULE — and even the SDK path's own
+        # equivalent context is only ever a proposed, not-yet-pushed diff
+        # unless a human separately clicked "Create Pull Request"). Taking
+        # that claim at face value caused a real bug: a later task skipped
+        # its own acceptance criteria's file, like a prior one had already
+        # written it, when nothing had actually been committed anywhere.
+        f"# Earlier sibling tasks for this same story — human-ACCEPTED proposals, NOT confirmed committed "
+        "anywhere\n"
+        "You have no repository access to verify these, and a human accepting a proposal does not mean it was "
+        "ever pushed or merged. Use this only as background on what those tasks intended; it is never a reason "
+        "to omit a file THIS task's own acceptance criteria require — propose every file this task needs in "
+        "full, regardless of what an earlier summary claims.\n\n"
+        f"{prior_story_task_context or '(none — this is the first/only task for this story)'}\n\n"
         f"# Related story\n{story_text}\n\n"
         f"# Jira issue key\n{jira_issue_key or '(not synced to Jira yet)'}\n\n"
         f"# Coding standards (retrieved from the Knowledge Base)\n{standards_text}\n\n"
