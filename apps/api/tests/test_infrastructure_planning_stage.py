@@ -1,11 +1,18 @@
 """Tests for the Infrastructure Planning stage:
-  - the workflow template's node config (requirement 2's HLD+LLD gate,
-    requirement 4's 10 output sections, requirement 1's artifact type),
+  - the workflow template's node config (requirement 2's HLD+Story Backlog
+    gate, requirement 4's 10 output sections, requirement 1's artifact
+    type),
   - the graph engine's fan-in unlock against the real template edges
-    (only READY once *both* HLD and LLD are approved),
+    (only READY once *both* HLD and the Story Backlog are approved),
   - the DevOps-only approval gate (rule: DevOps approval is required),
   - agent_runs.py's optional-context merge (requirement 3's "implementation
     summary" — best-effort, never blocking).
+
+v0.3.0 note: Low-Level Design is no longer a project-level stage (each
+story drafts its own LLD in its own delivery lane — see
+workflows/sdlc-workflow.json's own top-level description), so
+Infrastructure Planning's second fan-in input is the approved Story
+Backlog, not a project-level LLD document.
 """
 
 import pytest
@@ -36,14 +43,14 @@ _REQUIRED_SECTIONS = [
 # --- Workflow template: node config ------------------------------------------------------
 
 
-def test_infrastructure_planning_node_requires_hld_and_lld_only():
+def test_infrastructure_planning_node_requires_hld_and_story_backlog_only():
     template = load_workflow_template("sdlc-workflow.json")
     node = next(n for n in template["nodes"] if n["id"] == "infrastructure_planning")
 
-    assert set(node["requiredInputs"]) == {"hld_document", "lld_document"}
+    assert set(node["requiredInputs"]) == {"hld_document", "story_backlog"}
     assert node["outputArtifactType"] == "infrastructure_plan_document"
     assert node["requiresHumanApproval"] is True
-    assert set(node.get("fullContentArtifactTypes", [])) == {"hld_document", "lld_document"}
+    assert set(node.get("fullContentArtifactTypes", [])) == {"hld_document", "story_backlog"}
 
 
 def test_infrastructure_planning_node_does_not_collide_with_the_existing_placeholder():
@@ -52,13 +59,26 @@ def test_infrastructure_planning_node_does_not_collide_with_the_existing_placeho
 
     assert placeholder["outputArtifactType"] == "infrastructure_plan"  # untouched
     assert placeholder["outputArtifactType"] != "infrastructure_plan_document"
+    # v0.3.0 — Infrastructure Provisioning now waits on the approved
+    # Infrastructure Plan directly, since Testing is no longer a
+    # project-level stage in between them.
+    assert placeholder["requiredInputs"] == ["infrastructure_plan_document"]
 
 
-def test_infrastructure_planning_has_fan_in_edges_from_hld_and_lld():
+def test_infrastructure_planning_has_fan_in_edges_from_hld_and_story_crafting():
     template = load_workflow_template("sdlc-workflow.json")
     sources = {e["source"] for e in template["edges"] if e["target"] == "infrastructure_planning"}
 
-    assert sources == {"hld", "lld"}
+    assert sources == {"hld", "story_crafting"}
+
+
+def test_low_level_design_implementation_pr_review_and_testing_are_not_project_level_nodes():
+    """v0.3.0 — these five stages are now purely per-story (see the
+    Stories tab / StoryDeliveryLane), not duplicated at the project level."""
+    template = load_workflow_template("sdlc-workflow.json")
+    node_ids = {n["id"] for n in template["nodes"]}
+
+    assert node_ids.isdisjoint({"lld", "implementation_planning", "implementation", "pr_review", "testing"})
 
 
 def test_infrastructure_planning_prompt_lists_all_10_sections_in_order():
@@ -80,22 +100,24 @@ def test_infrastructure_planning_prompt_forbids_auto_deploy_and_requires_devops_
 # --- Fan-in unlock against the real template edges -----------------------------------------
 
 
-def _seeded_hld_lld_and_target(db, project):
+def _seeded_hld_story_crafting_and_target(db, project):
     hld = make_node(db, project, node_key="hld", order_index=0, output_artifact_type="hld_document", status=WorkflowStatus.APPROVED)
-    lld = make_node(db, project, node_key="lld", order_index=1, output_artifact_type="lld_document", status=WorkflowStatus.APPROVED)
+    story_crafting = make_node(
+        db, project, node_key="story_crafting", order_index=1, output_artifact_type="story_backlog", status=WorkflowStatus.APPROVED
+    )
     infra = make_node(
         db, project, node_key="infrastructure_planning", order_index=2,
-        required_inputs=["hld_document", "lld_document"], output_artifact_type="infrastructure_plan_document",
+        required_inputs=["hld_document", "story_backlog"], output_artifact_type="infrastructure_plan_document",
         status=WorkflowStatus.LOCKED,
     )
     make_edge(db, project, hld, infra)
-    make_edge(db, project, lld, infra)
-    return hld, lld, infra
+    make_edge(db, project, story_crafting, infra)
+    return hld, story_crafting, infra
 
 
-def test_infrastructure_planning_stays_locked_until_both_hld_and_lld_are_approved(db, project, actor):
-    hld, lld, infra = _seeded_hld_lld_and_target(db, project)
-    lld.status = WorkflowStatus.READY  # LLD not yet approved
+def test_infrastructure_planning_stays_locked_until_both_hld_and_story_backlog_are_approved(db, project, actor):
+    hld, story_crafting, infra = _seeded_hld_story_crafting_and_target(db, project)
+    story_crafting.status = WorkflowStatus.READY  # Story Crafting not yet approved
     db.flush()
 
     engine = GraphEngineService(db)
@@ -105,18 +127,18 @@ def test_infrastructure_planning_stays_locked_until_both_hld_and_lld_are_approve
     assert infra.status == WorkflowStatus.LOCKED
 
 
-def test_infrastructure_planning_unlocks_once_both_hld_and_lld_are_approved(db, project, actor):
-    hld, lld, infra = _seeded_hld_lld_and_target(db, project)
-    lld.status = WorkflowStatus.READY  # LLD not yet approved when HLD reports in
+def test_infrastructure_planning_unlocks_once_both_hld_and_story_backlog_are_approved(db, project, actor):
+    hld, story_crafting, infra = _seeded_hld_story_crafting_and_target(db, project)
+    story_crafting.status = WorkflowStatus.READY  # not yet approved when HLD reports in
     db.flush()
 
     engine = GraphEngineService(db)
     engine.unlock_next_nodes(hld)  # HLD reports in first — not enough alone
     assert infra.status == WorkflowStatus.LOCKED
 
-    lld.status = WorkflowStatus.APPROVED  # LLD is now approved too
+    story_crafting.status = WorkflowStatus.APPROVED  # Story Crafting is now approved too
     db.flush()
-    unlocked = engine.unlock_next_nodes(lld)  # LLD reports in — both satisfied now
+    unlocked = engine.unlock_next_nodes(story_crafting)  # Story Crafting reports in — both satisfied now
 
     assert unlocked == [infra]
     assert infra.status == WorkflowStatus.READY
@@ -161,6 +183,11 @@ def test_developer_may_not_edit_infrastructure_planning(db):
 
 
 # --- _merge_optional_context: best-effort, non-blocking implementation summary -------------
+# Still a generic, node_key-keyed mechanism — these tests build their own
+# synthetic project-level "implementation_planning" node directly (not
+# from the template, which no longer has one), so they exercise the
+# mechanism itself independent of whether any real project ever produces
+# that artifact type today.
 
 
 def test_merge_optional_context_folds_in_an_approved_implementation_plan(db, project, actor):

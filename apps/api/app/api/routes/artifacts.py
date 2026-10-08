@@ -21,9 +21,13 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models import Artifact, ArtifactStatus, ArtifactVersion, Project, User, WorkflowNode
+from app.models import Artifact, ArtifactStatus, ArtifactVersion, Project, User, WorkflowNode, WorkflowStatus
 from app.schemas.agent_run import AgentRunRead
 from app.schemas.artifact import (
+    AskQuestionRequest,
+    AskQuestionResponse,
+    ChangeSummaryRead,
+    SectionChangeRead,
     ArtifactContentUpdate,
     ArtifactCreate,
     ArtifactRead,
@@ -34,10 +38,11 @@ from app.schemas.artifact import (
     ImproveSectionResponse,
 )
 from app.services.artifact_summary import apply_summaries_to_version
+from app.services.artifact_assist import ArtifactAssistError, answer_question, summarize_changes
 from app.services.audit import record_audit_log
 from app.services.document_export import DocumentExportError, render_html_document, render_pdf_document
 from app.services.github_export import build_github_pr_preview
-from app.services.graph_engine import GraphEngineService
+from app.services.graph_engine import RUNNABLE_STATUSES, GraphEngineService
 from app.services.permissions import require_can_edit_stage
 from app.services.section_improve_agent import SectionImproveAgentError, run_section_improve_agent
 from app.services.story_export import STORY_BACKLOG_ARTIFACT_TYPE, parse_story_backlog, render_csv, render_json, render_markdown
@@ -135,6 +140,18 @@ def create_artifact_version(
     to this new, unreviewed content, so the artifact's status resets to
     DRAFT — even if it was previously APPROVED. Use `PATCH /artifacts/{id}`
     instead if you just want to keep editing the current draft in place.
+
+    BUG FIX: this used to reset only the artifact's own status, never the
+    owning WorkflowNode's — so a node that had already reached APPROVED
+    (or COMPLETED/BLOCKED/RUNNING/WAITING_FOR_REVIEW) stayed stuck there
+    forever after, and "Run Agent" kept refusing with "node status is
+    APPROVED; must be one of: FAILED, NEEDS_CHANGES, READY,
+    WAITING_FOR_INPUT" — the only way out used to be
+    POST /reviews/{id}/request-changes, which itself refuses once that
+    review was already decided (a closed door once approved). Mirrors
+    exactly what request_changes already does to the node for a PENDING
+    review — same target status, same reasoning — just reachable from
+    this already-approved case too.
     """
     artifact = _get_artifact_or_404(db, artifact_id)
     creator = _get_user_or_400(db, payload.created_by_id, "created_by_id")
@@ -177,6 +194,20 @@ def create_artifact_version(
             "artifact_status": {"from": previous_status.value, "to": ArtifactStatus.DRAFT.value},
         },
     )
+
+    node = artifact.workflow_node
+    if node is not None and node.status not in RUNNABLE_STATUSES:
+        previous_node_status = node.status
+        GraphEngineService(db).mark_needs_changes(node)
+        record_audit_log(
+            db,
+            project_id=artifact.project_id,
+            actor_user_id=creator.id,
+            action="workflow_node.status_changed",
+            entity_type="WorkflowNode",
+            entity_id=node.id,
+            extra_data={"node_key": node.node_key, "from": previous_node_status.value, "to": WorkflowStatus.NEEDS_CHANGES.value, "reason": "new manual artifact version"},
+        )
 
     db.commit()
     db.refresh(version)
@@ -267,6 +298,7 @@ def improve_artifact_section(
     try:
         result = run_section_improve_agent(
             db, artifact=artifact, section_title=payload.section_title, instruction=payload.instruction, triggered_by=triggered_by,
+            mode=payload.mode,
         )
     except SectionImproveAgentError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
@@ -283,6 +315,46 @@ def improve_artifact_section(
         workflow_node_status=artifact.workflow_node.status.value,
         section_updated=result.section_updated,
     )
+
+
+# 6b. Summarize changes / ask questions (read-only) ----------------------------------
+
+
+@router.get("/{artifact_id}/changes", response_model=ChangeSummaryRead)
+def get_artifact_changes(
+    artifact_id: uuid.UUID, from_version: int | None = Query(default=None), to_version: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> ChangeSummaryRead:
+    """What changed between two versions (default: the previous version vs the
+    current one), section by section. Deterministic — no model call."""
+    artifact = _get_artifact_or_404(db, artifact_id)
+    try:
+        summary = summarize_changes(artifact, from_version_number=from_version, to_version_number=to_version)
+    except ArtifactAssistError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    return ChangeSummaryRead(
+        from_version=summary.from_version, to_version=summary.to_version, headline=summary.headline,
+        is_first_version=summary.is_first_version, change_note=summary.change_note,
+        changes=[SectionChangeRead(**vars(c)) for c in summary.changes],
+    )
+
+
+@router.post("/{artifact_id}/ask", response_model=AskQuestionResponse)
+def ask_about_artifact(artifact_id: uuid.UUID, payload: AskQuestionRequest, db: Session = Depends(get_db)) -> AskQuestionResponse:
+    """Answer a question about this document from its own text (and the
+    user's original request). Never modifies the document."""
+    artifact = _get_artifact_or_404(db, artifact_id)
+    user = _get_user_or_400(db, payload.triggered_by_user_id, "triggered_by_user_id")
+    try:
+        result = answer_question(db, artifact=artifact, question=payload.question)
+    except ArtifactAssistError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    record_audit_log(
+        db, project_id=artifact.project_id, actor_user_id=user.id, action="artifact.question_asked",
+        entity_type="Artifact", entity_id=artifact.id, extra_data={"question_length": len(payload.question), "used_mock": result.used_mock},
+    )
+    db.commit()
+    return AskQuestionResponse(answer=result.answer, sources=result.sources, used_mock=result.used_mock, truncated=result.truncated)
 
 
 # 7. Mark artifact as ready for review ----------------------------------------------

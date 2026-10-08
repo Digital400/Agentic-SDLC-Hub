@@ -37,7 +37,9 @@ class PRReviewRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "pr_review_runs"
 
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
-    workflow_node_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workflow_nodes.id", ondelete="CASCADE"), nullable=False)
+    # Null for a story-scoped run — see PullRequestLink.workflow_node_id's
+    # own docstring for the same reasoning.
+    workflow_node_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("workflow_nodes.id", ondelete="CASCADE"), nullable=True)
     implementation_task_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("implementation_tasks.id", ondelete="CASCADE"), nullable=False
     )
@@ -70,6 +72,10 @@ class PRReviewRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     major_findings: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
     minor_findings: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
     missing_tests: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # Review check 4 ("are there unrelated file changes?") — a distinct
+    # output, not folded into findings, so a REQUEST_CHANGES send-back or
+    # the UI can act on it directly. See pr_review_agent.py.
+    unrelated_changes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     # The agent's proposal — {"file","body"}. Requirement "comments must be
     # editable before posting" is a frontend concern: the UI holds edit
     # state and sends final text to /post-comments, this column is never
@@ -90,7 +96,7 @@ class PRReviewRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     project: Mapped["Project"] = relationship("Project")
-    workflow_node: Mapped["WorkflowNode"] = relationship("WorkflowNode")
+    workflow_node: Mapped["WorkflowNode | None"] = relationship("WorkflowNode")
     implementation_task: Mapped["ImplementationTask"] = relationship("ImplementationTask")
     implementation_run: Mapped["ImplementationRun"] = relationship("ImplementationRun")
     pull_request_link: Mapped["PullRequestLink"] = relationship("PullRequestLink")

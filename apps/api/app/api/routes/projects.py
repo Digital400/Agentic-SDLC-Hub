@@ -27,6 +27,7 @@ from app.models import (
     ProjectMember,
     ProjectRole,
     ProjectStatus,
+    PullRequestLink,
     Repository,
     RepositorySnapshot,
     PRReviewRun,
@@ -37,6 +38,7 @@ from app.models import (
     WorkflowEdge,
     WorkflowNode,
     WorkflowStatus,
+    WorkType,
 )
 from app.schemas.agent_run import AgentRunRead
 from app.schemas.artifact import ArtifactRead
@@ -95,8 +97,19 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
     if creator is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"created_by_id {payload.created_by_id} does not match an existing user")
 
+    # work_type picks the template only when the caller didn't already
+    # name one explicitly (workflow_template_file) — e.g. the Scrum Story
+    # Lanes template is opt-in and only ever reachable that way, unrelated
+    # to work_type. NEW_PROJECT keeps today's default (sdlc-workflow.json,
+    # via load_workflow_template(None)); the other three work types all
+    # use the existing-project feature template — see WorkType's own
+    # docstring for why they share one.
+    template_file = payload.workflow_template_file
+    if template_file is None and payload.work_type != WorkType.NEW_PROJECT:
+        template_file = "existing-project-feature-workflow.json"
+
     try:
-        template = load_workflow_template(payload.workflow_template_file)
+        template = load_workflow_template(template_file)
     except WorkflowTemplateError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
@@ -104,6 +117,7 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> Pro
         name=payload.name,
         description=payload.description,
         business_owner=payload.business_owner,
+        work_type=payload.work_type,
         workflow_template_id=template["id"],
         workflow_template_version=template["version"],
         current_stage=template["startNode"],
@@ -322,11 +336,32 @@ def list_project_implementation_tasks(project_id: uuid.UUID, db: Session = Depen
 
 @router.get("/{project_id}/github-repository", response_model=RepositoryRead | None)
 def get_project_github_repository(project_id: uuid.UUID, db: Session = Depends(get_db)) -> Repository | None:
-    """See app/api/routes/github_integration.py for the read-only GitHub
-    actions (branches, tree, file, snapshots) against the repository this
-    returns."""
+    """The project's PRIMARY repository (see Repository.is_primary) — for
+    a project with multiple connected repositories, use
+    GET /{project_id}/github-repositories instead to see all of them. See
+    app/api/routes/github_integration.py for the read-only GitHub actions
+    (branches, tree, file, snapshots) against the repository this returns."""
     _get_project_or_404(db, project_id)
-    return db.query(Repository).filter(Repository.project_id == project_id).order_by(Repository.created_at.desc()).first()
+    return (
+        db.query(Repository)
+        .filter(Repository.project_id == project_id)
+        .order_by(Repository.is_primary.desc(), Repository.created_at.desc())
+        .first()
+    )
+
+
+@router.get("/{project_id}/github-repositories", response_model=list[RepositoryRead])
+def list_project_github_repositories(project_id: uuid.UUID, db: Session = Depends(get_db)) -> list[Repository]:
+    """Every repository connected to this project — multi-repo support
+    (a project may have a separate frontend/backend/infra repo, etc.),
+    primary first."""
+    _get_project_or_404(db, project_id)
+    return (
+        db.query(Repository)
+        .filter(Repository.project_id == project_id)
+        .order_by(Repository.is_primary.desc(), Repository.created_at.desc())
+        .all()
+    )
 
 
 # 5a. Get a project's configured Jira project, if any --------------------------------
@@ -621,17 +656,33 @@ def list_task_pr_review_runs(project_id: uuid.UUID, task_id: uuid.UUID, db: Sess
 
 
 @router.get("/{project_id}/implementation-tasks/{task_id}/implementation-runs", response_model=list[ImplementationRunRead])
-def list_task_implementation_runs(project_id: uuid.UUID, task_id: uuid.UUID, db: Session = Depends(get_db)) -> list[ImplementationRun]:
+def list_task_implementation_runs(project_id: uuid.UUID, task_id: uuid.UUID, db: Session = Depends(get_db)) -> list[ImplementationRunRead]:
+    """A real, confirmed bug this fixes: ImplementationRun has no
+    `pull_request` relationship at all, so returning raw ORM rows here
+    (as this used to) always serialized pull_request=None regardless of
+    whether one actually exists — every consumer of this list (the story
+    lane's Implementation/PR Review/Testing tabs, all keyed off
+    `latestRun.pull_request`) would show "create a pull request first"
+    forever, even immediately after a real one was created, on the very
+    next refresh. GET /implementation-runs/{id} (get_implementation_run)
+    already attached it correctly via ImplementationRunRead.from_orm_run
+    — this route just needed the same treatment, batched here (one query
+    for every run's PR link, not N) rather than one at a time."""
     _get_project_or_404(db, project_id)
     task = db.get(ImplementationTask, task_id)
     if task is None or task.project_id != project_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Implementation task {task_id} not found in project {project_id}")
-    return (
+    runs = (
         db.query(ImplementationRun)
         .filter(ImplementationRun.implementation_task_id == task_id)
         .order_by(ImplementationRun.created_at.desc())
         .all()
     )
+    links_by_run_id = {
+        link.implementation_run_id: link
+        for link in db.query(PullRequestLink).filter(PullRequestLink.implementation_run_id.in_([r.id for r in runs])).all()
+    } if runs else {}
+    return [ImplementationRunRead.from_orm_run(run, pull_request=links_by_run_id.get(run.id)) for run in runs]
 
 
 # 7. Update workflow node status ---------------------------------------------------

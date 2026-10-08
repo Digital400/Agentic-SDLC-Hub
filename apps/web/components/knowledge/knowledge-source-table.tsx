@@ -15,6 +15,7 @@ const SOURCE_TYPE_LABEL: Record<KnowledgeSourceItem["sourceType"], string> = {
   PROJECT_ARTIFACT: "Project artifact",
   UPLOADED_DOCUMENT: "Uploaded document",
   EXTERNAL_LINK: "External link",
+  MANUAL_ENTRY: "Manual entry",
 };
 
 export function KnowledgeSourceTable({ sources }: { sources: KnowledgeSourceItem[] }) {

@@ -52,6 +52,16 @@ class IntegrationConnectionRead(BaseModel):
         )
 
 
+class CreateRemoteRepositoryRequest(BaseModel):
+    """Body for creating a brand-new (empty) repository on GitHub — backs
+    the project wizard's "Create a new repository" option."""
+
+    name: str = Field(..., min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._-]+$")
+    description: str | None = Field(default=None, max_length=350)
+    private: bool = True
+    actor_user_id: uuid.UUID | None = None
+
+
 class GitHubRepoSummaryRead(BaseModel):
     """One repo option for the picker — see
     app/services/github_integration.py's list_repositories. Not persisted;
@@ -85,6 +95,7 @@ class RepositoryRead(BaseModel):
     description: str | None
     html_url: str | None
     is_private: bool | None
+    is_primary: bool
     created_at: datetime
     updated_at: datetime
 

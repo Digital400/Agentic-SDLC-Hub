@@ -148,6 +148,10 @@ def _build_heuristic_result(
     lld_summary: str,
     standards_chunks: list[RetrievedChunk] | None = None,
     jira_issue_key: str | None = None,
+    implementation_plan_summary: str = "",
+    test_scenarios_summary: str = "",
+    engineering_setup_context: str = "",
+    prior_story_task_context: str = "",
 ) -> ImplementationAgentResult:
     paths = task.expected_paths or [f"(no expected path declared for '{task.title}')"]
     changes: list[ProposedFileChange] = []
@@ -179,6 +183,11 @@ def _build_heuristic_result(
         risks.append("No relevant repository files were found for this task — the repo snapshot may be stale or empty.")
     if not standards_chunks:
         risks.append("No coding-standards knowledge was retrieved — proceeding on repository context alone.")
+    if engineering_setup_context:
+        risks.append(
+            "This project has configured engineering setup context (coding standards, guardrails, and/or repo "
+            "conventions) that a real implementation must follow — this scaffold does not enforce any of it."
+        )
 
     explanation = (
         f"Heuristic scaffold for \"{task.title}\" ({task.area.value}). No real model is configured "
@@ -188,6 +197,10 @@ def _build_heuristic_result(
         f"{'LLD context: ' + lld_summary[:200] + '. ' if lld_summary else ''}"
         f"{'Jira: ' + jira_issue_key + '. ' if jira_issue_key else ''}"
         f"{f'{len(standards_chunks)} coding-standards excerpt(s) available. ' if standards_chunks else ''}"
+        f"{'Project engineering setup context is available. ' if engineering_setup_context else ''}"
+        f"{'An Implementation Plan is available. ' if implementation_plan_summary.strip() else ''}"
+        f"{'Test Scenarios are available. ' if test_scenarios_summary.strip() else ''}"
+        f"{'This story has earlier, already-accepted task(s) this one builds on. ' if prior_story_task_context.strip() else ''}"
         "No repository, branch, or file was written by generating this — review the diff below before anything else happens to it."
     )
 
@@ -213,17 +226,31 @@ _SYSTEM_PROMPT = (
     '- "proposed_file_changes": array of objects {"path": string, "change_type": one of "create"/"modify"/"delete", '
     '"summary": string, "content": string (the FULL proposed final content of the file after this change; omit or '
     'use null for a "delete")}.\n'
-    '- "diff": a single string containing a unified diff (git-style "--- a/<path>" / "+++ b/<path>" hunks) covering '
-    "every proposed file change — for human review; must be consistent with each file's \"content\" above.\n"
     '- "explanation": string — what the change does and why.\n'
     '- "test_command": string — the exact command a human should run to verify this change.\n'
     '- "risks": array of strings — include any blocker that would stop this from being mergeable as-is.\n'
     '- "pr_description": string — a complete pull request description (what changed, why, and how to verify), '
     "referencing the Jira issue key when one is given.\n"
-    "RULES: Output a diff only. Do NOT claim the change has been applied, committed, or pushed anywhere — you have "
-    "no ability to do so and must not imply otherwise. Never reference creating or pushing to a branch, and never "
-    "reference the repository's default/main branch as a target. Use only the repository content given to you; do "
-    "not invent file contents you weren't shown."
+    # Deliberately NOT asking for a hand-written unified diff here anymore
+    # (it used to be a required "diff" key): a real multi-file change made
+    # the model restate every file's full content twice — once as "content",
+    # once again as diff hunks — which routinely exhausted the output
+    # budget before the JSON even finished, silently producing the mock
+    # scaffold (this was the root cause behind a real "still mock" bug).
+    # The diff is now built deterministically below via difflib from
+    # "content" plus the existing repository snippet, so it's always
+    # complete and always consistent with "content" by construction,
+    # instead of just hoping the model kept the two in sync.
+    "RULES: Do NOT claim the change has been applied, committed, or pushed anywhere — you have no ability to do so "
+    "and must not imply otherwise. Never reference creating or pushing to a branch, and never reference the "
+    "repository's default/main branch as a target. Use only the repository content given to you; do not invent "
+    "file contents you weren't shown. If a Technology Stack is given to you below (Project Engineering Setup "
+    "context), every path you propose and every line of content you write MUST match it exactly — the same "
+    "language and the same file extensions (a TypeScript backend gets .ts files, never .js; a JavaScript one gets "
+    ".js, never .ts), the same frontend/backend framework, and that framework's own idiomatic conventions. Never "
+    "silently fall back to a different language or framework than what's configured, even for a file you're "
+    "creating from scratch and even if an existing repository file you were shown uses a different one — the "
+    "configured stack is authoritative."
 )
 
 
@@ -235,6 +262,10 @@ def _run_real_agent(
     lld_summary: str,
     standards_chunks: list[RetrievedChunk] | None = None,
     jira_issue_key: str | None = None,
+    implementation_plan_summary: str = "",
+    test_scenarios_summary: str = "",
+    engineering_setup_context: str = "",
+    prior_story_task_context: str = "",
 ) -> ImplementationAgentResult:
     file_context_parts = []
     for f in repo_context.relevant_files:
@@ -250,20 +281,47 @@ def _run_real_agent(
         else "(no related story found)"
     )
 
-    standards_text = (
-        "\n\n".join(f"### {c.source_title}\n{c.content}" for c in standards_chunks)
-        if standards_chunks
-        else "(none retrieved)"
-    )
+    # RAG-retrieved COMPANY_STANDARD knowledge (semantically filtered) —
+    # distinct from engineering_setup_context below, which is the
+    # project's own persisted, always-included-in-full setup (coding
+    # standards, guardrails, repo/build conventions — see
+    # app/services/agent_context_builder.py).
+    standards_text = "\n\n".join(f"### {c.source_title}\n{c.content}" for c in standards_chunks) if standards_chunks else "(none retrieved)"
 
     user_content = (
         f"# Task\nTitle: {task.title}\nArea: {task.area.value}\nDescription: {task.description}\n"
         f"Expected files/folders: {', '.join(task.expected_paths) or '(none declared)'}\n"
         f"Acceptance criteria: {'; '.join(task.acceptance_criteria) or '(none declared)'}\n\n"
         f"# Approved LLD summary\n{lld_summary or '(not available)'}\n\n"
+        # Story Code Implementation Agent — Implementation Plan and Test
+        # Scenarios are additive context (both may not exist yet for an
+        # older/project-level task), same as everything else here.
+        f"# Implementation Plan\n{implementation_plan_summary or '(not available)'}\n\n"
+        f"# Test Scenarios\n{test_scenarios_summary or '(not available)'}\n\n"
+        # Full-stack-per-story sequencing (see app/api/routes/stories.py's
+        # _ensure_story_implementation_tasks): this story may have earlier
+        # tasks (DATABASE before BACKEND before FRONTEND) whose changes a
+        # human has reviewed and accepted — BUG FIX: this used to claim
+        # that work was "ALREADY committed to this same feature branch,"
+        # which is false (this path has no repository access at all —
+        # see module docstring's HARD RULE — and even the SDK path's own
+        # equivalent context is only ever a proposed, not-yet-pushed diff
+        # unless a human separately clicked "Create Pull Request"). Taking
+        # that claim at face value caused a real bug: a later task skipped
+        # its own acceptance criteria's file, like a prior one had already
+        # written it, when nothing had actually been committed anywhere.
+        f"# Earlier sibling tasks for this same story — human-ACCEPTED proposals, NOT confirmed committed "
+        "anywhere\n"
+        "You have no repository access to verify these, and a human accepting a proposal does not mean it was "
+        "ever pushed or merged. Use this only as background on what those tasks intended; it is never a reason "
+        "to omit a file THIS task's own acceptance criteria require — propose every file this task needs in "
+        "full, regardless of what an earlier summary claims.\n\n"
+        f"{prior_story_task_context or '(none — this is the first/only task for this story)'}\n\n"
         f"# Related story\n{story_text}\n\n"
         f"# Jira issue key\n{jira_issue_key or '(not synced to Jira yet)'}\n\n"
-        f"# Coding standards\n{standards_text}\n\n"
+        f"# Coding standards (retrieved from the Knowledge Base)\n{standards_text}\n\n"
+        f"# Project Engineering Setup — coding standards, guardrails, GitHub/build conventions to follow\n"
+        f"{engineering_setup_context or '(no engineering setup configured for this project)'}\n\n"
         f"# Repository context\nArchitecture summary: {repo_context.architecture_summary}\n"
         f"Relevant folders: {', '.join(repo_context.relevant_folders) or '(none)'}\n"
         + "\n".join(file_context_parts)
@@ -271,28 +329,42 @@ def _run_real_agent(
         + (task.test_expectation or "(not specified — propose a reasonable test command)")
     )
 
-    raw = generate_raw_text(system_prompt=_SYSTEM_PROMPT, user_content=user_content, output_token_budget=4096)
+    # 16000, not 4096 — a real code change routinely proposes multiple
+    # full file contents (see ProposedFileChange.after_content), which a
+    # single-file placeholder-sized budget silently truncated mid-JSON in
+    # practice (confirmed: a real multi-file C# change was cut off at
+    # ~4096 tokens, producing invalid JSON that fell back to the mock
+    # scaffold with no visible error anywhere).
+    raw = generate_raw_text(system_prompt=_SYSTEM_PROMPT, user_content=user_content, output_token_budget=16000)
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`").removeprefix("json").strip()
     parsed = json.loads(cleaned)
 
     changes = []
+    diff_parts: list[str] = []
     for item in parsed.get("proposed_file_changes", []):
         change_type = str(item.get("change_type", "modify")).lower()
         if change_type not in _VALID_CHANGE_TYPES:
             change_type = "modify"
         content = item.get("content")
+        path = str(item.get("path", ""))
+        after_content = str(content) if content is not None and change_type != "delete" else None
         changes.append(
             ProposedFileChange(
-                path=str(item.get("path", "")), change_type=change_type, summary=str(item.get("summary", "")),
-                after_content=(str(content) if content is not None and change_type != "delete" else None),
+                path=path, change_type=change_type, summary=str(item.get("summary", "")),
+                after_content=after_content,
             )
         )
+        # Built here, not asked of the model — see _SYSTEM_PROMPT's comment
+        # on why: guaranteed consistent with "content" by construction,
+        # and it doesn't cost the model any of its own output budget.
+        before = "" if change_type == "create" else _existing_snippet(path, repo_context)
+        diff_parts.append(_unified_diff_for_path(path, before=before, after=after_content or ""))
 
     return ImplementationAgentResult(
         proposed_file_changes=changes,
-        diff_text=str(parsed.get("diff", "")),
+        diff_text="\n".join(diff_parts),
         pr_description=str(parsed.get("pr_description", "")) or _build_pr_description(task=task, story=story, jira_issue_key=jira_issue_key),
         explanation=str(parsed.get("explanation", "")),
         test_command=str(parsed.get("test_command", "")) or _DEFAULT_TEST_COMMAND_BY_AREA.get(task.area.value, "N/A"),
@@ -312,6 +384,10 @@ def run_implementation_agent(
     lld_summary: str,
     standards_chunks: list[RetrievedChunk] | None = None,
     jira_issue_key: str | None = None,
+    implementation_plan_summary: str = "",
+    test_scenarios_summary: str = "",
+    engineering_setup_context: str = "",
+    prior_story_task_context: str = "",
 ) -> ImplementationAgentResult:
     """Real AI when configured; the deterministic heuristic otherwise, or if
     the real call errors or returns unparseable JSON (logged, not raised —
@@ -320,10 +396,22 @@ def run_implementation_agent(
 
     `standards_chunks` (RAG, see app/services/retrieval.py) and
     `jira_issue_key` are both additive context — story-level implementation
-    workflow requirement 4 — never required for a run to proceed."""
+    workflow requirement 4 — never required for a run to proceed.
+    `implementation_plan_summary`/`test_scenarios_summary` (Story Code
+    Implementation Agent) are likewise additive. `engineering_setup_context`
+    (Agent Context Builder, agent_type="implementation" — see
+    app/services/agent_context_builder.py) is the project's own persisted
+    coding standards/guardrails/repo/build conventions, pre-assembled and
+    budget-fitted by the caller — this function just drops it into the
+    prompt verbatim. `prior_story_task_context` (full-stack-per-story — see
+    app/api/routes/implementation_runs.py's _build_prior_story_task_context)
+    summarizes this story's earlier, already-accepted sibling task(s) —
+    empty for a single-area story or the first task in a sequence."""
     kwargs = dict(
         task=task, repo_context=repo_context, story=story, lld_summary=lld_summary,
         standards_chunks=standards_chunks, jira_issue_key=jira_issue_key,
+        implementation_plan_summary=implementation_plan_summary, test_scenarios_summary=test_scenarios_summary,
+        engineering_setup_context=engineering_setup_context, prior_story_task_context=prior_story_task_context,
     )
     if get_active_provider() == "mock":
         return _build_heuristic_result(**kwargs)

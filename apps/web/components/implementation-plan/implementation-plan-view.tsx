@@ -15,7 +15,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Select } from "@/components/ui/select";
 import { api, ApiError } from "@/lib/api";
 import { toGenerateImplementationPlanResult } from "@/lib/mappers";
-import type { ImplementationTaskArea, ImplementationTaskItem, ProjectWorkflowNode } from "@/lib/types";
+import type { GithubRepositoryItem, ImplementationTaskArea, ImplementationTaskItem, ProjectWorkflowNode } from "@/lib/types";
 
 const AREA_ORDER: ImplementationTaskArea[] = ["BACKEND", "FRONTEND", "DATABASE", "TESTING", "INFRA", "DOCS"];
 const AREA_LABEL: Record<ImplementationTaskArea, string> = {
@@ -35,6 +35,7 @@ export function ImplementationPlanView({
   currentUserId,
   reviewers,
   hasRepository,
+  repositories,
 }: {
   projectId: string;
   /** Null for a project created before this stage existed — see the
@@ -48,6 +49,11 @@ export function ImplementationPlanView({
    * per-task "Preview Repo Context" panel (see repo-context-preview-panel.tsx),
    * which needs a repository snapshot to build anything from. */
   hasRepository: boolean;
+  /** Multi-repo support — every repository connected to this project. The
+   * per-task repository picker below only renders once there's more than
+   * one to choose from; a project with just one repo behaves exactly as
+   * before (every task silently uses that repo). */
+  repositories: GithubRepositoryItem[];
 }) {
   const router = useRouter();
   const [reviewerId, setReviewerId] = useState(
@@ -56,6 +62,21 @@ export function ImplementationPlanView({
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<{ taskCount: number; reviewId: string } | null>(null);
+  // Multi-repo support — optimistic local override so the picker reflects
+  // a just-made assignment immediately, without waiting on router.refresh().
+  const [taskRepositoryOverrides, setTaskRepositoryOverrides] = useState<Record<string, string | null>>({});
+  const [repositoryAssignError, setRepositoryAssignError] = useState<string | null>(null);
+
+  async function handleAssignRepository(taskId: string, repositoryId: string) {
+    const resolved = repositoryId || null;
+    setRepositoryAssignError(null);
+    try {
+      await api.implementationTasks.updateRepository(taskId, resolved);
+      setTaskRepositoryOverrides((prev) => ({ ...prev, [taskId]: resolved }));
+    } catch (err) {
+      setRepositoryAssignError(err instanceof ApiError ? err.message : "Failed to assign a repository to this task.");
+    }
+  }
 
   async function handleGenerate() {
     if (!node) return;
@@ -145,6 +166,8 @@ export function ImplementationPlanView({
         </CardContent>
       </Card>
 
+      {repositoryAssignError ? <p className="text-xs text-destructive">{repositoryAssignError}</p> : null}
+
       {tasks.length === 0 ? (
         <EmptyState
           icon={ListChecks}
@@ -226,6 +249,26 @@ export function ImplementationPlanView({
                         </div>
                       ) : null}
                     </dl>
+                    {repositories.length > 1 ? (
+                      <div className="mt-2 border-t border-border pt-2">
+                        <label className="mb-1 block text-[11px] text-muted-foreground">
+                          Target repository (defaults to the project&rsquo;s primary repository)
+                        </label>
+                        <Select
+                          value={taskRepositoryOverrides[task.id] ?? task.repositoryId ?? ""}
+                          onChange={(e) => handleAssignRepository(task.id, e.target.value)}
+                          className="w-72 text-xs"
+                        >
+                          <option value="">Use primary repository</option>
+                          {repositories.map((r) => (
+                            <option key={r.id} value={r.id}>
+                              {r.owner}/{r.name}
+                              {r.isPrimary ? " (primary)" : ""}
+                            </option>
+                          ))}
+                        </Select>
+                      </div>
+                    ) : null}
                     {hasRepository ? (
                       <RepoContextPreviewPanel projectId={projectId} taskId={task.id} />
                     ) : (

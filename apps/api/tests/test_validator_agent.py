@@ -113,3 +113,57 @@ def test_to_dict_includes_the_new_fields():
     assert "missing_details" in payload
     assert "risks" in payload
     assert payload["recommendation"] in ("READY_FOR_REVIEW", "NEEDS_IMPROVEMENT")
+
+
+# --- Deterministic review-time check (story backlogs only) -----------------------------
+#
+# See app/services/review_time.py — this closes the real gap that let an
+# oversized story through the in-app Draft/Improve loop with nothing
+# checking its own self-reported "5 / 15 / 30" against anything: before
+# this, review_time_problems() was only ever called for a repository-
+# synced backlog (stage_document_sync.py), never for a draft produced by
+# this app's own loop_engine.py.
+
+
+def _story_block(title: str, review_time: str) -> str:
+    return f"## Story: {title}\n\n**Estimated PR Review Time:** {review_time}\n**Priority:** High\n"
+
+
+def test_an_oversized_story_becomes_a_critical_issue_even_on_an_otherwise_clean_draft():
+    content = (
+        "# Backlog\n\n"
+        + _story_block("Small story", "5 / 15 / 30")
+        + _story_block("Huge story", "10 / 30 / 90")
+    )
+    result = run_validator(validator=None, stage_name="Story Crafting", content_markdown=content)
+
+    assert any("Huge story" in issue and "90 minutes" in issue for issue in result.critical_issues)
+    assert not any("Small story" in issue for issue in result.critical_issues)
+
+
+def test_an_oversized_story_forces_revise_even_when_the_rest_of_the_draft_would_approve():
+    content = (
+        "# Backlog\n\n" + ("Solid, thorough backlog content describing the work clearly. " * 20) + "\n\n"
+        + _story_block("Oversized story", "15 / 45 / 90")
+    )
+    result = run_validator(validator=None, stage_name="Story Crafting", content_markdown=content)
+
+    assert result.approval_recommendation != "APPROVE"
+    assert result.has_critical_issues is True
+
+
+def test_every_story_within_budget_adds_no_review_time_issues():
+    content = "# Backlog\n\n" + _story_block("Story A", "5 / 15 / 30") + _story_block("Story B", "5 / 10 / 20")
+    result = run_validator(validator=None, stage_name="Story Crafting", content_markdown=content)
+
+    assert not any("minute" in issue for issue in result.critical_issues)
+
+
+def test_non_backlog_content_is_never_affected_by_the_review_time_check():
+    """A document with no '## Story:' headings at all (every other stage)
+    must never be touched by this — confirmed by using the word "Story"
+    in prose, which a naive check might mis-trigger on."""
+    content = "# HLD\n\n" + ("This document is the story of how we designed the system. " * 10)
+    result = run_validator(validator=None, stage_name="HLD", content_markdown=content)
+
+    assert not any("minute" in issue for issue in result.critical_issues)

@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # one (a reasoning model can spend the whole output-token budget on
     # hidden reasoning tokens before emitting any real content).
     OPENROUTER_API_KEY: str | None = None
-    OPENROUTER_MODEL: str = "minimax/minimax-m3:free"
+    OPENROUTER_MODEL: str = "poolside/laguna-s-2.1:free"
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     # NVIDIA's hosted "Build" API (https://build.nvidia.com) — issues free
     # API keys for prototyping against a catalog of hosted models via a
@@ -68,6 +68,17 @@ class Settings(BaseSettings):
     NVIDIA_API_KEY: str | None = None
     NVIDIA_MODEL: str = "moonshotai/kimi-k3"
     NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
+    # Hugging Face's "Inference Providers" router
+    # (https://huggingface.co/docs/inference-providers) — a single
+    # OpenAI-compatible endpoint that proxies to whichever backend
+    # (Together, Fireworks, HF's own serverless inference, ...) actually
+    # hosts the requested model, several with a free quota. Get a token
+    # from huggingface.co/settings/tokens (a plain read-scope token is
+    # enough); point HUGGINGFACE_MODEL at any "<repo>:<provider>" or bare
+    # "<repo>" slug from huggingface.co/models?inference_provider=...
+    HUGGINGFACE_API_KEY: str | None = None
+    HUGGINGFACE_MODEL: str = "Qwen/Qwen2.5-Coder-32B-Instruct"
+    HUGGINGFACE_BASE_URL: str = "https://router.huggingface.co/v1"
     # Ollama local inference (free, no API key needed). Runs at
     # http://localhost:11434 by default.
     OLLAMA_BASE_URL: str = "http://localhost:11434"
@@ -93,8 +104,61 @@ class Settings(BaseSettings):
     # encrypted under the dev-only key is only as safe as this repo itself.
     GITHUB_TOKEN_ENCRYPTION_KEY: str | None = None
 
+    # CodeRunnerService (see app/services/code_runner.py) — where each
+    # story's isolated workspace is created on local disk. Defaults under
+    # the OS temp dir so nothing here needs provisioning to run; a real
+    # deployment should point this at a dedicated, cleaned-up volume, not
+    # the shared system temp dir.
+    CODE_RUNNER_WORKSPACE_ROOT: Path = Path.home() / ".agentic_sdlc_hub" / "code_runner_workspaces"
+    # SECURITY (rule 2 — "use allowlisted commands"): only these test-
+    # runner executables may ever be invoked by CodeRunnerService.run_tests
+    # — a configured test command whose first token isn't in this list is
+    # refused outright, never executed. Extend this list, don't bypass it,
+    # if a project needs a different test runner.
+    #
+    # "npx" is here specifically so a project can configure a real
+    # Playwright E2E command (e.g. "npx playwright test") in its
+    # Engineering Setup's Build/Test Commands step — without it, that
+    # command's first token ("npx") would be refused outright before ever
+    # reaching the "is Playwright actually installed" question. "playwright"
+    # itself covers a project that instead calls its locally-installed CLI
+    # directly (e.g. via a package.json script resolved on PATH).
+    CODE_RUNNER_ALLOWED_TEST_EXECUTABLES: list[str] = ["pytest", "npm", "yarn", "pnpm", "npx", "playwright", "go", "mvn", "gradle"]
+
+    # app/services/claude_agent_harness.py — opt-in: when False (the
+    # default), run_implementation_agent's existing single-shot prompt path
+    # is unchanged. When True, an Implementation Agent run instead drives a
+    # real Claude Agent SDK session (the actual Claude Code harness — file
+    # read/write/edit, bash, multi-turn self-correction) against a real,
+    # throwaway clone of the task's repository. Requires the `claude` CLI
+    # binary on PATH and an authenticated profile/ANTHROPIC_API_KEY
+    # reachable to it — see that module's own docstring for the full
+    # precondition list and its disclosed scope (Implementation Agent only
+    # for now, not every agent in this codebase).
+    CLAUDE_AGENT_SDK_ENABLED: bool = False
+    # Hard caps — this harness runs a real, metered agent loop, not a single
+    # bounded API call, so both exist as defense in depth against a
+    # runaway/looping session. max_budget_usd is the Agent SDK's own
+    # enforced ceiling (the session stops itself); max_turns is a second,
+    # independent backstop.
+    CLAUDE_AGENT_SDK_MAX_TURNS: int = 30
+    CLAUDE_AGENT_SDK_MAX_BUDGET_USD: float = 3.0
+
     class Config:
-        env_file = ".env"
+        # Absolute path, not the bare relative ".env" this used to be —
+        # pydantic-settings resolves a relative env_file against the
+        # process's current working directory at the moment Settings() is
+        # instantiated, not against this file's own location. Launching
+        # uvicorn from anywhere other than apps/api (the repo root, an
+        # IDE's default run directory, etc.) silently found no .env file
+        # at all and fell back to every default — including no AI
+        # provider key — with no error, ever. This is exactly what caused
+        # a real, repeatedly-reported bug: the API process kept resolving
+        # to the mock provider even with a real key already sitting in
+        # apps/api/.env, because the running process was never actually
+        # looking there. An absolute path makes this correct regardless
+        # of the launching shell's working directory.
+        env_file = REPO_ROOT / "apps" / "api" / ".env"
 
 
 @lru_cache

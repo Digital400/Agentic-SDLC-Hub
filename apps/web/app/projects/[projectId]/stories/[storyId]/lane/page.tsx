@@ -28,15 +28,42 @@ export default async function StoryLanePage({ params }: { params: { projectId: s
     throw err;
   }
 
-  const [nodes, lld] = await Promise.all([
+  const [nodes, lld, implementationPlan, testScenarios, implementationTask] = await Promise.all([
     api.storyDelivery.listNodes(lane.id),
     api.stories.getLld(story.id).catch((err) => {
       if (err instanceof ApiError && err.status === 404) return null;
       throw err;
     }),
+    api.stories.getImplementationPlan(story.id).catch((err) => {
+      if (err instanceof ApiError && err.status === 404) return null;
+      throw err;
+    }),
+    api.stories.getTestScenarios(story.id).catch((err) => {
+      if (err instanceof ApiError && err.status === 404) return null;
+      throw err;
+    }),
+    api.stories.getImplementationTask(story.id).catch((err) => {
+      if (err instanceof ApiError && err.status === 404) return null;
+      throw err;
+    }),
+  ]);
+  const implementationTasks = await api.stories.getImplementationTasks(story.id).catch(() => []);
+
+  const [implementationRuns, testRuns, prReviewRuns, testReport, testExecutions] = await Promise.all([
+    implementationTask ? api.projects.implementationTaskRuns(project.id, implementationTask.id) : Promise.resolve([]),
+    implementationTask ? api.projects.implementationTaskTestRuns(project.id, implementationTask.id) : Promise.resolve([]),
+    implementationTask ? api.projects.implementationTaskPrReviewRuns(project.id, implementationTask.id) : Promise.resolve([]),
+    api.stories.getTestReport(story.id).catch((err) => {
+      if (err instanceof ApiError && err.status === 404) return null;
+      throw err;
+    }),
+    api.storyTestExecutions.listForStory(story.id).catch(() => []),
   ]);
 
   const currentUserId = users[0]?.id ?? null;
+  const confluenceSpace = await api.projects.confluenceSpace(project.id).catch(() => null);
+  const confluencePreview = confluenceSpace ? await api.confluence.storyPublishPreview(story.id).catch(() => null) : null;
+  const initialConfluenceItem = confluencePreview?.items.find((i) => i.artifact_type === "story_lld") ?? null;
 
   return (
     <div>
@@ -53,6 +80,17 @@ export default async function StoryLanePage({ params }: { params: { projectId: s
         initialLane={lane}
         initialNodes={nodes}
         initialLld={lld}
+        initialImplementationPlan={implementationPlan}
+        initialTestScenarios={testScenarios}
+        initialImplementationTask={implementationTask}
+        initialImplementationTasks={implementationTasks}
+        initialImplementationRuns={implementationRuns}
+        initialTestRuns={testRuns}
+        initialPrReviewRuns={prReviewRuns}
+        initialTestReport={testReport}
+        initialTestExecutions={testExecutions}
+        confluenceConnected={confluenceSpace !== null}
+        initialConfluenceItem={initialConfluenceItem}
         users={users}
         currentUserId={currentUserId}
       />

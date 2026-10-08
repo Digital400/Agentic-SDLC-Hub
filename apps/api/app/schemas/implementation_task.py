@@ -12,9 +12,11 @@ class ImplementationTaskRead(BaseModel):
 
     id: uuid.UUID
     project_id: uuid.UUID
-    workflow_node_id: uuid.UUID
-    artifact_id: uuid.UUID
-    artifact_version_id: uuid.UUID
+    story_id: uuid.UUID | None
+    workflow_node_id: uuid.UUID | None
+    artifact_id: uuid.UUID | None
+    artifact_version_id: uuid.UUID | None
+    repository_id: uuid.UUID | None
     title: str
     description: str
     linked_story: str | None
@@ -30,6 +32,28 @@ class ImplementationTaskRead(BaseModel):
     order_index: int
     created_at: datetime
     updated_at: datetime
+
+
+class UpdateImplementationTaskRepositoryRequest(BaseModel):
+    """Body for PATCH /implementation-tasks/{id}/repository — assigns which
+    of the project's (possibly several) connected repositories this task's
+    code changes target. `repository_id: null` resets it back to "use the
+    project's primary repository" (the default every task already had
+    before multi-repo support existed)."""
+
+    repository_id: uuid.UUID | None = Field(
+        default=None, description="One of the task's own project's Repository ids, or null to use the project's primary repository."
+    )
+
+
+class ReopenImplementationTaskRequest(BaseModel):
+    """Body for POST /implementation-tasks/{id}/reopen — undoes a mistaken
+    "completed" state (most commonly: the wrong, already-merged pull
+    request was registered against this task — see
+    app/api/routes/implementation_tasks.py's reopen_task)."""
+
+    triggered_by_user_id: uuid.UUID = Field(..., description="Existing user id — who is correcting this.")
+    reason: str | None = Field(default=None, description="Shown on the superseded run's review comment and in the audit log.")
 
 
 class GenerateImplementationPlanRequest(BaseModel):

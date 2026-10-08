@@ -82,8 +82,12 @@ class ConfluencePageLinkRead(BaseModel):
     project_id: uuid.UUID
     confluence_space_link_id: uuid.UUID
     artifact_type: str
-    artifact_id: uuid.UUID
-    artifact_version_id: uuid.UUID
+    # Null for a story-scoped row — see story_id/story_artifact_id below
+    # and ConfluencePageLink's own docstring.
+    artifact_id: uuid.UUID | None
+    artifact_version_id: uuid.UUID | None
+    story_id: uuid.UUID | None
+    story_artifact_id: uuid.UUID | None
     confluence_page_id: str
     confluence_page_url: str
     confluence_page_title: str
@@ -129,3 +133,28 @@ class ConfluencePublishResultItem(BaseModel):
 
 class ConfluencePublishResponse(BaseModel):
     results: list[ConfluencePublishResultItem]
+
+
+# --- Story-scoped publishing (e.g. Story LLD) — see
+# app/services/story_confluence_publish.py -------------------------------
+
+
+class StoryConfluencePublishItemRead(BaseModel):
+    artifact_type: str
+    label: str
+    story_artifact_id: uuid.UUID | None
+    content_preview: str
+    validation_errors: list[str]
+    already_published: ConfluencePageLinkRead | None
+    update_available: bool
+
+
+class StoryConfluencePublishPreviewRead(BaseModel):
+    story_id: uuid.UUID
+    space_key: str
+    items: list[StoryConfluencePublishItemRead]
+
+
+class StoryConfluencePublishRequest(BaseModel):
+    triggered_by_user_id: uuid.UUID
+    artifact_types: list[NonBlankStr] = Field(..., min_length=1)

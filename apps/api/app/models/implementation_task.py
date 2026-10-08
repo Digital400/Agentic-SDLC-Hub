@@ -60,6 +60,15 @@ class ImplementationTask(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # tasks" directly without joining out to `linked_story` string
     # matching (see that field's own docstring below).
     story_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), nullable=True)
+    # Multi-repo support — which of the project's (possibly several)
+    # connected repositories this task's code changes target. Null means
+    # "use the project's primary repository" (Repository.is_primary),
+    # which is also what every task created before this field existed
+    # resolves to — see app/api/routes/implementation_runs.py's
+    # _resolve_repository_for_task. SET NULL, not CASCADE: removing a
+    # repository from a project shouldn't delete the task that was
+    # targeting it, just fall it back to the primary repo.
+    repository_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("repositories.id", ondelete="SET NULL"), nullable=True)
 
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
@@ -103,3 +112,4 @@ class ImplementationTask(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     artifact: Mapped["Artifact | None"] = relationship("Artifact")
     artifact_version: Mapped["ArtifactVersion | None"] = relationship("ArtifactVersion")
     story: Mapped["Story | None"] = relationship("Story")
+    repository: Mapped["Repository | None"] = relationship("Repository")

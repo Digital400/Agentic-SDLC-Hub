@@ -65,12 +65,19 @@ def test_lld_validation_checklist_covers_the_new_rules():
 # --- Workflow template: LLD's required inputs ---------------------------------------
 
 
-def test_lld_node_requires_solution_discovery_hld_and_story_crafting_outputs():
+def test_lld_is_not_a_project_level_template_node():
+    """v0.3.0 — Low-Level Design is no longer a project-level stage; each
+    story drafts its own LLD individually in its own delivery lane (see
+    workflows/sdlc-workflow.json's own top-level description and
+    app/services/story_lld_agent.py). RICH_DEFAULT_PROMPTS["lld"]'s
+    content is still tested above since app/services/story_lld_agent.py's
+    own prompt (RICH_DEFAULT_PROMPTS["story_lld"]) was designed to mirror
+    its shape, but no template node named "lld" is ever materialized for
+    a new project anymore."""
     template = load_workflow_template("sdlc-workflow.json")
-    lld = next(n for n in template["nodes"] if n["id"] == "lld")
+    node_ids = {n["id"] for n in template["nodes"]}
 
-    assert set(lld["requiredInputs"]) == {"solution_options_doc", "hld_document", "story_backlog"}
-    assert "hld_document" in lld.get("fullContentArtifactTypes", [])
+    assert "lld" not in node_ids
 
 
 # --- _sync_default_prompt: content changes create a new version, not a mutation ----

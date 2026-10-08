@@ -10,7 +10,6 @@ export default async function GithubIntegrationPage() {
     api.projects.list(),
   ]);
 
-  const connection = connections.find((c) => c.status === "CONNECTED") ?? connections[0] ?? null;
   const projects = projectsResponse.items.map(toProject);
   const currentUserId = users[0]?.id ?? null;
 
@@ -18,10 +17,10 @@ export default async function GithubIntegrationPage() {
     <div>
       <PageHeader
         title="GitHub"
-        description="Connect a GitHub account and configure a read-only repository scan — no push, no branch creation."
+        description="Connect one or more GitHub accounts and configure each project's repositories for a read-only scan — no push, no branch creation."
       />
       <GithubIntegrationView
-        connection={connection ? toGithubConnectionItem(connection) : null}
+        connections={connections.map(toGithubConnectionItem)}
         projects={projects.map((p) => ({ id: p.id, name: p.name }))}
         currentUserId={currentUserId}
       />

@@ -1,36 +1,50 @@
 """Real AI generation for agent runs, via the Anthropic API, Gemini API,
-OpenRouter, NVIDIA's hosted "Build" API, or Ollama.
+OpenRouter, NVIDIA's hosted "Build" API, Hugging Face's Inference
+Providers router, or Ollama.
 
 Falls back to app/services/mock_agent.py's deterministic placeholder when
 none of ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY,
-NVIDIA_API_KEY, or Ollama is configured (see apps/api/.env.example), so
-the system stays fully testable and demoable without any paid key.
-Priority order:
+NVIDIA_API_KEY, HUGGINGFACE_API_KEY, or Ollama is configured (see
+apps/api/.env.example), so the system stays fully testable and demoable
+without any paid key. Priority order:
   1. Anthropic (if ANTHROPIC_API_KEY is set)
   2. Gemini (if GEMINI_API_KEY is set)
   3. OpenRouter (if OPENROUTER_API_KEY is set and reachable)
   4. NVIDIA's hosted "Build" API (if NVIDIA_API_KEY is set and reachable)
-  5. Ollama (if running locally, no API key needed)
-  6. Mock (deterministic fallback)
+  5. Hugging Face's Inference Providers router (if HUGGINGFACE_API_KEY is set and reachable)
+  6. Ollama (if running locally, no API key needed)
+  7. Mock (deterministic fallback)
 
-Gemini, OpenRouter, and NVIDIA are all offered as free-tier-friendly
-alternatives for anyone who wants real generated output without Anthropic
-billing (Google AI Studio, openrouter.ai, and build.nvidia.com all issue
-free-tier API keys). OpenRouter and NVIDIA sit ahead of Ollama in priority
-specifically because they're fast hosted calls rather than local CPU
-inference — see `_generate_with_ollama`'s own module-docstring-adjacent
-note that CPU-only local inference can legitimately take minutes per
-call. Ollama is completely free and runs locally — install Ollama from
-https://ollama.ai and pull a model (e.g., 'ollama pull llama3.1:8b') to
-use it.
+Gemini, OpenRouter, NVIDIA, and Hugging Face are all offered as
+free-tier-friendly alternatives for anyone who wants real generated
+output without Anthropic billing (Google AI Studio, openrouter.ai,
+build.nvidia.com, and huggingface.co all issue free-tier API
+keys/tokens — see each provider's own Settings.*_API_KEY comment in
+app/core/config.py for where to get one). These four hosted providers sit
+ahead of Ollama in priority specifically because they're fast hosted
+calls rather than local CPU inference — see `_generate_with_ollama`'s own
+module-docstring-adjacent note that CPU-only local inference can
+legitimately take minutes per call. Ollama is completely free and runs
+locally — install Ollama from https://ollama.ai and pull a model (e.g.,
+'ollama pull llama3.1:8b') to use it.
 
-OpenRouter and NVIDIA are both only selected if a fast reachability check
-confirms the endpoint actually responds (see `_openai_compatible_endpoint_
-is_reachable`) — a hosted endpoint that accepts a connection and then
-simply never responds (observed in practice against NVIDIA's endpoint) is
-treated the same as the key being unset, falling through to the next
-provider, rather than every request committing to the full generation
-timeout below.
+OpenRouter, NVIDIA, and Hugging Face are all only selected if a fast
+reachability check confirms the endpoint actually responds (see
+`_openai_compatible_endpoint_is_reachable`) — a hosted endpoint that
+accepts a connection and then simply never responds (observed in
+practice against NVIDIA's endpoint) is treated the same as the key being
+unset, falling through to the next provider, rather than every request
+committing to the full generation timeout below.
+
+NOTE on free-tier daily caps: OpenRouter's free ":free"-suffixed models
+share one account-wide limit (50 requests/day on an unverified account,
+observed in practice — see the 429 body's own
+"Rate limit exceeded: free-models-per-day" message), separate from and
+much stingier than its per-minute rate limiting. Hugging Face's free
+quota is provider-dependent (whichever backend actually serves the
+requested model) but is a genuinely separate quota from OpenRouter's —
+useful as a fallback on a day OpenRouter's is already exhausted, not just
+theoretically.
 
 The model is instructed to respond in a fixed two-part format — a one-line
 JSON header (needs_clarification + questions) followed by "---" followed by
@@ -42,10 +56,13 @@ This instruction is provider-agnostic — both `_build_system_prompt` and
 providers.
 """
 
+import contextvars
 import json
 import logging
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 import anthropic
 import httpx
@@ -80,6 +97,13 @@ _MODEL_PRICING_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (1.00, 5.00),
 }
 
+# Public re-export of this dict's keys — the curated model-override
+# suggestions GET /agent-runs/providers offers for anthropic/claude_agent_sdk
+# (see app/api/routes/agent_runs.py's list_provider_options). Exposed as its
+# own constant rather than having that route reach into the leading-
+# underscore pricing dict directly.
+KNOWN_CLAUDE_MODELS: tuple[str, ...] = tuple(_MODEL_PRICING_PER_MTOK)
+
 # Ollama's own Python client wraps httpx and accepts no timeout by
 # default — an unresponsive/still-loading local Ollama would otherwise
 # hang a request indefinitely, with no error surfaced anywhere (the
@@ -102,6 +126,7 @@ _OLLAMA_GENERATION_TIMEOUT_SECONDS = 180.0
 # hosted model without approaching "forever."
 _OPENROUTER_REQUEST_TIMEOUT_SECONDS = 300.0
 _NVIDIA_REQUEST_TIMEOUT_SECONDS = 300.0
+_HUGGINGFACE_REQUEST_TIMEOUT_SECONDS = 300.0
 # A fast, bounded reachability check — same reasoning as
 # _OLLAMA_CONNECTIVITY_TIMEOUT_SECONDS below: get_active_provider() runs on
 # the hot path of every single agent-run/Approve request, so it must fail
@@ -113,7 +138,67 @@ _NVIDIA_REQUEST_TIMEOUT_SECONDS = 300.0
 # above before ever falling through to the next provider.
 _OPENAI_COMPATIBLE_CONNECTIVITY_TIMEOUT_SECONDS = 5.0
 
-AIProvider = Literal["anthropic", "gemini", "openrouter", "nvidia", "ollama", "mock"]
+AIProvider = Literal["anthropic", "gemini", "openrouter", "nvidia", "huggingface", "ollama", "mock"]
+
+# A per-run override of which backend to use, set by the caller (see
+# app/api/routes/agent_runs.py's start_agent_run, from
+# AgentRunCreate.provider_override) instead of letting get_active_provider's
+# auto-detection chain / the global CLAUDE_AGENT_SDK_ENABLED flag decide.
+# A contextvar, not a parameter threaded through every generate() caller —
+# generate() is invoked from many places (agent_runs.py directly,
+# loop_engine.py's multiple iterations, revision_agent.py,
+# section_improve_agent.py, story_lld_agent.py, ...) and all of them must
+# honor one run's chosen backend without each needing a new parameter.
+# "claude_agent_sdk" is not a real AIProvider value (it's a separate
+# pre-check in generate(), below) — it's included here so a caller can
+# explicitly request it for one run, same as any other value.
+ProviderOverride = Literal["claude_agent_sdk", "anthropic", "gemini", "openrouter", "nvidia", "huggingface", "ollama"]
+_provider_override_var: contextvars.ContextVar[ProviderOverride | None] = contextvars.ContextVar(
+    "provider_override", default=None
+)
+
+
+@contextmanager
+def use_provider_override(value: ProviderOverride | None) -> Iterator[None]:
+    """Scopes `value` as the backend every generate()/get_active_provider()
+    call underneath sees, for the duration of the `with` block — reset
+    automatically on exit (including on an exception), so one run's choice
+    never leaks into an unrelated later call on the same worker thread."""
+    token = _provider_override_var.set(value)
+    try:
+        yield
+    finally:
+        _provider_override_var.reset(token)
+
+
+# A per-run override of which MODEL to use within the chosen provider — e.g.
+# "claude-opus-5" instead of whatever Settings.AI_MODEL is configured to, or
+# a specific Hugging Face repo id instead of Settings.HUGGINGFACE_MODEL.
+# Independent of provider_override above: a model override only takes
+# effect once a provider (real or claude_agent_sdk) is actually in use, and
+# is simply ignored by a provider it doesn't name (there is no cross-provider
+# model namespace to validate against here — an invalid id still reaches the
+# real API and fails there, exactly as a hand-edited Settings.*_MODEL would).
+_model_override_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("model_override", default=None)
+
+
+@contextmanager
+def use_model_override(value: str | None) -> Iterator[None]:
+    """Scopes `value` the same way use_provider_override does, for the
+    model name every `_generate_with_*` function and the Claude Agent SDK
+    harness reads instead of that provider's configured default."""
+    token = _model_override_var.set(value)
+    try:
+        yield
+    finally:
+        _model_override_var.reset(token)
+
+
+def get_model_override() -> str | None:
+    """The effective per-run model override, if any — read by every
+    `_generate_with_*` function below and by `_generate_with_claude_agent_sdk`
+    (which passes it through to ClaudeAgentOptions.model)."""
+    return _model_override_var.get()
 
 
 class AIGenerationError(Exception):
@@ -132,6 +217,13 @@ class AgentGenerationResult:
     total_tokens: int = 0
     cost: float = 0.0
     used_mock: bool = False
+    # True when the provider stopped because it hit output_token_budget,
+    # not because it finished — the model's own signal that this draft is
+    # cut off mid-document, not a real answer that happens to be short.
+    # `generate()` turns this into a visible warning appended to
+    # content_markdown (see its own comment) rather than silently
+    # persisting a truncated document with no explanation anywhere.
+    truncated: bool = False
     # Token Budget Service output (see app/services/token_budget.py) — the
     # pre-call estimate and the full per-block report, for AgentRun's
     # estimated-vs-actual token fields and its token_budget_report.
@@ -178,9 +270,21 @@ def get_active_provider() -> AIProvider:
     2. Gemini (if GEMINI_API_KEY is set)
     3. OpenRouter (if OPENROUTER_API_KEY is set and reachable)
     4. NVIDIA's hosted "Build" API (if NVIDIA_API_KEY is set and reachable)
-    5. Ollama (if running locally, no API key needed)
-    6. Mock (deterministic fallback)
+    5. Hugging Face's Inference Providers router (if HUGGINGFACE_API_KEY is set and reachable)
+    6. Ollama (if running locally, no API key needed)
+    7. Mock (deterministic fallback)
+
+    A per-run override (see `use_provider_override`) skips this whole
+    chain and goes straight to the requested provider — the caller chose
+    it explicitly for this run, so no reachability re-check or priority
+    fallback applies. ("claude_agent_sdk" isn't a value this function
+    returns; generate() checks for it separately, before ever calling
+    this.)
     """
+    override = _provider_override_var.get()
+    if override is not None and override != "claude_agent_sdk":
+        return override
+
     settings = get_settings()
     if settings.ANTHROPIC_API_KEY:
         return "anthropic"
@@ -190,6 +294,8 @@ def get_active_provider() -> AIProvider:
         return "openrouter"
     if settings.NVIDIA_API_KEY and _openai_compatible_endpoint_is_reachable(settings.NVIDIA_BASE_URL, settings.NVIDIA_API_KEY):
         return "nvidia"
+    if settings.HUGGINGFACE_API_KEY and _openai_compatible_endpoint_is_reachable(settings.HUGGINGFACE_BASE_URL, settings.HUGGINGFACE_API_KEY):
+        return "huggingface"
     # Check if Ollama is available by attempting to connect
     try:
         client = ollama.Client(host=settings.OLLAMA_BASE_URL, timeout=_OLLAMA_CONNECTIVITY_TIMEOUT_SECONDS)
@@ -334,7 +440,15 @@ def build_prioritized_context(
             "ONLY the section(s) affected by that feedback — copy every other section through "
             "unchanged, verbatim, in the same order and heading structure. Return the complete "
             "document (every section, in Markdown, using `## ` headings), not just the parts you "
-            "changed, per your Output Format instructions."
+            "changed, per your Output Format instructions.\n\n"
+            "If this document has an 'Open Questions' (or similarly named unresolved-decisions) "
+            "section, and the feedback below actually answers one of its listed questions: RESOLVE "
+            "it — incorporate the decision into the section it belongs in (e.g. Architecture, Data "
+            "Model, Scope), and remove that question from Open Questions entirely. Do not re-list, "
+            "rephrase, or re-ask a question the feedback already answered; only questions still "
+            "genuinely unresolved after this revision belong in that section. An 'improve' pass "
+            "whose feedback answers every open question should end with an empty or removed Open "
+            "Questions section, not the same-size list restated."
         )
     else:
         node_rules += (
@@ -448,15 +562,38 @@ def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> fl
     return round((prompt_tokens * input_rate + completion_tokens * output_rate) / 1_000_000, 6)
 
 
+# Extended thinking's tokens count against the SAME `max_tokens` ceiling as
+# the actual visible completion — not a separate budget. A dense,
+# structured drafting task (Story LLD's diagrams/contracts, HLD's C4
+# diagrams/tables, ...) can lead Claude Sonnet 5 to burn a large share of a
+# generous-looking output_token_budget on reasoning before it ever starts
+# writing — confirmed in practice: raising output_token_budget from 3072 to
+# 6144 alone did not stop "Output truncated" on Story LLD.
+#
+# `thinking: {"type": "enabled", "budget_tokens": N}` (an explicit, bounded
+# thinking budget separate from max_tokens) would be the clean fix, but
+# newer models (confirmed: claude-sonnet-5) reject it outright — "enabled"
+# is unsupported; the API's own error message says to use "adaptive" plus
+# `output_config.effort` instead. "low" effort biases the model toward
+# spending less of the shared max_tokens ceiling on thinking, leaving more
+# of output_token_budget for the actual document — this is a bias, not a
+# hard cap like budget_tokens would be, so `truncated` below still matters:
+# a document that's still too large for output_token_budget is reported
+# truncated, not silently cut off.
+_ANTHROPIC_THINKING_EFFORT = "low"
+
+
 def _generate_with_anthropic(system_prompt: str, user_content: str, output_token_budget: int) -> AgentGenerationResult:
     settings = get_settings()
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    model = get_model_override() or settings.AI_MODEL
 
     try:
         response = client.messages.create(
-            model=settings.AI_MODEL,
+            model=model,
             max_tokens=output_token_budget,
             thinking={"type": "adaptive"},
+            output_config={"effort": _ANTHROPIC_THINKING_EFFORT},
             system=system_prompt,
             messages=[{"role": "user", "content": user_content}],
         )
@@ -477,9 +614,71 @@ def _generate_with_anthropic(system_prompt: str, user_content: str, output_token
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
-        cost=_estimate_cost(settings.AI_MODEL, prompt_tokens, completion_tokens),
+        cost=_estimate_cost(model, prompt_tokens, completion_tokens),
         used_mock=False,
+        truncated=response.stop_reason == "max_tokens",
     )
+
+
+# A free-tier hosted endpoint (OpenRouter's/NVIDIA's own ":free" models)
+# rate-limiting a request under ordinary, expected load is routine, not
+# exceptional — a human hitting this in the UI would just wait a few
+# seconds and click Run Agent again. Retrying it here, bounded and only
+# for the specific transient statuses that mean "try again shortly," saves
+# that manual retry instead of failing the whole run over a delay
+# measured in seconds. Any other status (a bad key, a bad request) is
+# never retried — it fails immediately, exactly as before.
+_RETRYABLE_STATUS_CODES = {429, 503}
+_RETRY_BACKOFF_SECONDS = [1.0, 3.0, 7.0]  # <= ~11s of added latency, worst case
+
+
+def _post_once_or_timeout(url: str, *, headers: dict[str, str], json: dict[str, Any], timeout: float) -> httpx.Response | httpx.TimeoutException:
+    """httpx.post, but a timeout (ReadTimeout/ConnectTimeout/...) comes
+    back as a value instead of propagating — lets the retry loop below
+    treat "timed out" the same way it treats a 429/503 response, which it
+    otherwise never sees at all (a timeout raises before any response
+    object exists, so a loop that only inspects response.status_code
+    silently never retries it — the exact gap that let a genuine
+    free-tier-backend timeout fail a run on the very first attempt)."""
+    try:
+        return httpx.post(url, headers=headers, json=json, timeout=timeout)
+    except httpx.TimeoutException as exc:
+        return exc
+
+
+def _post_chat_completion_with_retry(url: str, *, headers: dict[str, str], json: dict[str, Any], timeout: float) -> httpx.Response:
+    # A timeout retries at most once more (each attempt can itself take up
+    # to `timeout` seconds, so unlike the 429/503 ladder below, retrying it
+    # 3 more times could mean a ~20-minute wait for what's likely just a
+    # genuinely slow/overloaded free-tier backend, not a quick blip worth
+    # chasing that hard) — one retry catches a cold-start/transient stall
+    # without compounding into an unreasonable wait.
+    result = _post_once_or_timeout(url, headers=headers, json=json, timeout=timeout)
+    if isinstance(result, httpx.TimeoutException):
+        logger.warning("Provider request timed out after %.0fs; retrying once.", timeout)
+        time.sleep(2.0)
+        result = _post_once_or_timeout(url, headers=headers, json=json, timeout=timeout)
+    if isinstance(result, httpx.TimeoutException):
+        raise result
+    response = result
+
+    for backoff_seconds in _RETRY_BACKOFF_SECONDS:
+        if response.status_code not in _RETRYABLE_STATUS_CODES:
+            return response
+        retry_after = response.headers.get("retry-after")
+        try:
+            wait_seconds = min(float(retry_after), 15.0) if retry_after else backoff_seconds
+        except ValueError:
+            wait_seconds = backoff_seconds
+        logger.warning(
+            "Provider returned %s (rate-limited/overloaded); retrying in %.1fs.", response.status_code, wait_seconds
+        )
+        time.sleep(wait_seconds)
+        result = _post_once_or_timeout(url, headers=headers, json=json, timeout=timeout)
+        if isinstance(result, httpx.TimeoutException):
+            raise result
+        response = result
+    return response
 
 
 def _generate_with_openrouter(system_prompt: str, user_content: str, output_token_budget: int) -> AgentGenerationResult:
@@ -492,11 +691,11 @@ def _generate_with_openrouter(system_prompt: str, user_content: str, output_toke
     settings = get_settings()
 
     try:
-        response = httpx.post(
+        response = _post_chat_completion_with_retry(
             f"{settings.OPENROUTER_BASE_URL}/chat/completions",
             headers={"Authorization": f"Bearer {settings.OPENROUTER_API_KEY}", "Accept": "application/json"},
             json={
-                "model": settings.OPENROUTER_MODEL,
+                "model": get_model_override() or settings.OPENROUTER_MODEL,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
@@ -510,11 +709,15 @@ def _generate_with_openrouter(system_prompt: str, user_content: str, output_toke
     except httpx.HTTPError as exc:
         # Covers both a network failure and a non-2xx response (via
         # raise_for_status) — never includes the Authorization header or
-        # API key, only httpx's own exception message.
+        # API key, only httpx's own exception message. A 429/503 reaches
+        # here only once _post_chat_completion_with_retry's own bounded
+        # retries are exhausted — still a real, reportable failure at that
+        # point, not swallowed.
         raise AIGenerationError(f"OpenRouter generation failed: {exc}") from exc
 
     data = response.json()
-    raw_text = data["choices"][0]["message"]["content"] or ""
+    choice = data["choices"][0]
+    raw_text = choice["message"]["content"] or ""
     needs_clarification, questions, body = _parse_response(raw_text)
     content_markdown = format_clarification_output(questions) if needs_clarification else body
 
@@ -536,6 +739,7 @@ def _generate_with_openrouter(system_prompt: str, user_content: str, output_toke
         # OpenRouter's own dashboard is the accurate source for real spend.
         cost=0.0,
         used_mock=False,
+        truncated=choice.get("finish_reason") == "length",
     )
 
 
@@ -551,11 +755,11 @@ def _generate_with_nvidia(system_prompt: str, user_content: str, output_token_bu
     settings = get_settings()
 
     try:
-        response = httpx.post(
+        response = _post_chat_completion_with_retry(
             f"{settings.NVIDIA_BASE_URL}/chat/completions",
             headers={"Authorization": f"Bearer {settings.NVIDIA_API_KEY}", "Accept": "application/json"},
             json={
-                "model": settings.NVIDIA_MODEL,
+                "model": get_model_override() or settings.NVIDIA_MODEL,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
@@ -569,11 +773,15 @@ def _generate_with_nvidia(system_prompt: str, user_content: str, output_token_bu
     except httpx.HTTPError as exc:
         # Covers both a network failure and a non-2xx response (via
         # raise_for_status) — never includes the Authorization header or
-        # API key, only httpx's own exception message.
+        # API key, only httpx's own exception message. A 429/503 reaches
+        # here only once _post_chat_completion_with_retry's own bounded
+        # retries are exhausted — still a real, reportable failure at that
+        # point, not swallowed.
         raise AIGenerationError(f"NVIDIA generation failed: {exc}") from exc
 
     data = response.json()
-    raw_text = data["choices"][0]["message"]["content"] or ""
+    choice = data["choices"][0]
+    raw_text = choice["message"]["content"] or ""
     needs_clarification, questions, body = _parse_response(raw_text)
     content_markdown = format_clarification_output(questions) if needs_clarification else body
 
@@ -593,6 +801,66 @@ def _generate_with_nvidia(system_prompt: str, user_content: str, output_token_bu
         # paid rate that may not apply to the caller's account/quota.
         cost=0.0,
         used_mock=False,
+        truncated=choice.get("finish_reason") == "length",
+    )
+
+
+def _generate_with_huggingface(system_prompt: str, user_content: str, output_token_budget: int) -> AgentGenerationResult:
+    """Generate via Hugging Face's Inference Providers router
+    (https://huggingface.co/docs/inference-providers) — a single
+    OpenAI-compatible /v1/chat/completions endpoint that proxies to
+    whichever backend actually serves HUGGINGFACE_MODEL. Same plain-httpx
+    treatment as OpenRouter/NVIDIA above, including the bounded 429/503
+    retry — a free-tier request landing on a momentarily busy backend is
+    exactly the transient case _post_chat_completion_with_retry exists
+    for."""
+    settings = get_settings()
+
+    try:
+        response = _post_chat_completion_with_retry(
+            f"{settings.HUGGINGFACE_BASE_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}", "Accept": "application/json"},
+            json={
+                "model": get_model_override() or settings.HUGGINGFACE_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                "max_tokens": output_token_budget,
+                "stream": False,
+            },
+            timeout=_HUGGINGFACE_REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        # Covers both a network failure and a non-2xx response (via
+        # raise_for_status) — never includes the Authorization header or
+        # API key, only httpx's own exception message.
+        raise AIGenerationError(f"Hugging Face generation failed: {exc}") from exc
+
+    data = response.json()
+    choice = data["choices"][0]
+    raw_text = choice["message"]["content"] or ""
+    needs_clarification, questions, body = _parse_response(raw_text)
+    content_markdown = format_clarification_output(questions) if needs_clarification else body
+
+    usage = data.get("usage") or {}
+    prompt_tokens = usage.get("prompt_tokens", 0) or 0
+    completion_tokens = usage.get("completion_tokens", 0) or 0
+
+    return AgentGenerationResult(
+        content_markdown=content_markdown,
+        needs_clarification=needs_clarification,
+        clarification_questions=questions,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=usage.get("total_tokens", prompt_tokens + completion_tokens) or (prompt_tokens + completion_tokens),
+        # Whichever backend actually served this request bills Hugging
+        # Face, not this app directly — same "don't assume a rate that may
+        # not apply" framing as every other free-tier provider above.
+        cost=0.0,
+        used_mock=False,
+        truncated=choice.get("finish_reason") == "length",
     )
 
 
@@ -602,7 +870,7 @@ def _generate_with_gemini(system_prompt: str, user_content: str, output_token_bu
 
     try:
         response = client.models.generate_content(
-            model=settings.GEMINI_MODEL,
+            model=get_model_override() or settings.GEMINI_MODEL,
             contents=user_content,
             config=genai_types.GenerateContentConfig(
                 system_instruction=system_prompt,
@@ -620,6 +888,12 @@ def _generate_with_gemini(system_prompt: str, user_content: str, output_token_bu
     prompt_tokens = (usage.prompt_token_count if usage else None) or 0
     completion_tokens = (usage.candidates_token_count if usage else None) or 0
 
+    # `finish_reason` is a FinishReason enum ("MAX_TOKENS", "STOP", ...) —
+    # compared as a string so a differently-typed value from a future SDK
+    # version degrades to "not truncated" rather than raising.
+    candidates = response.candidates or []
+    finish_reason = str(getattr(candidates[0], "finish_reason", "")) if candidates else ""
+
     return AgentGenerationResult(
         content_markdown=content_markdown,
         needs_clarification=needs_clarification,
@@ -632,6 +906,7 @@ def _generate_with_gemini(system_prompt: str, user_content: str, output_token_bu
         # a paid rate that may not apply to the caller's account.
         cost=0.0,
         used_mock=False,
+        truncated="MAX_TOKENS" in finish_reason.upper(),
     )
 
 
@@ -648,7 +923,7 @@ def _generate_with_ollama(system_prompt: str, user_content: str, output_token_bu
     try:
         # Ollama's chat API accepts messages in a similar format to OpenAI
         response = client.chat(
-            model=settings.OLLAMA_MODEL,
+            model=get_model_override() or settings.OLLAMA_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
@@ -688,6 +963,7 @@ def _generate_with_ollama(system_prompt: str, user_content: str, output_token_bu
         # Ollama is completely free (runs locally), so cost is 0.0
         cost=0.0,
         used_mock=False,
+        truncated=response.get("done_reason") == "length",
     )
 
 
@@ -761,6 +1037,59 @@ def generate(
         current_draft_content=current_draft_content,
     )
 
+    system_prompt = _build_system_prompt(active_prompt)
+    user_content = budget_result.assembled_text()
+
+    # Claude Agent SDK harness (see app/services/claude_agent_harness.py) —
+    # opt-in, read-only grounding against the project's real connected
+    # repository. Checked BEFORE the mock branch below, deliberately: the
+    # Agent SDK authenticates via the `claude` CLI's own credentials, not
+    # necessarily this app's ANTHROPIC_API_KEY, so a deployment that wants
+    # only the Agent SDK (no separate text-completion key configured) must
+    # not have get_active_provider() == "mock" silently skip it. Only
+    # attempted when a repository actually exists (no benefit otherwise —
+    # nothing to read); a session failure here falls back to the normal
+    # provider chain below (logged, not raised) — this function's existing
+    # resilience contract (an outage never blocks a stage run) applies here
+    # exactly the same way it already does for OpenRouter/NVIDIA/Hugging
+    # Face reachability failures elsewhere in this module.
+    #
+    # A per-run override (see `use_provider_override`) takes priority over
+    # the global CLAUDE_AGENT_SDK_ENABLED flag either way: explicitly
+    # choosing "claude_agent_sdk" for this run uses it even if the flag is
+    # off; explicitly choosing any other provider skips this branch
+    # entirely even if the flag is on, so get_active_provider() below sees
+    # exactly the provider the caller asked for.
+    override = _provider_override_var.get()
+    use_claude_agent_sdk = (override == "claude_agent_sdk") if override is not None else get_settings().CLAUDE_AGENT_SDK_ENABLED
+    if use_claude_agent_sdk:
+        from app.services.claude_agent_harness import ClaudeAgentHarnessError, resolve_project_repository
+
+        repository, base_branch = resolve_project_repository(project)
+        if repository is not None:
+            try:
+                result = _generate_with_claude_agent_sdk(system_prompt, user_content, repository=repository, base_branch=base_branch)
+            except ClaudeAgentHarnessError as exc:
+                logger.warning("Claude Agent SDK document session failed (%s); falling back to the configured provider.", exc)
+                if override == "claude_agent_sdk":
+                    # The caller explicitly asked for this run to use the
+                    # Agent SDK — silently falling back to a different
+                    # backend would mean the LLM they picked never actually
+                    # ran. Raise instead of falling through to the generic
+                    # provider chain below.
+                    raise AIGenerationError(f"Claude Agent SDK session failed: {exc}") from exc
+            else:
+                result.estimated_context_tokens = budget_result.estimated_tokens
+                result.token_budget_report = budget_result.to_report_dict()
+                if result.truncated and not result.needs_clarification:
+                    result.content_markdown = _append_truncation_warning(result.content_markdown, output_token_budget)
+                return result
+        elif override == "claude_agent_sdk":
+            raise AIGenerationError(
+                "Claude Agent SDK was selected for this run, but this project has no connected GitHub "
+                "repository for it to read — connect one first, or pick a different provider for this run."
+            )
+
     if provider == "mock":
         # Local import avoids a hard dependency the other direction (mock
         # generation has no reason to know about real generation).
@@ -788,15 +1117,14 @@ def generate(
             token_budget_report=budget_result.to_report_dict(),
         )
 
-    system_prompt = _build_system_prompt(active_prompt)
-    user_content = budget_result.assembled_text()
-
     if provider == "gemini":
         result = _generate_with_gemini(system_prompt, user_content, output_token_budget)
     elif provider == "openrouter":
         result = _generate_with_openrouter(system_prompt, user_content, output_token_budget)
     elif provider == "nvidia":
         result = _generate_with_nvidia(system_prompt, user_content, output_token_budget)
+    elif provider == "huggingface":
+        result = _generate_with_huggingface(system_prompt, user_content, output_token_budget)
     elif provider == "ollama":
         result = _generate_with_ollama(system_prompt, user_content, output_token_budget)
     else:
@@ -804,7 +1132,57 @@ def generate(
 
     result.estimated_context_tokens = budget_result.estimated_tokens
     result.token_budget_report = budget_result.to_report_dict()
+
+    # A document truncated mid-sentence by the output token budget must
+    # never look like a complete draft with nothing more to say — this is
+    # exactly the failure mode that left a 15-story backlog silently
+    # cut off after 4 stories with no visible explanation anywhere.
+    if result.truncated and not result.needs_clarification:
+        result.content_markdown = _append_truncation_warning(result.content_markdown, output_token_budget)
+
     return result
+
+
+def _append_truncation_warning(content_markdown: str, output_token_budget: int) -> str:
+    return (
+        content_markdown.rstrip()
+        + "\n\n---\n\n> ⚠️ **Output truncated.** This draft hit its output token budget "
+        f"({output_token_budget} tokens) before the agent finished — content after this point is "
+        "missing, not just short. Increase this stage's `outputTokenBudget` in the workflow template "
+        "(see app/services/workflow_templates.py) or narrow the requested scope, then regenerate."
+    )
+
+
+def _generate_with_claude_agent_sdk(system_prompt: str, user_content: str, *, repository, base_branch: str) -> AgentGenerationResult:
+    """Dispatched from generate() only — see its own comment for when and
+    why. Delegates the actual session mechanics to
+    app/services/claude_agent_harness.py's run_document_session (read-only:
+    Read/Glob/Grep against a real clone of `repository`@`base_branch`, no
+    Write/Edit/Bash), then interprets the result under this module's own
+    two-part clarification contract exactly the way _generate_with_anthropic
+    does — same _parse_response/format_clarification_output calls, so a
+    document drafted this way is indistinguishable downstream from one
+    drafted by any other provider."""
+    from app.services.claude_agent_harness import run_document_session
+
+    session_result = run_document_session(
+        system_prompt=system_prompt, user_content=user_content, repository=repository, base_branch=base_branch,
+        model=get_model_override(),
+    )
+    needs_clarification, questions, body = _parse_response(session_result.text)
+    content_markdown = format_clarification_output(questions) if needs_clarification else body
+
+    return AgentGenerationResult(
+        content_markdown=content_markdown,
+        needs_clarification=needs_clarification,
+        clarification_questions=questions,
+        prompt_tokens=session_result.prompt_tokens,
+        completion_tokens=session_result.completion_tokens,
+        total_tokens=session_result.prompt_tokens + session_result.completion_tokens,
+        cost=session_result.cost,
+        used_mock=False,
+        truncated=session_result.truncated,
+    )
 
 
 def generate_raw_text(*, system_prompt: str, user_content: str, output_token_budget: int = 1024) -> str:
@@ -812,10 +1190,24 @@ def generate_raw_text(*, system_prompt: str, user_content: str, output_token_bud
     two-part draft/clarification response contract — used by
     app/services/artifact_summary.py's real-AI summarization path (that
     module writes its own JSON-response instructions into `system_prompt`
-    instead). Raises AIGenerationError on a provider failure, same as
-    `generate`. Never called when the mock provider is active — mock
-    summaries use a deterministic heuristic instead (see
-    artifact_summary.py), so this assumes a real key is configured."""
+    instead), and by every bespoke structured-JSON agent (implementation,
+    PR review, testing, implementation planning, validation). Raises
+    AIGenerationError on a provider failure, same as `generate`. Never
+    called when the mock provider is active — mock paths use a
+    deterministic heuristic instead, so this assumes a real key is
+    configured.
+
+    TRUNCATION (a real, previously-silent bug): every caller here expects
+    a complete JSON object back and parses it with json.loads. A response
+    cut off by output_token_budget is never valid JSON — it fails as a
+    confusing JSONDecodeError ("Unterminated string...") deep in the
+    caller, which every one of those callers' own except blocks quietly
+    swallows and falls back to a heuristic scaffold, with nothing telling
+    a human *why* real code never actually arrived. Raising here instead,
+    with the budget named explicitly, turns that into an honest,
+    diagnosable `AIGenerationError` your caller's existing fallback
+    handling already understands — the same fix generate() got for its
+    own callers, applied at this entry point too."""
     provider = get_active_provider()
     if provider == "gemini":
         result = _generate_with_gemini(system_prompt, user_content, output_token_budget)
@@ -823,8 +1215,16 @@ def generate_raw_text(*, system_prompt: str, user_content: str, output_token_bud
         result = _generate_with_openrouter(system_prompt, user_content, output_token_budget)
     elif provider == "nvidia":
         result = _generate_with_nvidia(system_prompt, user_content, output_token_budget)
+    elif provider == "huggingface":
+        result = _generate_with_huggingface(system_prompt, user_content, output_token_budget)
     elif provider == "ollama":
         result = _generate_with_ollama(system_prompt, user_content, output_token_budget)
     else:
         result = _generate_with_anthropic(system_prompt, user_content, output_token_budget)
+    if result.truncated:
+        raise AIGenerationError(
+            f"Provider output was truncated at the {output_token_budget}-token output budget before "
+            "finishing — the response is incomplete, not just short. Increase output_token_budget for "
+            "this call."
+        )
     return result.content_markdown

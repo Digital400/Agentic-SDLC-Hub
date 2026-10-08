@@ -42,8 +42,16 @@ class KnowledgeSource(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=False,
     )
     uploaded_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    # Null = org-wide/global (visible to every project's retrieval — the
+    # original behavior). Non-null scopes this source to exactly one
+    # project — see app/services/retrieval.py, which matches sources
+    # where project_id IS NULL OR project_id = the run's project.
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
+    )
 
     uploaded_by: Mapped["User"] = relationship("User", foreign_keys=[uploaded_by_id])
+    project: Mapped["Project | None"] = relationship("Project")
     chunks: Mapped[list["KnowledgeChunk"]] = relationship(
         "KnowledgeChunk",
         back_populates="source",

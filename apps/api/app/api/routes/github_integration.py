@@ -34,6 +34,7 @@ from app.models import (
 )
 from app.schemas.github_integration import (
     ConnectGitHubRequest,
+    CreateRemoteRepositoryRequest,
     CreateRepositoryRequest,
     CreateSnapshotRequest,
     GitHubRepoSummaryRead,
@@ -205,6 +206,61 @@ def list_connection_repositories(connection_id: uuid.UUID, db: Session = Depends
     ]
 
 
+@router.get("/connections/{connection_id}/repositories/exists")
+def remote_repository_exists(
+    connection_id: uuid.UUID, name: str = Query(..., min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._-]+$"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Does a repository with this name already exist under the
+    connection's own account? Backs the wizard's live name check for
+    "Create a new repository" (a real GitHub lookup, not the capped list)."""
+    connection = _get_connection_or_404(db, connection_id)
+    if connection.status != IntegrationStatus.CONNECTED or not connection.github_username:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This GitHub connection isn't CONNECTED.")
+    token = decrypt_secret(connection.access_token_encrypted)
+    try:
+        github_api.get_repository(token, connection.github_username, name)
+    except GitHubIntegrationError as exc:
+        if exc.status_code == 404:
+            return {"exists": False, "owner": connection.github_username, "name": name}
+        raise _github_error_to_http(exc) from exc
+    return {"exists": True, "owner": connection.github_username, "name": name}
+
+
+@router.post("/connections/{connection_id}/repositories", response_model=GitHubRepoSummaryRead, status_code=status.HTTP_201_CREATED)
+def create_remote_repository(
+    connection_id: uuid.UUID, payload: CreateRemoteRepositoryRequest, db: Session = Depends(get_db)
+) -> GitHubRepoSummaryRead:
+    """Create a brand-new empty repository on GitHub under this
+    connection's account (the project wizard's "Create a new repository").
+    The one route here that creates something on GitHub; it does not link
+    it to a project — the caller then saves it via POST /github/repositories."""
+    connection = _get_connection_or_404(db, connection_id)
+    if connection.status != IntegrationStatus.CONNECTED:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This GitHub connection isn't CONNECTED.")
+    token = decrypt_secret(connection.access_token_encrypted)
+    try:
+        repo = github_api.create_repository(token, payload.name, description=payload.description, private=payload.private)
+    except GitHubIntegrationError as exc:
+        if exc.status_code == 422:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"Could not create repository '{payload.name}': {exc}") from exc
+        raise _github_error_to_http(exc) from exc
+
+    record_audit_log(
+        db,
+        actor_user_id=payload.actor_user_id,
+        action="github.repository_created",
+        entity_type="IntegrationConnection",
+        entity_id=connection.id,
+        extra_data={"owner": repo.owner, "name": repo.name, "private": repo.is_private},
+    )
+    db.commit()
+    return GitHubRepoSummaryRead(
+        owner=repo.owner, name=repo.name, full_name=repo.full_name, default_branch=repo.default_branch,
+        description=repo.description, is_private=repo.is_private, html_url=repo.html_url,
+    )
+
+
 # 2. Save a project's repo configuration ----------------------------------------------
 
 
@@ -223,6 +279,14 @@ def create_repository(payload: CreateRepositoryRequest, db: Session = Depends(ge
     except GitHubIntegrationError as exc:
         raise _github_error_to_http(exc) from exc
 
+    # Multi-repo support — a project may already have other repositories
+    # connected. The FIRST one connected becomes primary automatically (the
+    # obvious default, and matches every existing single-repo project's
+    # behavior exactly); every subsequent one is added without disturbing
+    # whichever repo is already primary — a human picks the primary
+    # explicitly via set_primary_repository below.
+    has_existing_repo = db.query(Repository.id).filter(Repository.project_id == project.id).first() is not None
+
     repository = Repository(
         project=project,
         connection=connection,
@@ -232,6 +296,7 @@ def create_repository(payload: CreateRepositoryRequest, db: Session = Depends(ge
         description=github_repo.description,
         html_url=github_repo.html_url,
         is_private=github_repo.is_private,
+        is_primary=not has_existing_repo,
     )
     db.add(repository)
     db.flush()
@@ -242,7 +307,7 @@ def create_repository(payload: CreateRepositoryRequest, db: Session = Depends(ge
         action="repository.connected",
         entity_type="Repository",
         entity_id=repository.id,
-        extra_data={"owner": payload.owner, "name": payload.name, "default_branch": github_repo.default_branch},
+        extra_data={"owner": payload.owner, "name": payload.name, "default_branch": github_repo.default_branch, "is_primary": repository.is_primary},
     )
 
     db.commit()
@@ -253,6 +318,67 @@ def create_repository(payload: CreateRepositoryRequest, db: Session = Depends(ge
 @router.get("/repositories/{repository_id}", response_model=RepositoryRead)
 def get_repository(repository_id: uuid.UUID, db: Session = Depends(get_db)) -> RepositoryRead:
     return RepositoryRead.model_validate(_get_repository_or_404(db, repository_id))
+
+
+@router.post("/repositories/{repository_id}/set-primary", response_model=RepositoryRead)
+def set_primary_repository(repository_id: uuid.UUID, db: Session = Depends(get_db)) -> RepositoryRead:
+    """Makes this repository the one any task that doesn't explicitly name
+    a repository resolves to (see app/api/routes/implementation_runs.py's
+    _resolve_repository_for_task). Unsets every sibling repository's own
+    is_primary in the same project first — "exactly one primary per
+    project" is enforced here in application code, not a DB constraint,
+    same pattern as every other "exactly one active X" rule in this
+    codebase."""
+    repository = _get_repository_or_404(db, repository_id)
+    db.query(Repository).filter(Repository.project_id == repository.project_id, Repository.id != repository.id).update(
+        {"is_primary": False}
+    )
+    repository.is_primary = True
+    db.flush()
+
+    record_audit_log(
+        db, project_id=repository.project_id, action="repository.set_primary", entity_type="Repository", entity_id=repository.id,
+        extra_data={"owner": repository.owner, "name": repository.name},
+    )
+
+    db.commit()
+    db.refresh(repository)
+    return RepositoryRead.model_validate(repository)
+
+
+@router.delete("/repositories/{repository_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_repository(repository_id: uuid.UUID, db: Session = Depends(get_db)) -> None:
+    """Disconnects one repository from its project. Any ImplementationTask
+    that explicitly targeted this repository falls back to the project's
+    primary repository (repository_id -> NULL via the FK's ON DELETE SET
+    NULL — see ImplementationTask.repository_id's own docstring), not left
+    dangling or blocked. If the removed repository was itself primary and
+    other repositories remain for this project, the most-recently-created
+    of them is promoted so the project is never left without a primary
+    repository while it still has at least one connected."""
+    repository = _get_repository_or_404(db, repository_id)
+    project_id, was_primary = repository.project_id, repository.is_primary
+    owner, name = repository.owner, repository.name
+
+    db.delete(repository)
+    db.flush()
+
+    if was_primary:
+        successor = (
+            db.query(Repository)
+            .filter(Repository.project_id == project_id)
+            .order_by(Repository.created_at.desc())
+            .first()
+        )
+        if successor is not None:
+            successor.is_primary = True
+
+    record_audit_log(
+        db, project_id=project_id, action="repository.disconnected", entity_type="Repository", entity_id=repository_id,
+        extra_data={"owner": owner, "name": name},
+    )
+
+    db.commit()
 
 
 # 3. Read-only repository actions -----------------------------------------------------

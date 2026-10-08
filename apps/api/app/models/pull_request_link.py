@@ -27,7 +27,10 @@ class PullRequestLink(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "pull_request_links"
 
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
-    workflow_node_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workflow_nodes.id", ondelete="CASCADE"), nullable=False)
+    # Null for a story-scoped PR — a StoryDeliveryNode, not a WorkflowNode,
+    # governs that PR's stage (see app/models/story_delivery_node.py); same
+    # nullable-relaxation precedent as ImplementationTask.workflow_node_id.
+    workflow_node_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("workflow_nodes.id", ondelete="CASCADE"), nullable=True)
     implementation_task_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("implementation_tasks.id", ondelete="CASCADE"), nullable=False
     )
@@ -38,6 +41,17 @@ class PullRequestLink(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Set only for a PR created inside a per-story delivery lane — see
     # app/models/story.py.
     story_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), nullable=True)
+    lane_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("story_delivery_lanes.id", ondelete="CASCADE"), nullable=True)
+    # Set only when this PR was opened from a CodeRunnerService-pushed
+    # branch (see app/services/story_code_implementation.py's
+    # create_pull_request_from_code_run) rather than the older
+    # commit-file-by-file-via-REST-API path (create_pull_request in
+    # app/api/routes/implementation_runs.py), which never touches this.
+    code_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("code_runs.id", ondelete="SET NULL"), nullable=True)
+    # Denormalized from Story.jira_issue_key at PR-creation time — kept
+    # here too so a PR's own Jira linkage survives even if the story is
+    # later re-synced to a different issue; never written back to Jira.
+    jira_issue_key: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     branch_name: Mapped[str] = mapped_column(String(255), nullable=False)
     base_branch: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -58,9 +72,11 @@ class PullRequestLink(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     commit_message: Mapped[str] = mapped_column(Text, nullable=False)
 
     project: Mapped["Project"] = relationship("Project")
-    workflow_node: Mapped["WorkflowNode"] = relationship("WorkflowNode")
+    workflow_node: Mapped["WorkflowNode | None"] = relationship("WorkflowNode")
     implementation_task: Mapped["ImplementationTask"] = relationship("ImplementationTask")
     implementation_run: Mapped["ImplementationRun"] = relationship("ImplementationRun")
     repository: Mapped["Repository"] = relationship("Repository")
     story: Mapped["Story | None"] = relationship("Story")
+    lane: Mapped["StoryDeliveryLane | None"] = relationship("StoryDeliveryLane")
+    code_run: Mapped["CodeRun | None"] = relationship("CodeRun")
     triggered_by: Mapped["User | None"] = relationship("User", foreign_keys=[triggered_by_user_id])

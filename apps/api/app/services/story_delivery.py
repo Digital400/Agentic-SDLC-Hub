@@ -45,11 +45,25 @@ class StoryDeliveryError(Exception):
 # gates (LLD_REVIEW, HUMAN_CODE_REVIEW, QA_APPROVAL) as real, distinct,
 # approval-gated nodes rather than folding them into IMPLEMENTATION/
 # PULL_REQUEST/TESTING's own status.
+#
+# IMPLEMENTATION_PLAN / TEST_SCENARIOS were added later ("Update the
+# existing workflow after HLD and Story Crafting" — extend, don't rename,
+# the existing architecture): IMPLEMENTATION_PLAN sits between LLD_REVIEW
+# and IMPLEMENTATION (plan the work once the design is approved, before
+# writing code); TEST_SCENARIOS sits between IMPLEMENTATION and
+# PULL_REQUEST (scenarios drafted against the real diff, before a PR is
+# opened for them). Both are plain, non-review-gated nodes — a human
+# advances them through the same generic PATCH
+# /delivery-lane-nodes/{id} every other non-gate node already uses; no
+# dedicated agent/artifact type was added for either (a StoryArtifact can
+# still be attached to one by hand via its node_id, same as any node).
 DEFAULT_STORY_DELIVERY_NODES: tuple[tuple[str, str, bool], ...] = (
     ("STORY_READY", "Story Ready", False),
     ("STORY_LLD", "Story LLD", False),
     ("LLD_REVIEW", "LLD Review", True),
+    ("IMPLEMENTATION_PLAN", "Implementation Plan", False),
     ("IMPLEMENTATION", "Implementation", False),
+    ("TEST_SCENARIOS", "Test Scenarios", False),
     ("PULL_REQUEST", "Pull Request", False),
     ("PR_REVIEW_AGENT", "PR Review Agent", False),
     ("HUMAN_CODE_REVIEW", "Human Code Review", True),
@@ -66,7 +80,9 @@ _NODE_ASSIGNED_ROLE: dict[str, str] = {
     "STORY_READY": "PRODUCT_OWNER",
     "STORY_LLD": "ARCHITECT",
     "LLD_REVIEW": "TECH_LEAD",
+    "IMPLEMENTATION_PLAN": "TECH_LEAD",
     "IMPLEMENTATION": "DEVELOPER",
+    "TEST_SCENARIOS": "QA",
     "PULL_REQUEST": "DEVELOPER",
     "PR_REVIEW_AGENT": "TECH_LEAD",
     "HUMAN_CODE_REVIEW": "TECH_LEAD",
@@ -153,3 +169,61 @@ def advance_lane(db: Session, *, lane: StoryDeliveryLane, completed_node: StoryD
     lane.current_node_id = next_node.id
     db.flush()
     return next_node
+
+
+# PR Review Agent rule — "if recommendation is REQUEST_CHANGES, lane
+# returns to Code Implementation or Implementation Plan update." These are
+# the only two valid rework targets; LLD/LLD_REVIEW are never reopened by
+# this mechanism.
+REWORK_TARGET_NODE_KEYS = ("IMPLEMENTATION", "IMPLEMENTATION_PLAN")
+
+
+def send_lane_back_for_rework(
+    db: Session, *, lane: StoryDeliveryLane, target_node_key: str, actor: User
+) -> StoryDeliveryNode:
+    """Reopens `target_node_key` (IMPLEMENTATION or IMPLEMENTATION_PLAN)
+    back to READY and re-LOCKS every node from there through the end of
+    the lane — their COMPLETED/BLOCKED status from the first pass no
+    longer reflects reality once the code they gated is being reworked.
+    The lane is otherwise a strict forward-only sequence (see advance_lane
+    above); this is the one place that ever moves a node backward.
+
+    DISCLOSED SCOPE: does not delete or invalidate previously-drafted
+    StoryArtifacts (Implementation Plan/Test Scenarios/PR Review runs) —
+    they stay visible for reference; a human or agent drafts fresh ones
+    once rework is complete. Does not reopen STORY_LLD/LLD_REVIEW — the
+    stated rule only ever sends work back to Implementation or
+    Implementation Plan update."""
+    if target_node_key not in REWORK_TARGET_NODE_KEYS:
+        raise StoryDeliveryError(
+            f"Cannot send a lane back to '{target_node_key}' — must be one of {REWORK_TARGET_NODE_KEYS}."
+        )
+
+    target = next((n for n in lane.nodes if n.node_key == target_node_key), None)
+    if target is None:
+        raise StoryDeliveryError(f"Lane {lane.id} has no '{target_node_key}' node.")
+
+    for node in lane.nodes:
+        if node.order_index < target.order_index:
+            continue
+        if node.id == target.id:
+            node.status = StoryDeliveryNodeStatus.READY
+            node.completed_at = None
+            node.blocked_reason = None
+        else:
+            node.status = StoryDeliveryNodeStatus.LOCKED
+            node.started_at = None
+            node.completed_at = None
+            node.blocked_reason = None
+
+    lane.current_node_id = target.id
+    lane.status = StoryDeliveryLaneStatus.ACTIVE
+    db.flush()
+
+    story = lane.story
+    _log(
+        db, story=story, lane=lane, node=target, action="story_lane.sent_back_for_rework", actor=actor,
+        details={"target_node_key": target_node_key},
+    )
+
+    return target

@@ -223,6 +223,40 @@ def test_run_revision_agent_full_cycle(db, project, actor, monkeypatch):
     assert "2 reviewer comments" in result.artifact_version.change_summary
     assert "Risks" in result.artifact_version.change_summary
 
+
+def test_revision_agent_includes_engineering_setup_context(db, project, actor, monkeypatch):
+    """A reviewer-requested revision is a real IMPROVE run — it should get
+    the same Project Engineering Setup context (see
+    app/services/agent_context_builder.py) the generic Run Agent
+    Draft/Improve/Validate action already gets, not none at all."""
+    from app.models import ProjectCodingStandard, ProjectEngineeringSetup
+
+    setup = ProjectEngineeringSetup(
+        project_id=project.id, created_by_id=actor.id, application_type="Web Application", primary_language="Python",
+    )
+    db.add(setup)
+    db.flush()
+    db.add(ProjectCodingStandard(setup_id=setup.id, title="Naming", content="Use snake_case."))
+    db.flush()
+
+    node, artifact, version, review = _setup(db, project, actor)
+    _add_comments(db, review, actor, [("Add mitigations.", "Risks")])
+
+    captured_kwargs = {}
+
+    def fake_generate(**kwargs):
+        captured_kwargs.update(kwargs)
+        return _revised_result(ORIGINAL_DOC)
+
+    monkeypatch.setattr(revision_agent, "generate", fake_generate)
+    monkeypatch.setattr(revision_agent, "retrieve_relevant_chunks", lambda *args, **kwargs: [])
+
+    result = run_revision_agent(db, review=review, triggered_by=actor)
+
+    assert "Use snake_case." in captured_kwargs["approved_artifact_content"]["project_engineering_setup"]
+    assert result.agent_run.engineering_setup_context_snapshot is not None
+    assert result.agent_run.engineering_setup_context_snapshot["agent_type"] == "generic"
+
     # Rule 3/9: node moved on, and a fresh review was opened for the same reviewer.
     assert node.status == WorkflowStatus.WAITING_FOR_REVIEW
     assert result.new_review is not None

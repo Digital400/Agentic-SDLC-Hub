@@ -16,12 +16,13 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models import KnowledgeChunk, KnowledgeContentType, KnowledgeSource, KnowledgeSourceStatus, KnowledgeSourceType, User
+from app.models import KnowledgeChunk, KnowledgeContentType, KnowledgeSource, KnowledgeSourceStatus, KnowledgeSourceType, Project, User
 from app.schemas.knowledge import (
     KnowledgeChunkCreate,
     KnowledgeChunkRead,
     KnowledgeSearchResult,
     KnowledgeSourceCreate,
+    KnowledgeSourceFromTextCreate,
     KnowledgeSourceRead,
     KnowledgeSourceUpdate,
 )
@@ -47,12 +48,21 @@ def _get_user_or_400(db: Session, user_id: uuid.UUID, field_name: str) -> User:
     return user
 
 
+def _get_project_or_400(db: Session, project_id: uuid.UUID) -> Project:
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"project_id {project_id} does not match an existing project")
+    return project
+
+
 # 1. Register a knowledge source --------------------------------------------------
 
 
 @router.post("", response_model=KnowledgeSourceRead, status_code=status.HTTP_201_CREATED)
 def create_knowledge_source(payload: KnowledgeSourceCreate, db: Session = Depends(get_db)) -> KnowledgeSourceRead:
     uploaded_by = _get_user_or_400(db, payload.uploaded_by_id, "uploaded_by_id")
+    if payload.project_id is not None:
+        _get_project_or_400(db, payload.project_id)
 
     source = KnowledgeSource(
         title=payload.title,
@@ -61,6 +71,7 @@ def create_knowledge_source(payload: KnowledgeSourceCreate, db: Session = Depend
         file_url=payload.file_url,
         status=KnowledgeSourceStatus.PENDING,
         uploaded_by=uploaded_by,
+        project_id=payload.project_id,
     )
     db.add(source)
     db.flush()
@@ -164,6 +175,59 @@ async def upload_knowledge_source(
     return KnowledgeSourceRead.from_orm_source(source)
 
 
+# 1c. Create a source + its one chunk from pasted text (no file) ---------------------
+
+
+@router.post("/from-text", response_model=KnowledgeSourceRead, status_code=status.HTTP_201_CREATED)
+def create_knowledge_source_from_text(
+    payload: KnowledgeSourceFromTextCreate, db: Session = Depends(get_db)
+) -> KnowledgeSourceRead:
+    """Pasted-content counterpart to POST /knowledge-sources/upload —
+    creates a source and chunks+embeds its text in one call, landing
+    straight in INDEXED like that endpoint does. Optionally scoped to a
+    project via `project_id` (see KnowledgeSource.project_id / the
+    module docstring) — used by the Create Project wizard's Knowledge
+    Base step, and usable standalone for org-wide notes too."""
+    uploaded_by = _get_user_or_400(db, payload.uploaded_by_id, "uploaded_by_id")
+    if payload.project_id is not None:
+        _get_project_or_400(db, payload.project_id)
+
+    chunk_contents = chunk_text(payload.content)
+    if not chunk_contents:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "content has no extractable text.")
+
+    source = KnowledgeSource(
+        title=payload.title,
+        category=payload.category,
+        source_type=payload.source_type,
+        file_url=payload.file_url,
+        status=KnowledgeSourceStatus.PENDING,
+        uploaded_by=uploaded_by,
+        project_id=payload.project_id,
+    )
+    db.add(source)
+    db.flush()
+
+    for i, content in enumerate(chunk_contents):
+        db.add(KnowledgeChunk(source=source, chunk_index=i, content=content, embedding=embed_text(content)))
+    source.status = KnowledgeSourceStatus.INDEXED
+    db.flush()
+
+    record_audit_log(
+        db,
+        project_id=payload.project_id,
+        actor_user_id=uploaded_by.id,
+        action="knowledge_source.created_from_text",
+        entity_type="KnowledgeSource",
+        entity_id=source.id,
+        extra_data={"title": source.title, "chunk_count": len(chunk_contents), "project_scoped": payload.project_id is not None},
+    )
+
+    db.commit()
+    db.refresh(source)
+    return KnowledgeSourceRead.from_orm_source(source)
+
+
 # 2. List knowledge sources --------------------------------------------------------
 
 
@@ -172,12 +236,15 @@ def list_knowledge_sources(
     db: Session = Depends(get_db),
     category: str | None = Query(default=None),
     status_filter: KnowledgeSourceStatus | None = Query(default=None, alias="status"),
+    project_id: uuid.UUID | None = Query(default=None, description="Exact match — omit for every source (global + every project's)."),
 ) -> list[KnowledgeSourceRead]:
     query = db.query(KnowledgeSource)
     if category is not None:
         query = query.filter(KnowledgeSource.category == category)
     if status_filter is not None:
         query = query.filter(KnowledgeSource.status == status_filter)
+    if project_id is not None:
+        query = query.filter(KnowledgeSource.project_id == project_id)
 
     sources = query.order_by(KnowledgeSource.created_at.desc()).all()
     return [KnowledgeSourceRead.from_orm_source(s) for s in sources]

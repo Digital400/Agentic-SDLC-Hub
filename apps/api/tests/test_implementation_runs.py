@@ -220,6 +220,69 @@ def test_successful_run_persists_expected_output_and_updates_task_status(db, pro
     assert "implementation_run.completed" in actions
 
 
+# --- Claude Agent SDK harness dispatch (opt-in — see app/services/claude_agent_harness.py) --
+
+
+def test_claude_agent_sdk_harness_is_used_when_enabled(db, project, actor, monkeypatch):
+    """When get_settings().CLAUDE_AGENT_SDK_ENABLED is on, start_implementation_run
+    must call run_implementation_agent_via_sdk (the real Claude Code harness
+    against a real workspace) instead of the single-shot prompt path —
+    cloning the repository at the snapshot's own ref."""
+    implementation, task = _chain(db, project, actor)
+    del implementation
+    repository, snapshot = _add_repository(db, project)
+    dev = _developer(db)
+
+    import app.api.routes.implementation_runs as routes_module
+    from app.services.implementation_agent import ImplementationAgentResult, ProposedFileChange
+
+    captured = {}
+
+    def _fake_harness(*, task, repository, base_branch, story, lld_summary, **kwargs):
+        captured["repository_id"] = repository.id
+        captured["base_branch"] = base_branch
+        return ImplementationAgentResult(
+            proposed_file_changes=[ProposedFileChange(path="apps/api/app/api/routes/auth.py", change_type="modify", summary="x", after_content="x")],
+            diff_text="diff", explanation="Implemented via the real harness.", test_command="pytest", risks=[], used_mock=False,
+        )
+
+    monkeypatch.setattr(routes_module, "run_implementation_agent_via_sdk", _fake_harness)
+
+    from app.core.config import Settings
+
+    real_settings = Settings()
+    real_settings.CLAUDE_AGENT_SDK_ENABLED = True
+    monkeypatch.setattr(routes_module, "get_settings", lambda: real_settings)
+
+    run = start_implementation_run(StartImplementationRunRequest(implementation_task_id=task.id, triggered_by_user_id=dev.id), db)
+
+    assert run.explanation == "Implemented via the real harness."
+    assert run.used_mock is False
+    assert captured["repository_id"] == repository.id
+    assert captured["base_branch"] == snapshot.ref
+
+
+def test_claude_agent_sdk_harness_is_not_used_by_default(db, project, actor, monkeypatch):
+    implementation, task = _chain(db, project, actor)
+    del implementation
+    _add_repository(db, project)
+    dev = _developer(db)
+
+    import app.api.routes.implementation_runs as routes_module
+
+    called = {"harness": False}
+
+    def _fake_harness(**kwargs):
+        called["harness"] = True
+        raise AssertionError("should not be called when CLAUDE_AGENT_SDK_ENABLED is False")
+
+    monkeypatch.setattr(routes_module, "run_implementation_agent_via_sdk", _fake_harness)
+
+    start_implementation_run(StartImplementationRunRequest(implementation_task_id=task.id, triggered_by_user_id=dev.id), db)
+
+    assert called["harness"] is False
+
+
 def test_no_github_token_ever_appears_in_the_run_or_its_audit_log(db, project, actor):
     implementation, task = _chain(db, project, actor)
     del implementation
@@ -231,6 +294,56 @@ def test_no_github_token_ever_appears_in_the_run_or_its_audit_log(db, project, a
         [run.diff_text, run.explanation, [row.extra_data for row in db.query(AuditLog).filter(AuditLog.entity_id == run.id).all()]]
     )
     assert "not-a-real-fernet-token" not in dump
+
+
+# --- Multi-repo support (Repository.is_primary / ImplementationTask.repository_id) --------
+
+
+def test_run_uses_the_projects_primary_repository_when_the_task_names_none(db, project, actor):
+    implementation, task = _chain(db, project, actor)
+    del implementation
+    # _add_repository builds rows directly (bypasses the create_repository
+    # route, which is what actually sets is_primary on connect) — set it
+    # explicitly here to exercise _resolve_repository_for_task itself.
+    first, _ = _add_repository(db, project)
+    first.is_primary = True
+    second, second_snapshot = _add_repository(db, project)
+    db.add(RepositoryFileIndex(snapshot=second_snapshot, path="apps/api/app/api/routes/auth.py", entry_type=RepositoryFileEntryType.FILE, size=1, sha="x"))
+    db.flush()
+
+    run = start_implementation_run(StartImplementationRunRequest(implementation_task_id=task.id, triggered_by_user_id=actor.id), db)
+
+    assert db.get(RepositorySnapshot, run.repository_snapshot_id).repository_id == first.id
+
+
+def test_run_uses_the_tasks_explicitly_assigned_repository_over_the_primary_one(db, project, actor):
+    implementation, task = _chain(db, project, actor)
+    del implementation
+    first, _ = _add_repository(db, project)
+    first.is_primary = True
+    second, second_snapshot = _add_repository(db, project)
+    db.add(RepositoryFileIndex(snapshot=second_snapshot, path="apps/api/app/api/routes/auth.py", entry_type=RepositoryFileEntryType.FILE, size=1, sha="x"))
+    task.repository_id = second.id
+    db.flush()
+
+    run = start_implementation_run(StartImplementationRunRequest(implementation_task_id=task.id, triggered_by_user_id=actor.id), db)
+
+    assert db.get(RepositorySnapshot, run.repository_snapshot_id).repository_id == second.id
+
+
+def test_run_falls_back_to_primary_when_the_tasks_assigned_repository_was_removed(db, project, actor):
+    implementation, task = _chain(db, project, actor)
+    del implementation
+    first, _ = _add_repository(db, project)
+    second, _ = _add_repository(db, project)
+    task.repository_id = second.id
+    db.flush()
+    db.delete(second)  # simulates the repository having been disconnected since assignment
+    db.flush()
+
+    run = start_implementation_run(StartImplementationRunRequest(implementation_task_id=task.id, triggered_by_user_id=actor.id), db)
+
+    assert db.get(RepositorySnapshot, run.repository_snapshot_id).repository_id == first.id
 
 
 # --- Review (requirement 6) -------------------------------------------------------------

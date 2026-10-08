@@ -19,6 +19,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import get_settings
+
 from app.models import (
     AgentDefinition,
     AgentPrompt,
@@ -38,6 +40,9 @@ from app.models import (
     TestRun,
     PRReviewRun,
     MaintenanceRun,
+    Release,
+    ReleaseStory,
+    CodeRun,
     JiraProjectLink,
     JiraIssueLink,
     ConfluenceSpaceLink,
@@ -45,6 +50,13 @@ from app.models import (
     IntegrationConnection,
     Project,
     ProjectMember,
+    ProjectCodingStandard,
+    ProjectCommandConfig,
+    ProjectDocumentationConfig,
+    ProjectEngineeringSetup,
+    ProjectGuardrail,
+    ProjectJiraConfig,
+    ProjectRepositoryConfig,
     Repository,
     RepositoryFileIndex,
     RepositorySnapshot,
@@ -58,6 +70,7 @@ from app.models import (
     StoryDeliveryEdge,
     StoryDeliveryLane,
     StoryDeliveryNode,
+    StoryTestExecution,
     SprintStory,
     User,
     UserRole,
@@ -82,8 +95,11 @@ TEST_TABLES = [
     StoryDeliveryEdge.__table__,
     StoryArtifact.__table__,
     StoryActivityLog.__table__,
+    StoryTestExecution.__table__,
     Sprint.__table__,
     SprintStory.__table__,
+    Release.__table__,
+    ReleaseStory.__table__,
     Review.__table__,
     ReviewComment.__table__,
     AuditLog.__table__,
@@ -107,7 +123,42 @@ TEST_TABLES = [
     Repository.__table__,
     RepositorySnapshot.__table__,
     RepositoryFileIndex.__table__,
+    CodeRun.__table__,
+    ProjectEngineeringSetup.__table__,
+    ProjectRepositoryConfig.__table__,
+    ProjectJiraConfig.__table__,
+    ProjectCodingStandard.__table__,
+    ProjectGuardrail.__table__,
+    ProjectDocumentationConfig.__table__,
+    ProjectCommandConfig.__table__,
 ]
+
+
+@pytest.fixture(autouse=True)
+def _claude_agent_sdk_disabled_by_default(monkeypatch):
+    """Settings always reads the real apps/api/.env (see
+    app/core/config.py's Config.env_file) — there is no test-specific env
+    file. CLAUDE_AGENT_SDK_ENABLED=true in a developer's own .env (a
+    legitimate thing to have on for real local use — see
+    app/services/claude_agent_harness.py) would otherwise leak into every
+    test that calls get_settings() without explicitly overriding it,
+    sending real implementation/generation runs down the real-session path
+    and failing them for real (confirmed: this broke ~65 unrelated tests
+    the moment a developer's own .env turned it on).
+
+    get_settings() is @lru_cache'd (app/core/config.py) — a single process-
+    lifetime cache, no per-call args to key on — so whichever test (or
+    import-time code) calls it FIRST bakes that moment's real .env
+    contents in for the rest of the whole pytest run; a plain
+    monkeypatch.setenv here is not enough on its own, since every later
+    get_settings() call just returns the already-cached object and never
+    re-reads the environment at all. Clearing the cache every test, after
+    setting the env var, is what actually makes this override take
+    effect — and takes effect for every subsequent test too, not just
+    this one, since the next get_settings() call anywhere rebuilds fresh
+    from (by then) this test's own monkeypatched environment."""
+    monkeypatch.setenv("CLAUDE_AGENT_SDK_ENABLED", "false")
+    get_settings.cache_clear()
 
 
 @pytest.fixture()
@@ -215,6 +266,83 @@ def make_story(
     db.add(story)
     db.flush()
     return story
+
+
+def fabricate_done_gate_prereqs(db: Session, *, project: Project, story, lane, node, actor: User) -> None:
+    """Fabricates whatever app/services/story_done_gate.py's final Done
+    gate additionally requires for `node.node_key`, bypassing every real
+    service (PR creation, PR Review Agent, StoryTestExecution) that would
+    normally produce it — for tests that drive a lane's generic node
+    sequence and only need the gate to pass, not to exercise those
+    services themselves (which already have their own dedicated test
+    files). Real FK targets (Repository/ImplementationTask/
+    ImplementationRun) are NOT created — this test database has no FK
+    enforcement (SQLite, no `PRAGMA foreign_keys=ON`), and
+    evaluate_story_done_gate never dereferences those relationships, only
+    the rows' own columns."""
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    from app.models import (
+        PRReviewRecommendation,
+        PRReviewRun,
+        PRReviewRunStatus,
+        PullRequestLink,
+        PullRequestStatus,
+        Story,
+        StoryArtifact,
+        StoryJiraSyncStatus,
+        StoryTestExecution,
+        StoryTestExecutionQaDecision,
+        StoryTestExecutionStatus,
+    )
+
+    if node.node_key == "STORY_READY":
+        # Done gate rule 1, "Jira story is synced" — fabricated directly;
+        # the real sync flow has its own dedicated tests
+        # (tests/test_story_jira_sync.py). `story` may be a StoryRead
+        # schema (routes like create_story return the read model, not the
+        # ORM row) — re-fetch the real row to mutate.
+        story_row = db.get(Story, story.id)
+        story_row.jira_sync_status = StoryJiraSyncStatus.SYNCED
+        story_row.jira_issue_key = story_row.jira_issue_key or "TEST-1"
+    elif node.node_key == "TEST_SCENARIOS":
+        db.add(
+            StoryArtifact(
+                story_id=story.id, lane_id=lane.id, node_id=node.id, artifact_type="story_test_scenarios",
+                title="Test Scenarios", content_markdown="## Functional Test Scenarios\n- Scenario 1\n", version_number=1,
+                created_by_id=actor.id,
+            )
+        )
+    elif node.node_key == "PULL_REQUEST":
+        db.add(
+            PullRequestLink(
+                project_id=project.id, story_id=story.id, lane_id=lane.id,
+                implementation_task_id=_uuid.uuid4(), implementation_run_id=_uuid.uuid4(), repository_id=_uuid.uuid4(),
+                branch_name="story/fabricated", base_branch="main", pr_number=1,
+                pr_url="https://github.com/example/example/pull/1", status=PullRequestStatus.OPEN,
+                jira_issue_key=story.jira_issue_key, commit_message="Fabricated for test — see fabricate_done_gate_prereqs.",
+            )
+        )
+    elif node.node_key == "PR_REVIEW_AGENT":
+        pr_link = db.query(PullRequestLink).filter(PullRequestLink.lane_id == lane.id).order_by(PullRequestLink.created_at.desc()).first()
+        db.add(
+            PRReviewRun(
+                project_id=project.id, story_id=story.id, implementation_task_id=_uuid.uuid4(), implementation_run_id=_uuid.uuid4(),
+                pull_request_link_id=pr_link.id, status=PRReviewRunStatus.COMPLETED,
+                overall_recommendation=PRReviewRecommendation.APPROVE, critical_findings=[],
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+    elif node.node_key == "QA_APPROVAL":
+        db.add(
+            StoryTestExecution(
+                story_id=story.id, lane_id=lane.id, executed_by_user_id=actor.id,
+                status=StoryTestExecutionStatus.QA_APPROVED, qa_decision=StoryTestExecutionQaDecision.APPROVED,
+                qa_decided_by_user_id=actor.id, completed_at=datetime.now(timezone.utc),
+            )
+        )
+    db.flush()
 
 
 def make_edge(

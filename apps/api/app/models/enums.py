@@ -46,6 +46,26 @@ class ProjectStatus(str, enum.Enum):
     ARCHIVED = "ARCHIVED"
 
 
+class WorkType(str, enum.Enum):
+    """What kind of work a project represents — selected once, at creation,
+    and used only to pick which workflow template to generate the
+    project's graph from (see app/api/routes/projects.py's create_project
+    and workflows/existing-project-feature-workflow.json's own header
+    comment for why EXISTING_PROJECT_FEATURE/BUG_FIX/TECHNICAL_IMPROVEMENT
+    all share one template): a brand-new project needs the full SDLC
+    (Requirement Intake through HLD); a change to something already
+    running doesn't need to re-run Problem Discovery or a full HLD — it
+    needs to scan the existing system first and produce a scoped Impact
+    Analysis / HLD Delta instead. NOT a per-story or per-task field —
+    Story Crafting's own VERTICAL/HORIZONTAL split (StoryType) is a
+    separate, unrelated axis."""
+
+    NEW_PROJECT = "NEW_PROJECT"
+    EXISTING_PROJECT_FEATURE = "EXISTING_PROJECT_FEATURE"
+    BUG_FIX = "BUG_FIX"
+    TECHNICAL_IMPROVEMENT = "TECHNICAL_IMPROVEMENT"
+
+
 class ProjectRole(str, enum.Enum):
     """A user's role within a single project (not a global/system role)."""
 
@@ -142,6 +162,10 @@ class KnowledgeSourceType(str, enum.Enum):
     PROJECT_ARTIFACT = "PROJECT_ARTIFACT"
     UPLOADED_DOCUMENT = "UPLOADED_DOCUMENT"
     EXTERNAL_LINK = "EXTERNAL_LINK"
+    # A human pasted this content directly (e.g. the Create Project
+    # wizard's Knowledge Base step) — not uploaded as a file, not a
+    # link, not derived from a project artifact.
+    MANUAL_ENTRY = "MANUAL_ENTRY"
 
 
 class IntegrationProvider(str, enum.Enum):
@@ -410,6 +434,63 @@ class SprintStoryStatus(str, enum.Enum):
     REMOVED = "REMOVED"
 
 
+class ReleaseStatus(str, enum.Enum):
+    """A Release's own lifecycle — see app/models/release.py. Distinct
+    from a Sprint's release_planning stage (app/services/release_export.py,
+    which renders one sprint's own release readiness as a project-level
+    Artifact): a Release is a free-standing, human-curated set of
+    RELEASE_READY stories, not implicitly tied to any one sprint.
+
+    DRAFT -> APPROVED is the one real gate (POST /releases/{id}/approve —
+    requirement 7's approval gate); RELEASED marks it actually shipped
+    (a separate, later human action, not implied by approval alone);
+    CANCELLED is a manual override reachable from DRAFT or APPROVED."""
+
+    DRAFT = "DRAFT"
+    APPROVED = "APPROVED"
+    RELEASED = "RELEASED"
+    CANCELLED = "CANCELLED"
+
+
+class StoryJiraSyncStatus(str, enum.Enum):
+    """A Story's own Jira sync state machine — see app/models/story.py's
+    `jira_sync_status`. Distinct from a JiraIssueLink's `jira_status`
+    (Jira's own live workflow status, e.g. "In Progress", pulled back by
+    GET /jira/projects/{id}/sync-status): this tracks whether *this app*
+    has successfully created the issue, not what state it's since moved
+    to on the Jira board.
+
+    NOT_SYNCED -> SYNC_PENDING -> SYNCED | SYNC_FAILED. A SYNC_FAILED
+    story can be retried (back to SYNC_PENDING) — sync failure never
+    deletes or otherwise damages the internal Story row (see
+    app/services/story_jira_sync.py)."""
+
+    NOT_SYNCED = "NOT_SYNCED"
+    SYNC_PENDING = "SYNC_PENDING"
+    SYNCED = "SYNCED"
+    SYNC_FAILED = "SYNC_FAILED"
+
+
+class CodeRunStatus(str, enum.Enum):
+    """One CodeRunnerService run's own lifecycle — see
+    app/models/code_run.py and app/services/code_runner.py. A strict,
+    forward-only sequence (no lane-style unlock graph): QUEUED ->
+    CLONING -> BRANCH_CREATED -> APPLYING_CHANGES -> TESTING ->
+    COMMITTED -> PUSHED. FAILED is reachable from any non-terminal state
+    — a run's own `error_message`/`logs` record what happened, the row
+    itself is never deleted (same "failure never destroys the record"
+    convention as every other run model in this codebase)."""
+
+    QUEUED = "QUEUED"
+    CLONING = "CLONING"
+    BRANCH_CREATED = "BRANCH_CREATED"
+    APPLYING_CHANGES = "APPLYING_CHANGES"
+    TESTING = "TESTING"
+    COMMITTED = "COMMITTED"
+    PUSHED = "PUSHED"
+    FAILED = "FAILED"
+
+
 class StoryDeliveryLaneStatus(str, enum.Enum):
     """One story's own delivery lane (see app/models/story_delivery_lane.py)
     — a dedicated, self-contained graph per story, deliberately NOT the
@@ -434,6 +515,31 @@ class StoryDeliveryNodeStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
 
 
+class StoryTestExecutionStatus(str, enum.Enum):
+    """One StoryTestExecution's overall status (see
+    app/models/story_test_execution.py) — derived from its per-scenario
+    results_json, not chosen freehand by a caller (see
+    app/services/story_test_execution.py's _recompute_status)."""
+
+    NOT_STARTED = "NOT_STARTED"
+    IN_PROGRESS = "IN_PROGRESS"
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    BLOCKED = "BLOCKED"
+    QA_APPROVED = "QA_APPROVED"
+
+
+class StoryTestExecutionQaDecision(str, enum.Enum):
+    """QA's own decision on a StoryTestExecution — distinct from `status`
+    (which tracks the mechanical pass/fail rollup): this is the human
+    approval gate requirement 6/"Story cannot be DONE until QA approval"
+    actually checks."""
+
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
 class RepositoryFileEntryType(str, enum.Enum):
     """One entry in a RepositorySnapshot's file index — see
     app/models/repository.py's RepositoryFileIndex. Mirrors GitHub's own
@@ -442,3 +548,58 @@ class RepositoryFileEntryType(str, enum.Enum):
 
     FILE = "FILE"
     DIRECTORY = "DIRECTORY"
+
+
+# --- Project Engineering Setup (see app/models/project_engineering_setup.py) -------------
+
+
+class GithubSetupOption(str, enum.Enum):
+    """A project's declared intent for GitHub during setup — distinct from
+    Repository actually existing: CONNECT_EXISTING_REPO/CREATE_NEW_REPO
+    both still require a human to finish that connection afterward (see
+    app/api/routes/github_integration.py); this only records the choice
+    and gates Implementation from running until a real Repository exists
+    for anything other than SKIP_FOR_NOW."""
+
+    CONNECT_EXISTING_REPO = "CONNECT_EXISTING_REPO"
+    CREATE_NEW_REPO = "CREATE_NEW_REPO"
+    SKIP_FOR_NOW = "SKIP_FOR_NOW"
+
+
+class JiraSetupOption(str, enum.Enum):
+    """A project's declared intent for Jira during setup. MAPPING_ONLY
+    records field-mapping preferences (see
+    app/services/jira_push_preview.py) without an actual connected Jira
+    project yet — still blocks Jira Sync until a real JiraProjectLink
+    exists, same as SKIP_FOR_NOW."""
+
+    CONNECT_EXISTING_PROJECT = "CONNECT_EXISTING_PROJECT"
+    MAPPING_ONLY = "MAPPING_ONLY"
+    SKIP_FOR_NOW = "SKIP_FOR_NOW"
+
+
+class DocumentationTarget(str, enum.Enum):
+    """Where an approved artifact publishes to — see
+    app/services/story_confluence_publish.py (CONFLUENCE) and
+    app/services/github_export.py (REPO_MARKDOWN)."""
+
+    INTERNAL_ONLY = "INTERNAL_ONLY"
+    CONFLUENCE = "CONFLUENCE"
+    REPO_MARKDOWN = "REPO_MARKDOWN"
+    CONFLUENCE_AND_REPO = "CONFLUENCE_AND_REPO"
+
+
+class CodingStandardCategory(str, enum.Enum):
+    """Which of the Agent Context Builder's named rule categories a
+    ProjectCodingStandard entry belongs to (see
+    app/services/agent_context_builder.py) — GENERAL is the default for a
+    standard that isn't specifically one of the other five; every category
+    is still labeled and injected into agent context the same way, this
+    just controls the section heading a standard is grouped under."""
+
+    GENERAL = "GENERAL"
+    ARCHITECTURE = "ARCHITECTURE"
+    SECURITY = "SECURITY"
+    TESTING = "TESTING"
+    GIT = "GIT"
+    DOCUMENTATION = "DOCUMENTATION"

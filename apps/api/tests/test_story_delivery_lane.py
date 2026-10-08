@@ -32,7 +32,7 @@ from app.schemas.story import (
 )
 from app.services.story_delivery import DEFAULT_STORY_DELIVERY_NODES
 
-from tests.conftest import make_approved_artifact, make_node
+from tests.conftest import fabricate_done_gate_prereqs, make_approved_artifact, make_node
 
 
 def _ba(db) -> User:
@@ -112,7 +112,7 @@ def test_create_story_lane_materializes_the_exact_default_node_sequence(db, proj
 
     nodes = list_lane_nodes(lane.id, db)
     assert [n.node_key for n in nodes] == [key for key, _, _ in DEFAULT_STORY_DELIVERY_NODES]
-    assert [n.order_index for n in nodes] == list(range(10))
+    assert [n.order_index for n in nodes] == list(range(len(DEFAULT_STORY_DELIVERY_NODES)))
     # Only the first node starts unlocked.
     assert nodes[0].status == StoryDeliveryNodeStatus.READY
     assert all(n.status == StoryDeliveryNodeStatus.LOCKED for n in nodes[1:])
@@ -167,6 +167,29 @@ def test_completing_a_node_unlocks_only_its_immediate_successor(db, project, act
     assert lane_after.current_node_id == by_key["STORY_LLD"].id
 
 
+def test_implementation_plan_and_test_scenarios_are_in_the_default_sequence(db, project, actor):
+    """"Update the existing workflow after HLD and Story Crafting" —
+    IMPLEMENTATION_PLAN sits between LLD_REVIEW and IMPLEMENTATION;
+    TEST_SCENARIOS sits between IMPLEMENTATION and PULL_REQUEST. Both are
+    plain, non-review-gated nodes, driven the same generic way as
+    IMPLEMENTATION/PULL_REQUEST/TESTING already are."""
+    _approved_project(db, project, actor)
+    story = _create_direct_story(db, project, actor)
+    create_story_lane(story.id, CreateStoryLaneRequest(triggered_by_user_id=actor.id), db)
+    lane = get_story_delivery_lane(story.id, db)
+    nodes = list_lane_nodes(lane.id, db)
+    keys_in_order = [n.node_key for n in nodes]
+
+    assert keys_in_order.index("LLD_REVIEW") < keys_in_order.index("IMPLEMENTATION_PLAN") < keys_in_order.index("IMPLEMENTATION")
+    assert keys_in_order.index("IMPLEMENTATION") < keys_in_order.index("TEST_SCENARIOS") < keys_in_order.index("PULL_REQUEST")
+
+    by_key = {n.node_key: n for n in nodes}
+    assert by_key["IMPLEMENTATION_PLAN"].requires_approval is False
+    assert by_key["TEST_SCENARIOS"].requires_approval is False
+    assert by_key["IMPLEMENTATION_PLAN"].assigned_role == "TECH_LEAD"
+    assert by_key["TEST_SCENARIOS"].assigned_role == "QA"
+
+
 def test_a_locked_node_cannot_be_moved_directly(db, project, actor):
     _approved_project(db, project, actor)
     story = _create_direct_story(db, project, actor)
@@ -191,6 +214,35 @@ def test_completing_the_final_node_completes_the_lane_and_marks_the_story_done(d
     for _ in range(len(DEFAULT_STORY_DELIVERY_NODES)):
         nodes = list_lane_nodes(lane.id, db)
         current = next(n for n in nodes if n.status == StoryDeliveryNodeStatus.READY)
+        if current.node_key == "QA_APPROVAL":
+            # Story-level testing workflow's evidence gate — fabricate a
+            # minimal story_test_report with a real Test Evidence section
+            # (see app/api/routes/stories.py's _require_test_evidence).
+            from app.models import StoryArtifact
+            db.add(
+                StoryArtifact(
+                    story_id=story.id, lane_id=lane.id, node_id=current.id, artifact_type="story_test_report",
+                    title="Test Report", content_markdown="## Test Evidence\nPass: 1 · Fail: 0\n", version_number=1,
+                    created_by_id=actor.id,
+                )
+            )
+            db.flush()
+        elif current.node_key == "IMPLEMENTATION_PLAN":
+            # Story Implementation Plan Agent, rule 4 — accepting the plan
+            # requires a real one to exist first. Fabricated directly.
+            from app.models import StoryArtifact
+            db.add(
+                StoryArtifact(
+                    story_id=story.id, lane_id=lane.id, node_id=current.id, artifact_type="story_implementation_plan",
+                    title="Implementation Plan", content_markdown="## Implementation Summary\nPlan.\n", version_number=1,
+                    created_by_id=actor.id,
+                )
+            )
+            db.flush()
+        # Final Done gate (app/services/story_done_gate.py) additionally
+        # requires Jira sync / Test Scenarios / a PR / a completed PR
+        # review / a QA-approved StoryTestExecution — fabricated here too.
+        fabricate_done_gate_prereqs(db, project=project, story=story, lane=lane, node=current, actor=actor)
         update_lane_node_status(current.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=actor.id), db)
 
     lane_after = get_story_delivery_lane(story.id, db)
@@ -202,6 +254,80 @@ def test_completing_the_final_node_completes_the_lane_and_marks_the_story_done(d
     from app.models import Story
     story_row = db.get(Story, story.id)
     assert story_row.status == StoryStatus.DONE
+
+
+def _drive_to_release_ready(db, project, actor):
+    """Runs a fresh story's lane up to (but not including) completing its
+    final RELEASE_READY node — shared setup for the Done-approval-gate
+    tests below."""
+    _approved_project(db, project, actor)
+    story = _create_direct_story(db, project, actor)
+    create_story_lane(story.id, CreateStoryLaneRequest(triggered_by_user_id=actor.id), db)
+    lane = get_story_delivery_lane(story.id, db)
+
+    for _ in range(len(DEFAULT_STORY_DELIVERY_NODES) - 1):
+        nodes = list_lane_nodes(lane.id, db)
+        current = next(n for n in nodes if n.status == StoryDeliveryNodeStatus.READY)
+        if current.node_key == "QA_APPROVAL":
+            from app.models import StoryArtifact
+
+            db.add(
+                StoryArtifact(
+                    story_id=story.id, lane_id=lane.id, node_id=current.id, artifact_type="story_test_report",
+                    title="Test Report", content_markdown="## Test Evidence\nPass: 1 · Fail: 0\n", version_number=1,
+                    created_by_id=actor.id,
+                )
+            )
+            db.flush()
+        elif current.node_key == "IMPLEMENTATION_PLAN":
+            from app.models import StoryArtifact
+
+            db.add(
+                StoryArtifact(
+                    story_id=story.id, lane_id=lane.id, node_id=current.id, artifact_type="story_implementation_plan",
+                    title="Implementation Plan", content_markdown="## Implementation Summary\nPlan.\n", version_number=1,
+                    created_by_id=actor.id,
+                )
+            )
+            db.flush()
+        fabricate_done_gate_prereqs(db, project=project, story=story, lane=lane, node=current, actor=actor)
+        update_lane_node_status(current.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=actor.id), db)
+
+    nodes = list_lane_nodes(lane.id, db)
+    release_ready_node = next(n for n in nodes if n.node_key == "RELEASE_READY")
+    assert release_ready_node.status == StoryDeliveryNodeStatus.READY
+    return story, lane, release_ready_node
+
+
+def test_a_non_product_owner_cannot_mark_a_story_done(db, project, actor):
+    """Rule 8 — "Human approval is required before final Done." Before
+    this gate existed, any role could complete RELEASE_READY (and so
+    mark the story DONE) with a single PATCH."""
+    story, lane, release_ready_node = _drive_to_release_ready(db, project, actor)
+    developer = User(email=f"{uuid.uuid4()}@example.com", full_name="Dev", role=UserRole.DEVELOPER)
+    db.add(developer)
+    db.flush()
+
+    with pytest.raises(HTTPException) as exc_info:
+        update_lane_node_status(release_ready_node.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=developer.id), db)
+    assert exc_info.value.status_code == 403
+
+    from app.models import Story
+
+    assert db.get(Story, story.id).status != StoryStatus.DONE
+
+
+def test_a_product_owner_can_mark_a_story_done(db, project, actor):
+    story, lane, release_ready_node = _drive_to_release_ready(db, project, actor)
+    product_owner = User(email=f"{uuid.uuid4()}@example.com", full_name="PO", role=UserRole.PRODUCT_OWNER)
+    db.add(product_owner)
+    db.flush()
+
+    update_lane_node_status(release_ready_node.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=product_owner.id), db)
+
+    from app.models import Story
+
+    assert db.get(Story, story.id).status == StoryStatus.DONE
 
 
 def test_blocking_a_node_records_the_reason(db, project, actor):

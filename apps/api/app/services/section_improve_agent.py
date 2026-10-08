@@ -32,9 +32,12 @@ from app.models import (
     ArtifactVersion,
     User,
 )
+from app.services.agent_context_builder import build_engineering_setup_context, infer_agent_context_type
 from app.services.ai_generation import AIGenerationError, generate
+from app.services.artifact_assist import latest_freeform_input
 from app.services.audit import record_audit_log
 from app.services.graph_engine import GraphEngineService
+from app.services.intake_text_condenser import condense_freeform_context
 from app.services.markdown_sections import find_section, has_real_sections
 from app.services.retrieval import retrieve_relevant_chunks
 from app.services.revision_agent import merge_section_revisions
@@ -56,8 +59,15 @@ class SectionImproveResult:
     section_updated: str | None = None
 
 
+_REGENERATE_INSTRUCTION = (
+    "Regenerate this section from scratch. Write a fresh version of it using the original request and any "
+    "clarification answers provided, plus the approved upstream inputs. Do not just polish the existing wording. "
+    "Change nothing outside this section."
+)
+
+
 def run_section_improve_agent(
-    db: Session, *, artifact: Artifact, section_title: str, instruction: str, triggered_by: User,
+    db: Session, *, artifact: Artifact, section_title: str, instruction: str, triggered_by: User, mode: str = "improve",
 ) -> SectionImproveResult:
     """Revise exactly `section_title` in `artifact`'s current version,
     per `instruction`. Preconditions are raised as SectionImproveAgentError
@@ -118,7 +128,7 @@ def run_section_improve_agent(
         triggered_by_user=triggered_by,
         action=AgentPromptRole.IMPROVE,
         status=AgentRunStatus.RUNNING,
-        input_context={"target_section": section_title, "instruction": instruction},
+        input_context={"target_section": section_title, "instruction": instruction, "mode": mode},
         input_artifact_ids=[str(artifact.id)],
         started_at=now,
         context_token_budget=node.context_token_budget,
@@ -130,7 +140,7 @@ def run_section_improve_agent(
     record_audit_log(
         db, project_id=project.id, actor_user_id=triggered_by.id, action="agent_run.started",
         entity_type="AgentRun", entity_id=run.id,
-        extra_data={"agent_key": agent.agent_key, "workflow_node": node.node_key, "action": "improve_section", "section_title": section_title},
+        extra_data={"agent_key": agent.agent_key, "workflow_node": node.node_key, "action": f"{mode}_section", "section_title": section_title},
     )
 
     def _fail(reason: str) -> SectionImproveResult:
@@ -142,6 +152,14 @@ def run_section_improve_agent(
             extra_data={"error": reason},
         )
         return SectionImproveResult(agent_run=run)
+
+    # Regenerate rewrites from the user's original request, so give the model
+    # that input (condensed if it is very long); a plain improve pass works
+    # from the existing text and the upstream artifacts only, as before.
+    freeform_context: dict = {}
+    if mode == "regenerate":
+        freeform_context, _ = condense_freeform_context(latest_freeform_input(db, node), context_token_budget=node.context_token_budget)
+        instruction = _REGENERATE_INSTRUCTION + (f"\nExtra guidance from the user: {instruction}" if instruction.strip() else "")
 
     graph_engine = GraphEngineService(db)
     # Read-only, best-effort context — never blocks (same as revision_agent.py).
@@ -159,13 +177,28 @@ def run_section_improve_agent(
         for c in retrieved_chunks
     ]
 
+    # Project Engineering Setup rule 6, extended to this path too — an
+    # "Improve section" run is a real IMPROVE run, not a lesser one, and
+    # previously got no coding-standards/guardrails/stack context at all
+    # (only app/api/routes/agent_runs.py's generic Draft/Improve/Validate
+    # action wired this in). A project with no engineering setup is
+    # untouched (rule 10).
+    engineering_setup = build_engineering_setup_context(
+        db, project=project, agent_type=infer_agent_context_type(node.node_key),
+        output_token_budget=max(500, (node.context_token_budget or 8000) // 4),
+    )
+    if engineering_setup.context_text:
+        inputs.approved_artifact_content["project_engineering_setup"] = engineering_setup.context_text
+        inputs.approved_artifact_summaries["project_engineering_setup"] = engineering_setup.context_text
+        run.engineering_setup_context_snapshot = engineering_setup.snapshot
+
     graph_engine.mark_running(node)
 
     try:
         result = generate(
             project=project, node=node, action=AgentPromptRole.IMPROVE, active_prompt=active_prompt,
             approved_artifact_content=inputs.approved_artifact_content, approved_artifact_summaries=inputs.approved_artifact_summaries,
-            freeform_context={}, context_token_budget=node.context_token_budget, output_token_budget=node.output_token_budget,
+            freeform_context=freeform_context, context_token_budget=node.context_token_budget, output_token_budget=node.output_token_budget,
             full_content_artifact_types=set(node.full_content_artifact_types), retrieved_chunks=retrieved_chunks,
             # Same "[Section: ...] <feedback>" convention revision_agent.py
             # uses for reviewer comments — the model already knows how to
@@ -214,7 +247,9 @@ def run_section_improve_agent(
 
     new_version = ArtifactVersion(
         artifact=artifact, version_number=next_version_number, content_markdown=merged_markdown, created_by=triggered_by,
-        change_summary=f'Improved section "{section_title}" via agent instruction.',
+        change_summary=(
+            f'Regenerated section "{section_title}".' if mode == "regenerate" else f'Improved section "{section_title}" via agent instruction.'
+        ),
     )
     db.add(new_version)
     db.flush()

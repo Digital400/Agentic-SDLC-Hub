@@ -6,12 +6,17 @@ import type { WorkflowStatus } from "@agentic-sdlc-hub/shared";
 // generated from these shapes.
 
 export type ProjectStatus = "ACTIVE" | "COMPLETED" | "ARCHIVED";
+/** Selected once, at project creation — decides which workflow template
+ * generates the project's graph (see apps/api/app/models/enums.py's
+ * WorkType docstring). NEW_PROJECT keeps the full default SDLC template;
+ * the other three all use the existing-project feature template. */
+export type WorkType = "NEW_PROJECT" | "EXISTING_PROJECT_FEATURE" | "BUG_FIX" | "TECHNICAL_IMPROVEMENT";
 export type ReviewStatus = "PENDING" | "APPROVED" | "NEEDS_CHANGES" | "REJECTED";
 export type AgentRunStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
 /** An artifact's own review lifecycle — distinct from WorkflowStatus, which
  * tracks its owning WorkflowNode's broader lifecycle. */
 export type ArtifactStatus = "DRAFT" | "READY_FOR_REVIEW" | "APPROVED" | "NEEDS_CHANGES" | "REJECTED";
-export type KnowledgeSourceType = "PROJECT_ARTIFACT" | "UPLOADED_DOCUMENT" | "EXTERNAL_LINK";
+export type KnowledgeSourceType = "PROJECT_ARTIFACT" | "UPLOADED_DOCUMENT" | "EXTERNAL_LINK" | "MANUAL_ENTRY";
 /** A knowledge source's ingestion lifecycle — a real upload (see
  * apps/api/app/services/document_ingestion.py) goes straight to INDEXED,
  * since every chunk is embedded before the upload call returns. */
@@ -34,6 +39,7 @@ export interface Project {
   /** node_key of the workflow node this project is currently on. */
   currentStage: string;
   status: ProjectStatus;
+  workType: WorkType;
   workflowTemplateId: string;
   createdAt: string;
   updatedAt: string;
@@ -116,9 +122,14 @@ export type ImplementationTaskStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED" |
 export interface ImplementationTaskItem {
   id: string;
   projectId: string;
-  workflowNodeId: string;
-  artifactId: string;
-  artifactVersionId: string;
+  storyId: string | null;
+  workflowNodeId: string | null;
+  artifactId: string | null;
+  artifactVersionId: string | null;
+  /** Multi-repo support — which of the project's (possibly several)
+   * connected repositories this task's code changes target. Null means
+   * "use the project's primary repository" — see GithubRepositoryItem.isPrimary. */
+  repositoryId: string | null;
   title: string;
   description: string;
   linkedStory: string | null;
@@ -172,10 +183,14 @@ export type PullRequestStatus = "OPEN" | "MERGED" | "CLOSED";
 export interface PullRequestLinkItem {
   id: string;
   projectId: string;
-  workflowNodeId: string;
+  workflowNodeId: string | null;
   implementationTaskId: string;
   implementationRunId: string;
   repositoryId: string;
+  storyId: string | null;
+  laneId: string | null;
+  codeRunId: string | null;
+  jiraIssueKey: string | null;
   branchName: string;
   baseBranch: string;
   prNumber: number;
@@ -238,14 +253,18 @@ export interface TestExecutedItem {
 export interface TestRunItem {
   id: string;
   projectId: string;
-  workflowNodeId: string;
+  workflowNodeId: string | null;
   implementationTaskId: string;
   implementationRunId: string;
   pullRequestLinkId: string | null;
+  storyId: string | null;
+  laneId: string | null;
   artifactId: string | null;
   artifactVersionId: string | null;
+  storyArtifactId: string | null;
   triggeredByUserId: string | null;
   agentType: TestAgentType;
+  testAgentKey: string | null;
   status: TestRunStatus;
   testPlan: string;
   testsToAdd: TestToAddItem[];
@@ -255,6 +274,7 @@ export interface TestRunItem {
   bugsFound: string[];
   suggestedFixes: string[];
   coverageImpact: Record<string, string>;
+  evidenceAttachments: string[];
   usedMock: boolean;
   tokenUsage: Record<string, number> | null;
   cost: number | null;
@@ -322,10 +342,11 @@ export interface PostedCommentItem {
 export interface PRReviewRunItem {
   id: string;
   projectId: string;
-  workflowNodeId: string;
+  workflowNodeId: string | null; // null for a story-scoped run
   implementationTaskId: string;
   implementationRunId: string;
   pullRequestLinkId: string;
+  storyId: string | null;
   triggeredByUserId: string | null;
   status: PRReviewRunStatus;
   overallRecommendation: PRReviewRecommendation | null;
@@ -334,6 +355,7 @@ export interface PRReviewRunItem {
   majorFindings: FindingItem[];
   minorFindings: FindingItem[];
   missingTests: string[];
+  unrelatedChanges: string[];
   suggestedComments: SuggestedCommentItem[];
   riskScore: number | null;
   finalReviewerNote: string;
@@ -361,6 +383,11 @@ export interface ArtifactSection {
   id: string;
   title: string;
   contentMarkdown: string;
+  /** True only for the synthesized leading "Content" section — a title
+   * that never actually appeared in the source document (see
+   * lib/markdown-sections.ts's splitMarkdownIntoSections). Undefined/
+   * falsy for every real `##`-heading section. */
+  isSynthetic?: boolean;
 }
 
 export interface ArtifactVersionSummary {
@@ -898,6 +925,10 @@ export interface GithubRepositoryItem {
   description: string | null;
   htmlUrl: string | null;
   isPrivate: boolean | null;
+  /** Multi-repo support — the repo a task uses by default when it doesn't
+   * explicitly target one of the project's (possibly several) other
+   * connected repositories. Exactly one per project. */
+  isPrimary: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -962,6 +993,16 @@ export interface RepositoryFileIndexItem {
   entryType: RepositoryFileEntryType;
   size: number | null;
   sha: string;
+}
+
+// A hand-edited file committed directly through the repository file editor
+// (see apps/api/app/api/routes/repository_file_edit.py) — always on a new
+// branch, never the repository's default branch.
+export interface CommitFileEditResult {
+  branchName: string;
+  baseBranch: string;
+  commitSha: string;
+  pullRequestUrl: string | null;
 }
 
 // Repo Context Builder preview — see apps/api/app/services/repo_context_builder.py.

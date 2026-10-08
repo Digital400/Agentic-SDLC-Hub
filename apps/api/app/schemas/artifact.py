@@ -1,8 +1,8 @@
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import model_validator, BaseModel, ConfigDict, Field
 
 from app.models.enums import ArtifactStatus
 from app.schemas.agent_run import AgentRunRead
@@ -125,8 +125,20 @@ class ImproveSectionRequest(BaseModel):
     real `##` heading in the artifact's current version."""
 
     section_title: NonBlankStr
-    instruction: NonBlankStr = Field(..., description="What should change in this section.")
+    # For mode "regenerate" this is optional extra guidance (may be blank).
+    instruction: str = Field(default="", description="What should change in this section.")
     triggered_by_user_id: uuid.UUID = Field(..., description="Existing user id.")
+    # "improve" polishes the existing text per the instruction; "regenerate"
+    # rewrites the section from scratch using the stage's original request
+    # (and any clarification answers), treating `instruction` as optional
+    # extra guidance. Either way only this one section can change.
+    mode: Literal["improve", "regenerate"] = "improve"
+
+    @model_validator(mode="after")
+    def _instruction_required_for_improve(self) -> "ImproveSectionRequest":
+        if self.mode == "improve" and not self.instruction.strip():
+            raise ValueError("instruction is required when mode is 'improve'")
+        return self
 
 
 class ImproveSectionResponse(BaseModel):
@@ -151,3 +163,36 @@ class ArtifactContentUpdate(BaseModel):
     edited_by_id: uuid.UUID = Field(
         ..., description="Existing user id — checked against app/services/permissions.py's stage-edit rule."
     )
+
+
+# --- Summarize changes / Ask questions (read-only) ---------------------------------------
+
+
+class SectionChangeRead(BaseModel):
+    title: str
+    kind: Literal["added", "removed", "changed"]
+    added_lines: list[str]
+    removed_lines: list[str]
+    added_line_count: int
+    removed_line_count: int
+
+
+class ChangeSummaryRead(BaseModel):
+    from_version: int | None
+    to_version: int
+    headline: str
+    is_first_version: bool
+    changes: list[SectionChangeRead]
+    change_note: str | None
+
+
+class AskQuestionRequest(BaseModel):
+    question: NonBlankStr = Field(..., max_length=2000)
+    triggered_by_user_id: uuid.UUID = Field(..., description="Existing user id.")
+
+
+class AskQuestionResponse(BaseModel):
+    answer: str
+    sources: list[str]
+    used_mock: bool
+    truncated: bool

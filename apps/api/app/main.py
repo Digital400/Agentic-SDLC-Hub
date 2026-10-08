@@ -7,21 +7,29 @@ from app.api.routes import (
     agent_definitions,
     agent_runs,
     artifacts,
+    code_runs,
     confluence_integration,
     github_integration,
     health,
     implementation_runs,
+    implementation_tasks,
     integrations,
     jira_integration,
     knowledge,
     maintenance_runs,
     ops,
     pr_review_runs,
+    project_engineering_setup,
     projects,
     prompts,
+    releases,
+    coding_tools,
+    repo_bootstrap,
+    repository_file_edit,
     reviews,
     sprints,
     stories,
+    story_test_executions,
     test_runs,
     users,
     validators,
@@ -55,6 +63,7 @@ async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSON
 
 app.include_router(health.router, tags=["health"])
 app.include_router(projects.router)
+app.include_router(project_engineering_setup.router)
 app.include_router(artifacts.router)
 app.include_router(reviews.router)
 app.include_router(prompts.router)
@@ -63,14 +72,21 @@ app.include_router(agent_definitions.router)
 app.include_router(knowledge.router)
 app.include_router(integrations.router)
 app.include_router(github_integration.router)
+app.include_router(coding_tools.router)
+app.include_router(repo_bootstrap.router)
+app.include_router(repository_file_edit.router)
 app.include_router(jira_integration.router)
 app.include_router(confluence_integration.router)
 app.include_router(implementation_runs.router)
+app.include_router(implementation_tasks.router)
+app.include_router(code_runs.router)
 app.include_router(test_runs.router)
 app.include_router(pr_review_runs.router)
 app.include_router(maintenance_runs.router)
 app.include_router(stories.router)
+app.include_router(story_test_executions.router)
 app.include_router(sprints.router)
+app.include_router(releases.router)
 app.include_router(ops.router)
 app.include_router(users.router)
 app.include_router(validators.router)

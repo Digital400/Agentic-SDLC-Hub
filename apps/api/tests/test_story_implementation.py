@@ -114,6 +114,24 @@ def _story_with_lane(db, project, actor, *, approve_lld: bool):
     if approve_lld:
         tech_lead = _tech_lead(db)
         update_lane_node_status(nodes["LLD_REVIEW"].id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=tech_lead.id), db)
+        # IMPLEMENTATION_PLAN now sits between LLD_REVIEW and IMPLEMENTATION
+        # (see app/services/story_delivery.py) — its completion is what
+        # actually unlocks IMPLEMENTATION and triggers
+        # _ensure_story_implementation_task, not LLD_REVIEW's directly.
+        # Accepting it (Story Implementation Plan Agent, rule 4) requires a
+        # real plan to exist first — fabricated directly here, same
+        # convention as QA_APPROVAL's own evidence-artifact stub elsewhere
+        # in this suite.
+        from app.models import StoryArtifact
+        db.add(
+            StoryArtifact(
+                story_id=story.id, lane_id=lane.id, node_id=nodes["IMPLEMENTATION_PLAN"].id,
+                artifact_type="story_implementation_plan", title="Implementation Plan", content_markdown="## Implementation Summary\nPlan.\n",
+                version_number=1, created_by_id=tech_lead.id,
+            )
+        )
+        db.flush()
+        update_lane_node_status(nodes["IMPLEMENTATION_PLAN"].id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=tech_lead.id), db)
 
     story_row = db.get(Story, story.id)
     return story_row, lane, nodes, lld_result.story_artifact
@@ -126,8 +144,9 @@ def test_implementation_task_is_not_created_until_lld_review_approves(db, projec
 
 def test_implementation_task_auto_created_once_story_lld_is_approved(db, project, actor):
     """Requirement 1 — implementation belongs to exactly this story's own
-    delivery lane; created automatically the moment LLD_REVIEW approves,
-    with no real WorkflowNode/Artifact backing it (both nullable now)."""
+    delivery lane; created automatically the moment IMPLEMENTATION_PLAN
+    completes (right after LLD_REVIEW approves it), with no real
+    WorkflowNode/Artifact backing it (both nullable now)."""
     story_row, lane, nodes, lld_artifact = _story_with_lane(db, project, actor, approve_lld=True)
     task = db.query(ImplementationTask).filter(ImplementationTask.story_id == story_row.id).first()
     assert task is not None

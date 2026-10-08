@@ -14,8 +14,15 @@ import { Select } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { formatCost, formatRelativeTime, formatSnakeCase } from "@/lib/format";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, type ApiProviderOverride } from "@/lib/api";
+import { buildQuickPicks, parseQuickPickValue, quickPickValue, useProviderOptions } from "@/lib/use-provider-options";
+import { ModelOverrideInput } from "@/components/model-override-input";
 import { runAgentAndApply } from "@/lib/run-agent";
+import { ValidationVerdictCard } from "@/components/documents/validation-verdict-card";
+import { readVerdict, type ValidationVerdict } from "@/lib/validation-verdict";
+import { CODING_TOOL_STAGE_KEYS, CodingToolPanel } from "@/components/workflow/coding-tool-panel";
+import { LargeTextInput } from "@/components/documents/large-text-input";
+import { clearDraft, describeCondensation, exceedsInputLimit, readCondensation } from "@/lib/intake-text";
 import type { AgentRunDetail, DocumentArtifact, ProjectWorkflowNode, ReviewItem, ValidatorDefinitionItem } from "@/lib/types";
 
 type AgentAction = "draft" | "improve" | "validate";
@@ -66,6 +73,10 @@ export function NodeDetailsPanel({
   const requiredArtifacts = node.requiredInputs.filter((input) => !freeformInputKeys.includes(input));
 
   const [action, setAction] = useState<AgentAction>("draft");
+  // Empty string = "project default" — see agent-actions-panel.tsx's own copy of this field.
+  const [providerOverride, setProviderOverride] = useState<ApiProviderOverride | "">("");
+  const [modelOverride, setModelOverride] = useState("");
+  const { options: providerOptions } = useProviderOptions(projectId);
   const [freeformValues, setFreeformValues] = useState<Record<string, string>>({});
   // Scrum story lanes, requirement 2 — the one deliberately special-cased
   // extra control on this stage (see app/db/seed.py's story_crafting
@@ -80,6 +91,8 @@ export function NodeDetailsPanel({
   const isStoryCrafting = node.nodeKey === "story_crafting";
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [condensedNote, setCondensedNote] = useState<{ text: string; artifactId: string } | null>(null);
+  const [verdict, setVerdict] = useState<{ verdict: ValidationVerdict; artifactId: string } | null>(null);
 
   const [overrideStatus, setOverrideStatus] = useState<WorkflowStatus>(node.status);
   const [overrideReason, setOverrideReason] = useState("");
@@ -94,12 +107,16 @@ export function NodeDetailsPanel({
     }
     setRunning(true);
     setError(null);
+    setCondensedNote(null);
+    setVerdict(null);
     try {
       const { run, saved } = await runAgentAndApply({
         projectId,
         workflowNodeId: node.id,
         action,
         triggeredByUserId: currentUserId,
+        providerOverride: providerOverride || undefined,
+        modelOverride: modelOverride.trim() || undefined,
         inputContext: isStoryCrafting
           ? {
               ...freeformValues,
@@ -111,6 +128,22 @@ export function NodeDetailsPanel({
       });
       if (run.status !== "COMPLETED" || saved === null) {
         setError(run.error_message ?? "The run did not complete.");
+        return;
+      }
+      // Validate judges the draft and changes nothing — show the verdict here
+      // instead of jumping away from it.
+      const runVerdict = readVerdict(run);
+      if (runVerdict) {
+        setVerdict({ verdict: runVerdict, artifactId: saved.artifactId });
+        router.refresh();
+        return;
+      }
+      for (const key of freeformInputKeys) clearDraft(`${projectId}:${node.id}:${key}`);
+      // A long input is condensed server-side; tell the user before moving on
+      // rather than redirecting straight past that.
+      const condensation = readCondensation(run.token_budget_report);
+      if (condensation) {
+        setCondensedNote({ text: describeCondensation(condensation), artifactId: saved.artifactId });
         return;
       }
       router.push(`/documents/${saved.artifactId}`);
@@ -245,6 +278,29 @@ export function NodeDetailsPanel({
                 <option value="improve">Improve</option>
                 <option value="validate">Validate</option>
               </Select>
+              <Select
+                value={providerOverride ? quickPickValue(providerOverride, modelOverride || null) : ""}
+                onChange={(e) => {
+                  if (e.target.value === "") {
+                    setProviderOverride("");
+                    setModelOverride("");
+                    return;
+                  }
+                  const { provider, model } = parseQuickPickValue(e.target.value);
+                  setProviderOverride(provider);
+                  setModelOverride(model ?? "");
+                }}
+                className="mb-2 text-xs"
+                title="Which LLM/model runs this one call — leave on Default to use the project's configured provider. A known model (e.g. claude-sonnet-5) is its own row; anything else can still be typed in the Model field below."
+              >
+                <option value="">LLM: Default (project-configured)</option>
+                {buildQuickPicks(providerOptions).map((p) => (
+                  <option key={p.value} value={p.value} disabled={!p.configured} title={p.unavailable_reason ?? undefined}>
+                    LLM: {p.label}
+                  </option>
+                ))}
+              </Select>
+              <ModelOverrideInput provider={providerOverride} providerOptions={providerOptions} value={modelOverride} onChange={setModelOverride} />
               {isStoryCrafting && (
                 <div className="mb-2">
                   <Select
@@ -271,22 +327,54 @@ export function NodeDetailsPanel({
                 </div>
               )}
               {freeformInputKeys.map((key) => (
-                <Textarea
+                <LargeTextInput
                   key={key}
-                  placeholder={key.replace(/_/g, " ")}
+                  label={key}
+                  storageKey={`${projectId}:${node.id}:${key}`}
                   value={freeformValues[key] ?? ""}
-                  onChange={(e) => setFreeformValues((prev) => ({ ...prev, [key]: e.target.value }))}
-                  rows={2}
-                  className="mb-2 text-xs"
+                  onChange={(v) => setFreeformValues((prev) => ({ ...prev, [key]: v }))}
+                  disabled={running}
                 />
               ))}
-              <Button size="sm" className="w-full" onClick={handleRun} disabled={running}>
+              <Button size="sm" className="w-full" onClick={handleRun} disabled={running || exceedsInputLimit(freeformValues)}>
                 {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlayCircle className="h-3.5 w-3.5" />}
                 {running ? "Running…" : "Run Agent"}
               </Button>
+              {running ? (
+                <p className="mt-2 text-xs text-muted-foreground" aria-live="polite">
+                  Working… a long request is condensed first, which can take a minute.
+                </p>
+              ) : null}
               {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
+              {verdict ? (
+                <div>
+                  <ValidationVerdictCard verdict={verdict.verdict} />
+                  <Button size="sm" variant="outline" className="mt-2" onClick={() => router.push(`/documents/${verdict.artifactId}`)}>
+                    Open the document
+                  </Button>
+                </div>
+              ) : null}
+              {condensedNote ? (
+                <div className="mt-2 rounded-md border border-amber-400/60 bg-amber-50 p-2 text-xs dark:border-amber-900 dark:bg-amber-950/30">
+                  <p>{condensedNote.text}</p>
+                  <Button size="sm" className="mt-2" onClick={() => router.push(`/documents/${condensedNote.artifactId}`)}>
+                    Open the document
+                  </Button>
+                </div>
+              ) : null}
             </div>
           )}
+          {/* Shown whether or not a document already exists, so a stage can also be (re)done in a coding tool.
+              Kept in sync by hand with STAGE_SPECS in apps/api/app/services/coding_tool_skills.py. */}
+          {CODING_TOOL_STAGE_KEYS.has(node.nodeKey) && node.status !== "LOCKED" ? (
+            <CodingToolPanel
+              projectId={projectId}
+              stage={node.nodeKey}
+              stageTitle={node.name}
+              currentUserId={currentUserId}
+              onSynced={(r) => router.push(`/documents/${r.artifact_id}`)}
+            />
+          ) : null}
         </section>
 
         <Separator />

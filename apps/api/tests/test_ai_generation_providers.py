@@ -11,14 +11,29 @@ import pytest
 
 from app.core.config import Settings
 from app.services import ai_generation
-from app.services.ai_generation import AIGenerationError, _generate_with_nvidia, _generate_with_openrouter
+from app.services.ai_generation import AIGenerationError, _generate_with_huggingface, _generate_with_nvidia, _generate_with_openrouter, generate_raw_text, use_model_override
 
 
 def _settings(**overrides) -> SimpleNamespace:
     """A lightweight stand-in for Settings — real Settings is a pydantic
     BaseSettings that reads the environment at construction time, so tests
-    override just the fields they care about rather than mutate env vars."""
+    override just the fields they care about rather than mutate env vars.
+
+    Every provider API key defaults to None here REGARDLESS of what a
+    developer's own real apps/api/.env has configured — this is the exact
+    same class of bug conftest.py's own `_claude_agent_sdk_disabled_by_default`
+    fixture already fixed once for CLAUDE_AGENT_SDK_ENABLED ("confirmed:
+    this broke ~65 unrelated tests the moment a developer's own .env turned
+    it on"), just not yet applied to this file's own independent settings
+    stand-in: a real ANTHROPIC_API_KEY/GEMINI_API_KEY/etc. in .env was
+    silently leaking into every test here that didn't explicitly override
+    it, since get_active_provider() checks Anthropic first — a test meant
+    to exercise OpenRouter/NVIDIA/Hugging Face/Ollama would instead select
+    "anthropic" and fire a REAL network call with whatever real key the
+    developer had configured locally."""
     base = Settings().model_dump()
+    for key_field in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "NVIDIA_API_KEY", "HUGGINGFACE_API_KEY"):
+        base[key_field] = None
     base.update(overrides)
     return SimpleNamespace(**base)
 
@@ -62,7 +77,10 @@ def test_gemini_still_wins_over_openrouter_and_nvidia(monkeypatch):
 
 
 def test_falls_through_to_ollama_when_nothing_hosted_is_set(monkeypatch):
-    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(ANTHROPIC_API_KEY=None, GEMINI_API_KEY=None, OPENROUTER_API_KEY=None, NVIDIA_API_KEY=None))
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(ANTHROPIC_API_KEY=None, GEMINI_API_KEY=None, OPENROUTER_API_KEY=None, NVIDIA_API_KEY=None, HUGGINGFACE_API_KEY=None),
+    )
     _fake_ollama_client(monkeypatch)
     assert ai_generation.get_active_provider() == "ollama"
 
@@ -91,6 +109,82 @@ def test_falls_through_to_ollama_when_nvidia_is_unreachable(monkeypatch):
     monkeypatch.setattr(ai_generation, "_openai_compatible_endpoint_is_reachable", lambda base_url, api_key: False)
     _fake_ollama_client(monkeypatch)
     assert ai_generation.get_active_provider() == "ollama"
+
+
+def test_huggingface_key_wins_over_ollama_when_available_and_reachable_and_others_unset(monkeypatch):
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(ANTHROPIC_API_KEY=None, GEMINI_API_KEY=None, OPENROUTER_API_KEY=None, NVIDIA_API_KEY=None, HUGGINGFACE_API_KEY="hf_fake"),
+    )
+    monkeypatch.setattr(ai_generation, "_openai_compatible_endpoint_is_reachable", lambda base_url, api_key: True)
+    assert ai_generation.get_active_provider() == "huggingface"
+
+
+def test_nvidia_wins_over_huggingface_when_both_are_set_and_reachable(monkeypatch):
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(ANTHROPIC_API_KEY=None, GEMINI_API_KEY=None, OPENROUTER_API_KEY=None, NVIDIA_API_KEY="nvapi-fake", HUGGINGFACE_API_KEY="hf_fake"),
+    )
+    monkeypatch.setattr(ai_generation, "_openai_compatible_endpoint_is_reachable", lambda base_url, api_key: True)
+    assert ai_generation.get_active_provider() == "nvidia"
+
+
+def test_falls_through_to_ollama_when_huggingface_is_unreachable(monkeypatch):
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(ANTHROPIC_API_KEY=None, GEMINI_API_KEY=None, OPENROUTER_API_KEY=None, NVIDIA_API_KEY=None, HUGGINGFACE_API_KEY="hf_fake"),
+    )
+    monkeypatch.setattr(ai_generation, "_openai_compatible_endpoint_is_reachable", lambda base_url, api_key: False)
+    _fake_ollama_client(monkeypatch)
+    assert ai_generation.get_active_provider() == "ollama"
+
+
+# --- _generate_with_huggingface -----------------------------------------------------------
+
+
+def test_generate_with_huggingface_parses_content_and_usage(monkeypatch):
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(HUGGINGFACE_API_KEY="hf_realsecret", HUGGINGFACE_MODEL="Qwen/Qwen2.5-Coder-32B-Instruct", HUGGINGFACE_BASE_URL="https://router.huggingface.co/v1"),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == "https://router.huggingface.co/v1/chat/completions"
+        assert request.headers["authorization"] == "Bearer hf_realsecret"
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "{}\n---\nHello from Hugging Face."}}],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    result = _generate_with_huggingface("system", "user", 512)
+
+    assert "Hello from Hugging Face." in result.content_markdown
+    assert result.prompt_tokens == 8
+    assert result.completion_tokens == 4
+    assert result.total_tokens == 12
+    assert result.cost == 0.0
+    assert result.used_mock is False
+
+
+def test_generate_with_huggingface_raises_ai_generation_error_on_http_failure_and_never_leaks_the_key(monkeypatch):
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(HUGGINGFACE_API_KEY="hf_realsecret", HUGGINGFACE_MODEL="Qwen/Qwen2.5-Coder-32B-Instruct", HUGGINGFACE_BASE_URL="https://router.huggingface.co/v1"),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "invalid api key"})
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    with pytest.raises(AIGenerationError) as exc_info:
+        _generate_with_huggingface("system", "user", 512)
+    assert "hf_realsecret" not in str(exc_info.value)
 
 
 def test_reachability_check_never_blocks_on_a_hung_connection(monkeypatch):
@@ -222,3 +316,515 @@ def test_generate_with_nvidia_raises_ai_generation_error_on_http_failure_and_nev
     with pytest.raises(AIGenerationError) as exc_info:
         _generate_with_nvidia("system", "user", 512)
     assert "nvapi-realsecret" not in str(exc_info.value)
+
+
+# --- truncation detection/disclosure ------------------------------------------------------
+# Regression coverage for the failure mode that silently cut a 15-story
+# backlog off after 4 stories with zero visible explanation: the output
+# token budget was hit, but nothing in the persisted document said so.
+
+
+def test_generate_with_openrouter_flags_truncation_on_finish_reason_length(monkeypatch):
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "{}\n---\nPartial content that got cut off"}, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+    result = _generate_with_openrouter("system", "user", 512)
+    assert result.truncated is True
+
+
+def test_generate_with_nvidia_does_not_flag_truncation_on_a_normal_stop(monkeypatch):
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(NVIDIA_API_KEY="nvapi-fake"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "{}\n---\nA complete answer"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+    result = _generate_with_nvidia("system", "user", 512)
+    assert result.truncated is False
+
+
+def test_append_truncation_warning_names_the_budget_and_the_fix():
+    warned = ai_generation._append_truncation_warning("Some cut-off draft", 2048)
+    assert "Some cut-off draft" in warned
+    assert "2048" in warned
+    assert "outputTokenBudget" in warned
+
+
+def test_generate_raw_text_raises_instead_of_returning_truncated_json(monkeypatch):
+    """Regression test for the bug behind a persistent, hard-to-diagnose
+    "still mock" symptom: every generate_raw_text caller (implementation_agent,
+    pr_review_agent, testing_agent, implementation_planner, maintenance_agent)
+    expects a COMPLETE JSON/text response and either json.loads()s it directly
+    or treats it as finished prose. A truncated response used to come back as
+    ordinary content_markdown — the caller's json.loads() then failed with a
+    confusing "Unterminated string..." JSONDecodeError, silently caught by
+    that caller's own broad except-and-fall-back-to-heuristic block, with
+    nothing anywhere telling a human the model call was ever cut short.
+    generate_raw_text must now raise AIGenerationError itself so that failure
+    is at least attributable to truncation instead of masquerading as bad
+    JSON."""
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"proposed_file_changes": [{"path": "a.cs"'}, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    with pytest.raises(AIGenerationError) as exc_info:
+        generate_raw_text(system_prompt="system", user_content="user", output_token_budget=512)
+    assert "512" in str(exc_info.value)
+    assert "truncat" in str(exc_info.value).lower()
+
+
+# --- 429/503 retry (a free-tier hosted endpoint rate-limiting under -----------------
+# ordinary load is routine, not exceptional — see
+# _post_chat_completion_with_retry's own module-level docstring)
+
+
+def test_openrouter_retries_a_429_and_succeeds_on_the_next_attempt(monkeypatch):
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+    monkeypatch.setattr(ai_generation.time, "sleep", lambda seconds: None)  # don't actually wait in tests
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(429, json={"error": "rate limited"}, headers={"retry-after": "2"})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "{}\n---\nSecond attempt succeeded."}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+    result = _generate_with_openrouter("system", "user", 512)
+
+    assert len(calls) == 2
+    assert "Second attempt succeeded." in result.content_markdown
+
+
+def test_openrouter_gives_up_after_exhausting_retries_on_persistent_429(monkeypatch):
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+    monkeypatch.setattr(ai_generation.time, "sleep", lambda seconds: None)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(429, json={"error": "rate limited"})
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    with pytest.raises(AIGenerationError) as exc_info:
+        _generate_with_openrouter("system", "user", 512)
+    assert "429" in str(exc_info.value)
+    # Initial attempt + one retry per configured backoff step, no more.
+    assert len(calls) == 1 + len(ai_generation._RETRY_BACKOFF_SECONDS)
+
+
+def test_a_read_timeout_retries_once_and_succeeds_on_the_next_attempt(monkeypatch):
+    """Regression test: a genuine httpx.TimeoutException raises BEFORE any
+    response object exists, so a retry loop that only inspects
+    response.status_code (the 429/503 ladder above) never even sees it —
+    exactly the gap that let a real Hugging Face request time out and fail
+    a run on its very first attempt with no retry at all."""
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+    monkeypatch.setattr(ai_generation.time, "sleep", lambda seconds: None)
+    calls = []
+
+    def fake_post(url, *, headers, json, timeout):
+        calls.append(url)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("the read operation timed out")
+        request = httpx.Request("POST", url, headers=headers, json=json)
+        response = httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "{}\n---\nSucceeded after a timeout."}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+        )
+        response.request = request
+        return response
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    result = _generate_with_openrouter("system", "user", 512)
+
+    assert len(calls) == 2
+    assert "Succeeded after a timeout." in result.content_markdown
+
+
+def test_a_persistent_read_timeout_raises_after_one_retry(monkeypatch):
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+    monkeypatch.setattr(ai_generation.time, "sleep", lambda seconds: None)
+    calls = []
+
+    def fake_post(url, *, headers, json, timeout):
+        calls.append(url)
+        raise httpx.ReadTimeout("the read operation timed out")
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    with pytest.raises(AIGenerationError) as exc_info:
+        _generate_with_openrouter("system", "user", 512)
+    assert "timed out" in str(exc_info.value).lower()
+    # One initial attempt + exactly one retry for a timeout — not the full
+    # 429/503 backoff ladder, since each attempt can itself take the full
+    # request timeout.
+    assert len(calls) == 2
+
+
+def test_a_non_retryable_error_status_is_never_retried(monkeypatch):
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+    monkeypatch.setattr(ai_generation.time, "sleep", lambda seconds: (_ for _ in ()).throw(AssertionError("should not sleep/retry on a 401")))
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(401, json={"error": "invalid api key"})
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    with pytest.raises(AIGenerationError):
+        _generate_with_openrouter("system", "user", 512)
+    assert len(calls) == 1
+
+
+def test_generate_raw_text_returns_content_when_not_truncated(monkeypatch):
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(OPENROUTER_API_KEY="sk-or-fake"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"proposed_file_changes": []}'}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    result = generate_raw_text(system_prompt="system", user_content="user", output_token_budget=512)
+    assert result == '{"proposed_file_changes": []}'
+
+
+# --- Claude Agent SDK harness dispatch (project-level document stages) -----------------
+#
+# See app/services/claude_agent_harness.py's run_document_session — opt-in,
+# read-only grounding against a connected repository. These tests cover
+# _generate_with_claude_agent_sdk directly (the "interpret the session
+# result under generate()'s own contract" half) and generate()'s own
+# dispatch branch (the "only use this when a repository is actually
+# connected, and fall back cleanly on failure" half).
+
+
+def test_generate_with_claude_agent_sdk_interprets_the_session_like_any_other_provider(monkeypatch):
+    from app.services.ai_generation import _generate_with_claude_agent_sdk
+    from app.services.claude_agent_harness import DocumentSessionResult
+
+    monkeypatch.setattr(
+        "app.services.claude_agent_harness.run_document_session",
+        lambda **kwargs: DocumentSessionResult(text="## Problem\n\nGrounded in the real repo.", prompt_tokens=800, completion_tokens=300, cost=0.03, truncated=False),
+    )
+
+    result = _generate_with_claude_agent_sdk("system", "user", repository=object(), base_branch="main")
+
+    assert result.content_markdown == "## Problem\n\nGrounded in the real repo."
+    assert result.needs_clarification is False
+    assert result.prompt_tokens == 800
+    assert result.total_tokens == 1100
+    assert result.cost == 0.03
+    assert result.used_mock is False
+
+
+def test_generate_with_claude_agent_sdk_parses_a_clarification_response(monkeypatch):
+    from app.services.ai_generation import _generate_with_claude_agent_sdk
+    from app.services.claude_agent_harness import DocumentSessionResult
+
+    clarification_text = '{"needs_clarification": true, "clarification_questions": ["Which system owns this data?"]}\n---\n'
+    monkeypatch.setattr(
+        "app.services.claude_agent_harness.run_document_session",
+        lambda **kwargs: DocumentSessionResult(text=clarification_text, prompt_tokens=10, completion_tokens=5, cost=0.001, truncated=False),
+    )
+
+    result = _generate_with_claude_agent_sdk("system", "user", repository=object(), base_branch="main")
+
+    assert result.needs_clarification is True
+    assert "Which system owns this data?" in result.content_markdown
+
+
+def test_generate_dispatches_to_the_harness_when_enabled_and_a_repository_exists(db, project, actor, monkeypatch):
+    from app.models import AgentPromptRole, Integration, IntegrationConnection, IntegrationProvider, IntegrationStatus, Repository
+    from app.services.ai_generation import generate
+    from app.services.claude_agent_harness import DocumentSessionResult
+    from tests.conftest import make_agent_prompt, make_node
+
+    node = make_node(db, project, node_key="problem_discovery", order_index=0, output_artifact_type="problem_discovery_document")
+    prompt = make_agent_prompt(db, stage="problem_discovery")
+
+    integration = Integration(integration_name="GitHub", provider=IntegrationProvider.GITHUB, status=IntegrationStatus.CONNECTED)
+    db.add(integration)
+    db.flush()
+    connection = IntegrationConnection(integration=integration, access_token_encrypted="x", token_last_four="1234", github_username="octocat", status=IntegrationStatus.CONNECTED)
+    db.add(connection)
+    db.flush()
+    db.add(Repository(project=project, connection=connection, owner="octocat", name="hello-world", default_branch="main", is_primary=True))
+    db.flush()
+    db.refresh(project)
+
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(ANTHROPIC_API_KEY="sk-fake", CLAUDE_AGENT_SDK_ENABLED=True))
+    captured = {}
+
+    def _fake_run_document_session(**kwargs):
+        captured["called"] = True
+        return DocumentSessionResult(text="Grounded draft.", prompt_tokens=1, completion_tokens=1, cost=0.0, truncated=False)
+
+    monkeypatch.setattr("app.services.claude_agent_harness.run_document_session", _fake_run_document_session)
+
+    result = generate(
+        project=project, node=node, action=AgentPromptRole.DRAFT, active_prompt=prompt,
+        approved_artifact_content={}, approved_artifact_summaries={}, freeform_context={"request": "x"},
+        context_token_budget=2000, output_token_budget=512,
+    )
+
+    assert captured.get("called") is True
+    assert result.content_markdown == "Grounded draft."
+    assert result.used_mock is False
+
+
+@pytest.mark.parametrize(
+    "node_key,artifact_type",
+    [
+        ("solution_discovery", "solution_discovery_document"),
+        ("hld", "hld_document"),
+        ("story_crafting", "story_backlog"),
+    ],
+)
+def test_generate_dispatches_to_the_harness_for_every_project_level_stage(db, project, actor, monkeypatch, node_key, artifact_type):
+    """generate() has exactly ONE dispatch branch for the harness, shared
+    by every project-level stage — there is no per-stage service file for
+    Solution Discovery, HLD, or Story Crafting (confirmed: no
+    app/services/solution_discovery*.py, hld*.py, or story_crafting*.py
+    exists; they all call this same function). This test proves the
+    harness activates for each of them individually, not just Problem
+    Discovery, which the test above already covers."""
+    from app.models import AgentPromptRole, Integration, IntegrationConnection, IntegrationProvider, IntegrationStatus, Repository
+    from app.services.ai_generation import generate
+    from app.services.claude_agent_harness import DocumentSessionResult
+    from tests.conftest import make_agent_prompt, make_node
+
+    node = make_node(db, project, node_key=node_key, order_index=0, output_artifact_type=artifact_type)
+    prompt = make_agent_prompt(db, stage=node_key)
+
+    integration = Integration(integration_name="GitHub", provider=IntegrationProvider.GITHUB, status=IntegrationStatus.CONNECTED)
+    db.add(integration)
+    db.flush()
+    connection = IntegrationConnection(integration=integration, access_token_encrypted="x", token_last_four="1234", github_username="octocat", status=IntegrationStatus.CONNECTED)
+    db.add(connection)
+    db.flush()
+    db.add(Repository(project=project, connection=connection, owner="octocat", name="hello-world", default_branch="main", is_primary=True))
+    db.flush()
+    db.refresh(project)
+
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(ANTHROPIC_API_KEY="sk-fake", CLAUDE_AGENT_SDK_ENABLED=True))
+    captured = {}
+
+    def _fake_run_document_session(**kwargs):
+        captured["node_key"] = node_key
+        return DocumentSessionResult(text=f"Grounded draft for {node_key}.", prompt_tokens=1, completion_tokens=1, cost=0.0, truncated=False)
+
+    monkeypatch.setattr("app.services.claude_agent_harness.run_document_session", _fake_run_document_session)
+
+    result = generate(
+        project=project, node=node, action=AgentPromptRole.DRAFT, active_prompt=prompt,
+        approved_artifact_content={}, approved_artifact_summaries={}, freeform_context={"request": "x"},
+        context_token_budget=2000, output_token_budget=512,
+    )
+
+    assert captured.get("node_key") == node_key
+    assert result.content_markdown == f"Grounded draft for {node_key}."
+    assert result.used_mock is False
+
+
+def test_generate_skips_the_harness_when_no_repository_is_connected(db, project, actor, monkeypatch):
+    from app.models import AgentPromptRole
+    from app.services.ai_generation import generate
+    from tests.conftest import make_agent_prompt, make_node
+
+    node = make_node(db, project, node_key="problem_discovery", order_index=0, output_artifact_type="problem_discovery_document")
+    prompt = make_agent_prompt(db, stage="problem_discovery")
+
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(CLAUDE_AGENT_SDK_ENABLED=True))
+    monkeypatch.setattr(ai_generation, "get_active_provider", lambda: "mock")
+    called = {"harness": False}
+    monkeypatch.setattr("app.services.claude_agent_harness.run_document_session", lambda **kw: called.__setitem__("harness", True))
+
+    result = generate(
+        project=project, node=node, action=AgentPromptRole.DRAFT, active_prompt=prompt,
+        approved_artifact_content={}, approved_artifact_summaries={}, freeform_context={"request": "x"},
+        context_token_budget=2000, output_token_budget=512,
+    )
+
+    assert called["harness"] is False
+    assert result.used_mock is True  # falls through to the normal (mock, here) provider path
+
+
+def test_generate_falls_back_to_the_provider_chain_when_the_harness_errors(db, project, actor, monkeypatch):
+    from app.models import AgentPromptRole, Integration, IntegrationConnection, IntegrationProvider, IntegrationStatus, Repository
+    from app.services.ai_generation import generate
+    from app.services.claude_agent_harness import ClaudeAgentHarnessError
+    from tests.conftest import make_agent_prompt, make_node
+
+    node = make_node(db, project, node_key="problem_discovery", order_index=0, output_artifact_type="problem_discovery_document")
+    prompt = make_agent_prompt(db, stage="problem_discovery")
+
+    integration = Integration(integration_name="GitHub", provider=IntegrationProvider.GITHUB, status=IntegrationStatus.CONNECTED)
+    db.add(integration)
+    db.flush()
+    connection = IntegrationConnection(integration=integration, access_token_encrypted="x", token_last_four="1234", github_username="octocat", status=IntegrationStatus.CONNECTED)
+    db.add(connection)
+    db.flush()
+    db.add(Repository(project=project, connection=connection, owner="octocat", name="hello-world", default_branch="main", is_primary=True))
+    db.flush()
+    db.refresh(project)
+
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(CLAUDE_AGENT_SDK_ENABLED=True))
+    monkeypatch.setattr(ai_generation, "get_active_provider", lambda: "mock")
+
+    def _raise(**kwargs):
+        raise ClaudeAgentHarnessError("the claude CLI is not installed on this host")
+
+    monkeypatch.setattr("app.services.claude_agent_harness.run_document_session", _raise)
+
+    result = generate(
+        project=project, node=node, action=AgentPromptRole.DRAFT, active_prompt=prompt,
+        approved_artifact_content={}, approved_artifact_summaries={}, freeform_context={"request": "x"},
+        context_token_budget=2000, output_token_budget=512,
+    )
+
+    assert result.used_mock is True  # the run still completes, via the mock fallback, not a raised exception
+
+
+# --- model_override (see use_model_override) ---------------------------------------------
+
+
+def test_model_override_replaces_the_configured_model_in_the_outgoing_request(monkeypatch):
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(OPENROUTER_API_KEY="sk-or-realsecret", OPENROUTER_MODEL="meta-llama/llama-3.3-70b-instruct:free", OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"),
+    )
+    seen_models = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        seen_models.append(json.loads(request.content)["model"])
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}\n---\nHi."}}], "usage": {}})
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    with use_model_override("qwen/qwen-2.5-coder-32b-instruct"):
+        _generate_with_openrouter("system", "user", 512)
+
+    assert seen_models == ["qwen/qwen-2.5-coder-32b-instruct"]
+
+
+def test_no_model_override_falls_back_to_the_configured_default(monkeypatch):
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(OPENROUTER_API_KEY="sk-or-realsecret", OPENROUTER_MODEL="meta-llama/llama-3.3-70b-instruct:free", OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"),
+    )
+    seen_models = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        seen_models.append(json.loads(request.content)["model"])
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}\n---\nHi."}}], "usage": {}})
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    _generate_with_openrouter("system", "user", 512)
+
+    assert seen_models == ["meta-llama/llama-3.3-70b-instruct:free"]
+
+
+def test_model_override_resets_after_the_with_block_exits(monkeypatch):
+    monkeypatch.setattr(
+        ai_generation, "get_settings",
+        lambda: _settings(OPENROUTER_API_KEY="sk-or-realsecret", OPENROUTER_MODEL="default-model", OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"),
+    )
+    seen_models = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        seen_models.append(json.loads(request.content)["model"])
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}\n---\nHi."}}], "usage": {}})
+
+    monkeypatch.setattr(httpx, "post", _mock_post(handler))
+
+    with use_model_override("one-off-model"):
+        _generate_with_openrouter("system", "user", 512)
+    _generate_with_openrouter("system", "user", 512)
+
+    assert seen_models == ["one-off-model", "default-model"]
+
+
+# --- Anthropic thinking config (see _ANTHROPIC_THINKING_EFFORT's own comment) -------------
+
+
+def test_generate_with_anthropic_uses_adaptive_thinking_with_low_effort_not_enabled(monkeypatch):
+    """Regression: "enabled" thinking (an explicit budget_tokens separate
+    from max_tokens) would be the clean fix for thinking tokens silently
+    eating into a document's visible output, but newer models (confirmed:
+    claude-sonnet-5) reject that type outright with a 400 — only "adaptive"
+    is supported, biased via output_config.effort instead. This locks in
+    the actually-supported shape so a future edit can't silently
+    reintroduce the "enabled" type and break every real Anthropic call."""
+    monkeypatch.setattr(ai_generation, "get_settings", lambda: _settings(ANTHROPIC_API_KEY="sk-ant-real", AI_MODEL="claude-sonnet-5"))
+    captured = {}
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            content_block = SimpleNamespace(type="text", text="{}\n---\nHello.")
+            usage = SimpleNamespace(input_tokens=10, output_tokens=5)
+            return SimpleNamespace(content=[content_block], usage=usage, stop_reason="end_turn")
+
+    class _FakeAnthropicClient:
+        def __init__(self, *a, **k):
+            self.messages = _FakeMessages()
+
+    monkeypatch.setattr(ai_generation.anthropic, "Anthropic", _FakeAnthropicClient)
+
+    from app.services.ai_generation import _generate_with_anthropic
+
+    result = _generate_with_anthropic("system", "user", 512)
+
+    assert result.content_markdown == "Hello."
+    assert captured["thinking"] == {"type": "adaptive"}
+    assert captured["output_config"] == {"effort": "low"}
+    assert captured["max_tokens"] == 512  # output_token_budget itself — no inflated ceiling needed for "adaptive"

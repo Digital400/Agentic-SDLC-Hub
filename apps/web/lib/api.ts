@@ -77,6 +77,7 @@ export interface ApiProject {
   business_owner: string;
   current_stage: string;
   status: "ACTIVE" | "COMPLETED" | "ARCHIVED";
+  work_type: "NEW_PROJECT" | "EXISTING_PROJECT_FEATURE" | "BUG_FIX" | "TECHNICAL_IMPROVEMENT";
   workflow_template_id: string;
   workflow_template_version: string;
   created_by_id: string;
@@ -152,9 +153,11 @@ export type ApiImplementationTaskStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED
 export interface ApiImplementationTask {
   id: string;
   project_id: string;
-  workflow_node_id: string;
-  artifact_id: string;
-  artifact_version_id: string;
+  story_id: string | null;
+  workflow_node_id: string | null;
+  artifact_id: string | null;
+  artifact_version_id: string | null;
+  repository_id: string | null;
   title: string;
   description: string;
   linked_story: string | null;
@@ -179,6 +182,87 @@ export interface ApiGenerateImplementationPlanResponse {
   review: ApiReview;
 }
 
+// Project Engineering Setup — see
+// app/api/routes/project_engineering_setup.py and
+// app/schemas/project_engineering_setup.py.
+export type ApiGithubSetupOption = "CONNECT_EXISTING_REPO" | "CREATE_NEW_REPO" | "SKIP_FOR_NOW";
+export type ApiJiraSetupOption = "CONNECT_EXISTING_PROJECT" | "MAPPING_ONLY" | "SKIP_FOR_NOW";
+export type ApiDocumentationTarget = "INTERNAL_ONLY" | "CONFLUENCE" | "REPO_MARKDOWN" | "CONFLUENCE_AND_REPO";
+
+export interface ApiTechnologyStackInput {
+  application_type: string;
+  primary_language: string;
+  frontend_framework?: string | null;
+  backend_framework?: string | null;
+  database?: string | null;
+  cloud_provider?: string | null;
+}
+
+export interface ApiRepositorySetupInput {
+  option: ApiGithubSetupOption;
+  new_repo_name?: string | null;
+  branch_naming_pattern?: string;
+  target_branch?: string;
+}
+
+export type ApiCodingStandardCategory = "GENERAL" | "ARCHITECTURE" | "SECURITY" | "TESTING" | "GIT" | "DOCUMENTATION";
+
+export interface ApiCodingStandardInput {
+  title: string;
+  content: string;
+  category?: ApiCodingStandardCategory;
+  // Confluence / SharePoint (or any http(s)) reference link; never fetched.
+  source_url?: string | null;
+}
+
+export interface ApiGuardrailInput {
+  rule_text: string;
+}
+
+export interface ApiCreateEngineeringSetupRequest {
+  created_by_id: string;
+  technology_stack: ApiTechnologyStackInput;
+  repository: ApiRepositorySetupInput;
+  jira: { option: ApiJiraSetupOption };
+  coding_standards: ApiCodingStandardInput[];
+  guardrails: ApiGuardrailInput[];
+  documentation: { target: ApiDocumentationTarget };
+  commands: { build_command?: string | null; test_commands: string[]; lint_command?: string | null };
+}
+
+// PATCH /projects/{id}/engineering-setup — edits an already-created
+// setup; every section optional, only the ones given are changed. See
+// app/schemas/project_engineering_setup.py's UpdateEngineeringSetupRequest.
+export interface ApiUpdateEngineeringSetupRequest {
+  updated_by_id: string;
+  technology_stack?: ApiTechnologyStackInput;
+  repository?: ApiRepositorySetupInput;
+  jira?: { option: ApiJiraSetupOption };
+  coding_standards?: ApiCodingStandardInput[];
+  guardrails?: ApiGuardrailInput[];
+  documentation?: { target: ApiDocumentationTarget };
+  commands?: { build_command?: string | null; test_commands: string[]; lint_command?: string | null };
+}
+
+export interface ApiEngineeringSetup {
+  id: string;
+  project_id: string;
+  application_type: string;
+  primary_language: string;
+  frontend_framework: string | null;
+  backend_framework: string | null;
+  database: string | null;
+  cloud_provider: string | null;
+  created_at: string;
+  updated_at: string;
+  repository_config: { id: string; option: ApiGithubSetupOption; repository_id: string | null; new_repo_name: string | null; branch_naming_pattern: string; target_branch: string } | null;
+  jira_config: { id: string; option: ApiJiraSetupOption; jira_project_link_id: string | null } | null;
+  coding_standards: { id: string; title: string; content: string; category: ApiCodingStandardCategory; source_url: string | null; order_index: number }[];
+  guardrails: { id: string; rule_text: string; order_index: number }[];
+  documentation_config: { id: string; target: ApiDocumentationTarget } | null;
+  command_config: { id: string; build_command: string | null; test_commands: string[]; lint_command: string | null } | null;
+}
+
 // Implementation Agent execution — see app/services/implementation_agent.py
 // and app/models/implementation_run.py. Generating/reviewing a run never
 // writes to GitHub; only create_pull_request (once ACCEPTED) does — see
@@ -198,10 +282,14 @@ export type ApiPullRequestStatus = "OPEN" | "MERGED" | "CLOSED";
 export interface ApiPullRequestLink {
   id: string;
   project_id: string;
-  workflow_node_id: string;
+  workflow_node_id: string | null;
   implementation_task_id: string;
   implementation_run_id: string;
   repository_id: string;
+  story_id: string | null;
+  lane_id: string | null;
+  code_run_id: string | null;
+  jira_issue_key: string | null;
   branch_name: string;
   base_branch: string;
   pr_number: number;
@@ -213,19 +301,57 @@ export interface ApiPullRequestLink {
   created_at: string;
 }
 
+// CodeRunnerService — see app/models/code_run.py and
+// app/api/routes/code_runs.py. The local-git alternative to
+// api.implementationRuns.createPullRequest (which commits file-by-file
+// through GitHub's REST API); this applies an accepted patch through a
+// real, isolated clone, runs configured tests, and only on success
+// commits/pushes a real branch.
+export type ApiCodeRunStatus =
+  | "QUEUED" | "CLONING" | "BRANCH_CREATED" | "APPLYING_CHANGES" | "TESTING" | "COMMITTED" | "PUSHED" | "FAILED";
+
+export interface ApiCodeRunLogEntry {
+  timestamp: string;
+  level: string;
+  message: string;
+}
+
+export interface ApiCodeRun {
+  id: string;
+  project_id: string;
+  story_id: string;
+  lane_id: string | null;
+  repository_id: string;
+  triggered_by_user_id: string | null;
+  branch_name: string;
+  status: ApiCodeRunStatus;
+  started_at: string | null;
+  completed_at: string | null;
+  logs: ApiCodeRunLogEntry[];
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ApiImplementationRun {
   id: string;
   project_id: string;
   implementation_task_id: string;
   repository_snapshot_id: string | null;
   triggered_by_user_id: string | null;
+  story_id: string | null;
+  lane_id: string | null;
+  story_lld_artifact_id: string | null;
+  assigned_user_id: string | null;
   agent_type: string;
+  assigned_agent_key: string | null;
   status: ApiImplementationRunStatus;
   proposed_file_changes: ApiProposedFileChange[];
   diff_text: string;
   explanation: string;
   test_command: string;
   risks: string[];
+  pr_description: string;
   used_mock: boolean;
   token_usage: Record<string, number> | null;
   cost: number | null;
@@ -263,14 +389,18 @@ export interface ApiTestExecuted {
 export interface ApiTestRun {
   id: string;
   project_id: string;
-  workflow_node_id: string;
+  workflow_node_id: string | null;
   implementation_task_id: string;
   implementation_run_id: string;
   pull_request_link_id: string | null;
+  story_id: string | null;
+  lane_id: string | null;
   artifact_id: string | null;
   artifact_version_id: string | null;
+  story_artifact_id: string | null;
   triggered_by_user_id: string | null;
   agent_type: ApiTestAgentType;
+  test_agent_key: string | null;
   status: ApiTestRunStatus;
   test_plan: string;
   tests_to_add: ApiTestToAdd[];
@@ -280,6 +410,7 @@ export interface ApiTestRun {
   bugs_found: string[];
   suggested_fixes: string[];
   coverage_impact: Record<string, string>;
+  evidence_attachments: string[];
   used_mock: boolean;
   token_usage: Record<string, number> | null;
   cost: number | null;
@@ -319,10 +450,11 @@ export interface ApiPostedComment {
 export interface ApiPRReviewRun {
   id: string;
   project_id: string;
-  workflow_node_id: string;
+  workflow_node_id: string | null; // null for a story-scoped run
   implementation_task_id: string;
   implementation_run_id: string;
   pull_request_link_id: string;
+  story_id: string | null;
   triggered_by_user_id: string | null;
   status: ApiPRReviewRunStatus;
   overall_recommendation: ApiPRReviewRecommendation | null;
@@ -331,6 +463,7 @@ export interface ApiPRReviewRun {
   major_findings: ApiFinding[];
   minor_findings: ApiFinding[];
   missing_tests: string[];
+  unrelated_changes: string[];
   suggested_comments: ApiSuggestedComment[];
   risk_score: number | null;
   final_reviewer_note: string;
@@ -357,6 +490,33 @@ export interface ApiPostedCommentResult {
 export interface ApiPostPRReviewCommentsResponse {
   run: ApiPRReviewRun;
   results: ApiPostedCommentResult[];
+}
+
+// Story Testing stage — see app/models/story_test_execution.py and
+// app/services/story_test_execution.py.
+export type ApiStoryTestExecutionStatus = "NOT_STARTED" | "IN_PROGRESS" | "PASSED" | "FAILED" | "BLOCKED" | "QA_APPROVED";
+export type ApiStoryTestExecutionQaDecision = "PENDING" | "APPROVED" | "REJECTED";
+
+export interface ApiStoryTestExecution {
+  id: string;
+  story_id: string;
+  lane_id: string | null;
+  test_scenario_artifact_id: string | null;
+  pull_request_link_id: string | null;
+  executed_by_user_id: string | null;
+  status: ApiStoryTestExecutionStatus;
+  results_json: { scenario: string; status: string; notes: string }[];
+  agent_checklist: { item: string; done: boolean }[];
+  evidence_urls: string[];
+  bugs_found: string[];
+  qa_decision: ApiStoryTestExecutionQaDecision;
+  qa_decision_reason: string;
+  qa_decided_by_user_id: string | null;
+  used_mock: boolean;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ApiArtifactVersion {
@@ -389,6 +549,10 @@ export interface ApiStory {
   definition_of_done: string[];
   suggested_owner_role: string | null;
   story_points: number | null;
+  // The agent's own best/typical/worst-case PR review time estimate, and
+  // the worst-case minutes parsed from it — see app/services/review_time.py.
+  estimated_pr_review_time: string;
+  estimated_review_worst_case_minutes: number | null;
   business_value: string;
   technical_areas: string[];
   jira_issue_type: string;
@@ -400,11 +564,45 @@ export interface ApiStory {
   created_by_id: string;
   created_at: string;
   updated_at: string;
+  // Real, stored fields — see app/models/story.py. jira_sync_status is
+  // this app's own create-state machine, distinct from jira_status
+  // below (Jira's own live workflow status).
+  jira_sync_status: "NOT_SYNCED" | "SYNC_PENDING" | "SYNCED" | "SYNC_FAILED";
+  jira_issue_id: string | null;
   // Computed server-side — see app/api/routes/stories.py's _story_to_read.
   lane_status: string;
   jira_status: string;
   jira_issue_key: string | null;
   jira_issue_url: string | null;
+}
+
+// Recommended implementation order — see app/services/story_sequencing.py.
+export interface ApiStoryOrderResponse {
+  waves: { stories: ApiStory[] }[];
+  // story_id -> leftover Dependencies text that didn't match any known
+  // story title (a likely typo or renamed/deleted story).
+  unresolved_dependencies: Record<string, string>;
+  // Stories whose Dependencies form a cycle — reported, never guessed at.
+  circular: ApiStory[];
+}
+
+// Comparing an already-synced story against the CURRENT approved backlog —
+// sync-from-backlog never updates an existing story, so this is the
+// explicit, human-reviewed way a correction reaches one. See
+// app/api/routes/stories.py's get_story_backlog_diff/apply_story_backlog_diff.
+export interface ApiStoryFieldChange {
+  field: string;
+  current: string;
+  proposed: string;
+}
+
+export interface ApiStoryBacklogDiff {
+  story_id: string;
+  found_in_backlog: boolean;
+  source_version_number: number;
+  changes: ApiStoryFieldChange[];
+  up_to_date: boolean;
+  lane_active: boolean;
 }
 
 // Story delivery lane — dedicated per-story graph, see
@@ -485,6 +683,37 @@ export interface ApiSprintBoard {
   over_capacity: boolean;
 }
 
+// Release planning from story delivery lanes — see app/models/release.py
+// and app/api/routes/releases.py. Distinct from the older per-Sprint
+// release_planning stage (api.sprints' generateReleasePlan).
+export interface ApiRelease {
+  id: string;
+  project_id: string;
+  name: string;
+  version: string;
+  target_date: string | null;
+  status: "DRAFT" | "APPROVED" | "RELEASED" | "CANCELLED";
+  release_notes: string;
+  created_by_id: string;
+  approved_by_id: string | null;
+  approved_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiReleaseStory {
+  id: string;
+  release_id: string;
+  story_id: string;
+  added_by_id: string;
+  created_at: string;
+}
+
+export interface ApiReleaseBoard {
+  release: ApiRelease;
+  items: { release_story: ApiReleaseStory; story: ApiStory }[];
+}
+
 export interface ApiReviewComment {
   id: string;
   review_id: string;
@@ -551,10 +780,11 @@ export interface ApiKnowledgeSource {
   id: string;
   title: string;
   category: string;
-  source_type: "PROJECT_ARTIFACT" | "UPLOADED_DOCUMENT" | "EXTERNAL_LINK";
+  source_type: "PROJECT_ARTIFACT" | "UPLOADED_DOCUMENT" | "EXTERNAL_LINK" | "MANUAL_ENTRY";
   file_url: string | null;
   status: "PENDING" | "PROCESSING" | "INDEXED" | "FAILED";
   uploaded_by_id: string;
+  project_id: string | null;
   created_at: string;
   updated_at: string;
   uploaded_by_name: string;
@@ -589,7 +819,12 @@ export interface ApiJiraFieldMapping {
   linked_issues_placeholder: string[];
 }
 
-export interface ApiStoryJiraPreview {
+// NOTE: distinct from ApiStoryJiraPreview below (the real per-story sync
+// preview, app/services/story_jira_sync.py) — this one is the older,
+// local, no-connection whole-backlog preview (app/services/jira_export.py).
+// Named differently to avoid a TypeScript declaration-merging collision
+// that silently unioned the two shapes together before this fix.
+export interface ApiJiraExportStoryPreview {
   story_title: string;
   jira_issue_type: string;
   mapping: ApiJiraFieldMapping;
@@ -605,7 +840,7 @@ export interface ApiJiraExportPreview {
   valid_story_count: number;
   has_errors: boolean;
   overall_errors: string[];
-  stories: ApiStoryJiraPreview[];
+  stories: ApiJiraExportStoryPreview[];
   push_to_jira_enabled: boolean;
 }
 
@@ -702,6 +937,57 @@ export interface ApiJiraSyncStatusResponse {
   links: ApiJiraIssueLink[];
 }
 
+// Per-story Jira sync — see app/services/story_jira_sync.py and
+// app/api/routes/jira_integration.py's /jira/stories/... routes.
+// Story Points / Sprint have no standard Jira field, so both are shown
+// as plainly-labeled lines inside `description` — exactly what a sync
+// would send, never a hidden custom-field guess.
+export interface ApiStoryJiraSubtaskPreview {
+  implementation_task_id: string;
+  title: string;
+  description: string;
+  validation_errors: string[];
+  already_linked: ApiJiraIssueLink | null;
+}
+
+export interface ApiStoryJiraPreview {
+  story_id: string;
+  summary: string;
+  description: string;
+  priority: string | null;
+  story_points: number | null;
+  sprint_name: string | null;
+  labels: string[];
+  subtasks: ApiStoryJiraSubtaskPreview[];
+  validation_errors: string[];
+  already_linked: ApiJiraIssueLink | null;
+}
+
+export interface ApiBulkStoryJiraPreviewResponse {
+  previews: ApiStoryJiraPreview[];
+}
+
+export interface ApiSubtaskJiraSyncResult {
+  implementation_task_id: string;
+  status: "created" | "skipped_duplicate" | "skipped_invalid" | "failed";
+  jira_issue_key: string | null;
+  jira_issue_url: string | null;
+  errors: string[];
+}
+
+export interface ApiStoryJiraSyncResult {
+  story_id: string;
+  status: "created" | "skipped_duplicate" | "skipped_invalid" | "failed";
+  jira_issue_key: string | null;
+  jira_issue_url: string | null;
+  errors: string[];
+  subtasks: ApiSubtaskJiraSyncResult[];
+}
+
+export interface ApiBulkStoryJiraSyncResponse {
+  results: ApiStoryJiraSyncResult[];
+}
+
 // Real Confluence integration — see app/services/confluence_integration.py
 // and app/api/routes/confluence_integration.py. Same connect/preview/
 // publish shape as Jira above: nothing is ever published except the
@@ -744,8 +1030,11 @@ export interface ApiConfluencePageLink {
   project_id: string;
   confluence_space_link_id: string;
   artifact_type: string;
-  artifact_id: string;
-  artifact_version_id: string;
+  // Null for a story-scoped page — see story_id/story_artifact_id below.
+  artifact_id: string | null;
+  artifact_version_id: string | null;
+  story_id: string | null;
+  story_artifact_id: string | null;
   confluence_page_id: string;
   confluence_page_url: string;
   confluence_page_title: string;
@@ -781,6 +1070,24 @@ export interface ApiConfluencePublishResultItem {
 
 export interface ApiConfluencePublishResponse {
   results: ApiConfluencePublishResultItem[];
+}
+
+// Story-scoped publishing (e.g. Story LLD) — see
+// app/services/story_confluence_publish.py.
+export interface ApiStoryConfluencePublishItem {
+  artifact_type: string;
+  label: string;
+  story_artifact_id: string | null;
+  content_preview: string;
+  validation_errors: string[];
+  already_published: ApiConfluencePageLink | null;
+  update_available: boolean;
+}
+
+export interface ApiStoryConfluencePublishPreview {
+  story_id: string;
+  space_key: string;
+  items: ApiStoryConfluencePublishItem[];
 }
 
 // See app/services/github_export.py — no real GitHub connection exists;
@@ -926,6 +1233,7 @@ export interface ApiRepository {
   description: string | null;
   html_url: string | null;
   is_private: boolean | null;
+  is_primary: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -1020,6 +1328,49 @@ export interface ApiRepositoryFileIndexEntry {
   sha: string;
 }
 
+// Repository bootstrap — see app/api/routes/repo_bootstrap.py. Only ever
+// callable against a genuinely empty repository; the one write path that
+// commits directly to the default branch (there is no branch yet to PR
+// into) rather than through a feature branch like every other write.
+export interface ApiBootstrapRepositoryRequest {
+  triggered_by_user_id: string;
+}
+
+export interface ApiBootstrapCommit {
+  path: string;
+  commit_sha: string;
+}
+
+export interface ApiBootstrapRepositoryResponse {
+  repository_id: string;
+  branch: string;
+  commits: ApiBootstrapCommit[];
+}
+
+// Repository file edit — see app/api/routes/repository_file_edit.py. The
+// second deliberate exception to github_integration.py's read-only
+// contract: a hand-edited file, committed on a new branch (never the
+// repository's default branch) with a real pull request opened
+// immediately, unless open_pull_request is explicitly set to false.
+export interface ApiCommitFileEditRequest {
+  triggered_by_user_id: string;
+  path: string;
+  content: string;
+  commit_message?: string | null;
+  base_branch?: string | null;
+  branch_name?: string | null;
+  open_pull_request?: boolean;
+  pr_title?: string | null;
+  pr_body?: string | null;
+}
+
+export interface ApiCommitFileEditResponse {
+  branch_name: string;
+  base_branch: string;
+  commit_sha: string;
+  pull_request_url: string | null;
+}
+
 // Repo Context Builder — see apps/api/app/services/repo_context_builder.py.
 // A stateless preview of exactly what repo context would be sent to a
 // coding agent for one ImplementationTask; nothing here is persisted.
@@ -1103,6 +1454,38 @@ export type ApiLoopStatus =
   | "COMPLETED_NO_CRITICAL_ISSUES"
   | "WAITING_FOR_CLARIFICATION";
 
+// Mirrors apps/api/app/schemas/agent_run.py's ProviderOverride.
+// "claude_agent_sdk" requires the project to have a connected GitHub
+// repository; every other value requires that provider's own API key to
+// actually be configured in the backend's environment.
+export type ApiProviderOverride = "claude_agent_sdk" | "anthropic" | "gemini" | "openrouter" | "nvidia" | "huggingface" | "ollama";
+
+// Shared shape for "force this one run to use a specific LLM" across every
+// endpoint that accepts it — project-level agent runs (agentRuns.start) and
+// each per-story delivery-lane draft (storyDelivery.draftStoryLld /
+// draftImplementationPlan / draftTestScenarios).
+export interface LlmOverride {
+  providerOverride?: ApiProviderOverride;
+  modelOverride?: string;
+}
+
+// Mirrors apps/api/app/schemas/agent_run.py's ProviderOptionRead — see GET
+// /agent-runs/providers. `model` is the real configured model name (e.g.
+// "Qwen/Qwen2.5-Coder-32B-Instruct"), not a hardcoded guess; `configured`
+// says whether this option would actually work right now.
+export interface ApiProviderOption {
+  value: ApiProviderOverride;
+  label: string;
+  model: string | null;
+  configured: boolean;
+  unavailable_reason: string | null;
+  // Curated suggestions for model_override (e.g. the Claude family for
+  // anthropic/claude_agent_sdk) — not a closed list, just quick picks; any
+  // model id can still be typed. Empty for a provider with no curated
+  // suggestions (Gemini/OpenRouter/NVIDIA/Hugging Face/Ollama).
+  available_models: string[];
+}
+
 export interface ApiAgentRun {
   id: string;
   project_id: string;
@@ -1150,6 +1533,174 @@ export interface ApiAgentRun {
 }
 
 // "Improve section" — see app/services/section_improve_agent.py.
+export type ApiCodingTool = "claude_code" | "codex" | "opencode" | "cursor";
+
+export interface ApiSkillPack {
+  tool: ApiCodingTool;
+  tool_label: string;
+  stage: string;
+  files: { path: string; purpose: string; managed: boolean; content: string }[];
+  usage: string[];
+  notes: string[];
+}
+
+export interface ApiInstallSkillsResponse {
+  branch_name: string | null;
+  base_branch: string;
+  pull_request_url: string | null;
+  committed: string[];
+  skipped: { path: string; reason: string }[];
+  message: string;
+}
+
+export interface ApiSyncStoryInputsResponse {
+  branch_name: string | null;
+  base_branch: string;
+  pull_request_url: string | null;
+  committed: string[];
+  // Display names of upstream documents that aren't ready yet (e.g.
+  // ["Story LLD"]) — committed as a placeholder; empty means everything
+  // this stage needs is actually available right now.
+  not_ready: string[];
+  message: string;
+}
+
+// The Stories list's "Prepare for coding tool" bulk action — one click
+// across many stories instead of opening each one's own workspace. See
+// apps/api/app/api/routes/coding_tools.py's bulk_prepare_coding_tool.
+export interface ApiBulkPrepareStoryResult {
+  story_id: string;
+  story_title: string;
+  status: "prepared" | "skipped";
+  lane_created: boolean;
+  committed_paths: string[];
+  not_ready: string[];
+  reason: string | null;
+}
+
+export interface ApiBulkPrepareCodingToolResponse {
+  branch_name: string | null;
+  base_branch: string;
+  pull_request_url: string | null;
+  results: ApiBulkPrepareStoryResult[];
+  message: string;
+}
+
+// The Stories list's "Run Story LLD" bulk button — drafts every selected
+// story's Story LLD in one click. See app/api/routes/stories.py's
+// bulk_run_story_lld.
+export interface ApiBulkRunStoryLldStoryResult {
+  story_id: string;
+  story_title: string;
+  status: "drafted" | "already_drafted" | "needs_clarification" | "skipped";
+  lane_created: boolean;
+  reason: string | null;
+}
+
+export interface ApiBulkRunStoryLldResponse {
+  results: ApiBulkRunStoryLldStoryResult[];
+  remaining: ApiBulkRunStoryLldStoryResult[];
+  message: string;
+}
+
+// The Stories list's "Approve & Unlock Next" bulk action — a real,
+// role-checked human approval across many stories at once, never a
+// silent bypass. See app/api/routes/stories.py's bulk_approve_lane_node.
+export interface ApiBulkApproveLaneNodeStoryResult {
+  story_id: string;
+  story_title: string;
+  status: "approved" | "already_approved" | "skipped";
+  reason: string | null;
+}
+
+export interface ApiBulkApproveLaneNodeResponse {
+  results: ApiBulkApproveLaneNodeStoryResult[];
+  message: string;
+}
+
+// Story-wise bulk code Implementation — one real agent run per selected
+// story, for that story's own next runnable task. See
+// app/api/routes/stories.py's bulk_start_implementation.
+export interface ApiBulkStartImplementationStoryResult {
+  story_id: string;
+  story_title: string;
+  status: "started" | "awaiting_review" | "all_complete" | "skipped";
+  task_area: string | null;
+  task_title: string | null;
+  implementation_run_id: string | null;
+  run_status: string | null;
+  reason: string | null;
+}
+
+export interface ApiBulkStartImplementationResponse {
+  results: ApiBulkStartImplementationStoryResult[];
+  message: string;
+}
+
+export interface ApiSyncStoryStageResponse {
+  story_artifact_id: string;
+  version_number: number;
+  node_status: string;
+  ref: string;
+  path: string;
+  generated_by: string | null;
+  created: boolean;
+}
+
+// The Stories list's "Pull Latest from GitHub" bulk action — the reverse
+// of bulkPrepare. See app/api/routes/coding_tools.py's bulk_sync_story_stage.
+export interface ApiBulkSyncStoryStageStoryResult {
+  story_id: string;
+  story_title: string;
+  status: "synced" | "skipped";
+  version_number: number | null;
+  reason: string | null;
+}
+
+export interface ApiBulkSyncStoryStageResponse {
+  ref: string;
+  results: ApiBulkSyncStoryStageStoryResult[];
+  message: string;
+}
+
+export interface ApiSyncStageResponse {
+  artifact_id: string;
+  artifact_version_id: string;
+  version_number: number;
+  artifact_status: string;
+  workflow_node_status: string;
+  ref: string;
+  file_sha: string;
+  path: string;
+  generated_by: string | null;
+  created_artifact: boolean;
+}
+
+export interface ApiSectionChange {
+  title: string;
+  kind: "added" | "removed" | "changed";
+  added_lines: string[];
+  removed_lines: string[];
+  added_line_count: number;
+  removed_line_count: number;
+}
+
+export interface ApiChangeSummary {
+  from_version: number | null;
+  to_version: number;
+  headline: string;
+  is_first_version: boolean;
+  changes: ApiSectionChange[];
+  change_note: string | null;
+}
+
+export interface ApiAskQuestionResponse {
+  answer: string;
+  sources: string[];
+  used_mock: boolean;
+  truncated: boolean;
+}
+
 export interface ApiImproveSectionResponse {
   agent_run: ApiAgentRun;
   needs_clarification: boolean;
@@ -1174,8 +1725,13 @@ export const api = {
       return get<{ items: ApiProject[]; total: number }>(`/projects${qs}`);
     },
     get: (id: string) => get<ApiProject>(`/projects/${id}`),
-    create: (body: { name: string; business_owner: string; description?: string; created_by_id: string }) =>
-      post<ApiProject>("/projects", body),
+    create: (body: {
+      name: string;
+      business_owner: string;
+      description?: string;
+      created_by_id: string;
+      work_type?: "NEW_PROJECT" | "EXISTING_PROJECT_FEATURE" | "BUG_FIX" | "TECHNICAL_IMPROVEMENT";
+    }) => post<ApiProject>("/projects", body),
     update: (
       id: string,
       body: Partial<{ name: string; business_owner: string; description: string; current_stage: string }> & {
@@ -1205,6 +1761,10 @@ export const api = {
     generateImplementationPlan: (id: string, body: { triggered_by_user_id: string; reviewer_id: string }) =>
       post<ApiGenerateImplementationPlanResponse>(`/projects/${id}/implementation-plan/generate`, body),
     githubRepository: (id: string) => get<ApiRepository | null>(`/projects/${id}/github-repository`),
+    // Multi-repo support — every repository connected to this project,
+    // primary first. githubRepository() above still returns just the
+    // primary one, for callers that only ever cared about "the" repo.
+    githubRepositories: (id: string) => get<ApiRepository[]>(`/projects/${id}/github-repositories`),
     jiraProject: (id: string) => get<ApiJiraProjectLink | null>(`/projects/${id}/jira-project`),
     confluenceSpace: (id: string) => get<ApiConfluenceSpaceLink | null>(`/projects/${id}/confluence-space`),
     // Repo Context Preview (rule 7) — see app/services/repo_context_builder.py.
@@ -1246,8 +1806,21 @@ export const api = {
     // "Improve section" — see app/services/section_improve_agent.py. Only
     // works on a DRAFT artifact; every section besides `section_title` is
     // guaranteed unchanged. Never creates/touches a Review.
-    improveSection: (id: string, body: { section_title: string; instruction: string; triggered_by_user_id: string }) =>
-      post<ApiImproveSectionResponse>(`/artifacts/${id}/improve-section`, body),
+    improveSection: (
+      id: string,
+      body: { section_title: string; instruction?: string; triggered_by_user_id: string; mode?: "improve" | "regenerate" },
+    ) => post<ApiImproveSectionResponse>(`/artifacts/${id}/improve-section`, body),
+    // Read-only: what changed between two versions (default: previous vs current).
+    changes: (id: string, params?: { from_version?: number; to_version?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.from_version !== undefined) qs.set("from_version", String(params.from_version));
+      if (params?.to_version !== undefined) qs.set("to_version", String(params.to_version));
+      const suffix = qs.toString();
+      return get<ApiChangeSummary>(`/artifacts/${id}/changes${suffix ? `?${suffix}` : ""}`);
+    },
+    // Read-only: ask a question about this document; never modifies it.
+    ask: (id: string, body: { question: string; triggered_by_user_id: string }) =>
+      post<ApiAskQuestionResponse>(`/artifacts/${id}/ask`, body),
     // "GitHub integration" (rule scope) — a local preview of the PR
     // title/description/checklist a human pastes into a real GitHub PR;
     // no real GitHub connection exists — see app/services/github_export.py.
@@ -1281,7 +1854,7 @@ export const api = {
   // Implementation Agent execution (diff/patch preview only) — see
   // app/api/routes/implementation_runs.py.
   implementationRuns: {
-    start: (body: { implementation_task_id: string; triggered_by_user_id: string }) =>
+    start: (body: { implementation_task_id: string; triggered_by_user_id: string; provider_override?: ApiProviderOverride; model_override?: string }) =>
       post<ApiImplementationRun>("/implementation-runs", body),
     get: (id: string) => get<ApiImplementationRun>(`/implementation-runs/${id}`),
     review: (id: string, body: { decision: "ACCEPTED" | "REJECTED"; reviewed_by_user_id: string; comment?: string | null }) =>
@@ -1290,13 +1863,62 @@ export const api = {
     // the run is ACCEPTED. Never targets the repository's default branch.
     createPullRequest: (id: string, body: { triggered_by_user_id: string; base_branch?: string | null }) =>
       post<ApiImplementationRun>(`/implementation-runs/${id}/create-pull-request`, body),
+    // For a task implemented outside this app (Claude Code/Codex/OpenCode/
+    // Cursor via the Implementation skill) — records an already-open PR
+    // against the task instead of generating one from an agent's own diff.
+    registerPullRequest: (body: { implementation_task_id: string; pr_number: number; triggered_by_user_id: string }) =>
+      post<ApiImplementationRun>("/implementation-runs/register-pull-request", body),
+  },
+
+  // Multi-repo support — see app/api/routes/implementation_tasks.py.
+  implementationTasks: {
+    updateRepository: (taskId: string, repositoryId: string | null) =>
+      patch<ApiImplementationTask>(`/implementation-tasks/${taskId}/repository`, { repository_id: repositoryId }),
+    // Undoes a mistaken COMPLETED status (most commonly: the wrong pull
+    // request was registered) — puts the task back to PENDING and rejects
+    // the run its mistaken PR was attached to.
+    reopen: (taskId: string, body: { triggered_by_user_id: string; reason?: string | null }) =>
+      post<ApiImplementationTask>(`/implementation-tasks/${taskId}/reopen`, body),
+  },
+
+  // Project Engineering Setup — the Create Project wizard's own data. See
+  // app/api/routes/project_engineering_setup.py.
+  engineeringSetup: {
+    create: (projectId: string, body: ApiCreateEngineeringSetupRequest) =>
+      post<ApiEngineeringSetup>(`/projects/${projectId}/engineering-setup`, body),
+    get: (projectId: string) => get<ApiEngineeringSetup | null>(`/projects/${projectId}/engineering-setup`),
+    update: (projectId: string, body: ApiUpdateEngineeringSetupRequest) =>
+      patch<ApiEngineeringSetup>(`/projects/${projectId}/engineering-setup`, body),
+    linkRepository: (projectId: string, repositoryId: string) =>
+      post<ApiEngineeringSetup>(`/projects/${projectId}/engineering-setup/link-repository`, { repository_id: repositoryId }),
+    linkJiraProject: (projectId: string, jiraProjectLinkId: string) =>
+      post<ApiEngineeringSetup>(`/projects/${projectId}/engineering-setup/link-jira-project`, { jira_project_link_id: jiraProjectLinkId }),
+  },
+
+  // CodeRunnerService — the local-git alternative flow: apply an
+  // accepted patch through a real isolated clone, run configured tests,
+  // and only on success commit/push a real branch (see
+  // app/api/routes/code_runs.py). Story-scoped implementation runs only.
+  codeRuns: {
+    apply: (body: { implementation_run_id: string; triggered_by_user_id: string; base_branch?: string | null; test_commands?: string[] }) =>
+      post<ApiCodeRun>("/code-runs", body),
+    get: (id: string) => get<ApiCodeRun>(`/code-runs/${id}`),
+    // Only reachable once the CodeRun reached PUSHED — creates a real
+    // GitHub PR from the already-pushed branch (no further commits).
+    createPullRequest: (id: string, body: { triggered_by_user_id: string; base_branch?: string | null }) =>
+      post<ApiPullRequestLink>(`/code-runs/${id}/create-pull-request`, body),
   },
 
   // Testing Agent system — see app/api/routes/test_runs.py. QA approval
   // happens at the existing /reviews/{id} screen (review_id above), not here.
   testRuns: {
-    start: (body: { implementation_task_id: string; agent_type: ApiTestAgentType; triggered_by_user_id: string; reviewer_id: string }) =>
-      post<ApiTestRun>("/test-runs", body),
+    start: (body: {
+      implementation_task_id: string;
+      agent_type: ApiTestAgentType;
+      triggered_by_user_id: string;
+      reviewer_id?: string; // required for a project-level task; ignored for a story-scoped one
+      evidence_attachments?: string[];
+    }) => post<ApiTestRun>("/test-runs", body),
     get: (id: string) => get<ApiTestRun>(`/test-runs/${id}`),
   },
 
@@ -1319,6 +1941,28 @@ export const api = {
     get: (id: string) => get<ApiPRReviewRun>(`/pr-review-runs/${id}`),
     postComments: (id: string, body: { triggered_by_user_id: string; comments: { file: string; body: string }[] }) =>
       post<ApiPostPRReviewCommentsResponse>(`/pr-review-runs/${id}/post-comments`, body),
+    // Rule — "if recommendation is REQUEST_CHANGES, lane returns to Code
+    // Implementation or Implementation Plan update." Story-scoped only.
+    sendBackForRework: (id: string, body: { triggered_by_user_id: string; target_node_key: "IMPLEMENTATION" | "IMPLEMENTATION_PLAN" }) =>
+      post<ApiPRReviewRun>(`/pr-review-runs/${id}/send-back-for-rework`, body),
+  },
+
+  // Story Testing stage — see app/api/routes/story_test_executions.py.
+  storyTestExecutions: {
+    start: (body: { story_id: string; triggered_by_user_id: string }) =>
+      post<ApiStoryTestExecution>("/story-test-executions", body),
+    get: (id: string) => get<ApiStoryTestExecution>(`/story-test-executions/${id}`),
+    listForStory: (storyId: string) => get<ApiStoryTestExecution[]>(`/story-test-executions/by-story/${storyId}`),
+    generateChecklist: (id: string, body: { triggered_by_user_id: string }) =>
+      post<ApiStoryTestExecution>(`/story-test-executions/${id}/generate-checklist`, body),
+    attachCodeRun: (id: string, body: { triggered_by_user_id: string; code_run_id: string }) =>
+      post<ApiStoryTestExecution>(`/story-test-executions/${id}/attach-code-run`, body),
+    recordResults: (
+      id: string,
+      body: { triggered_by_user_id: string; results: { scenario: string; status: string; notes: string }[]; evidence_urls: string[]; bugs_found: string[] }
+    ) => patch<ApiStoryTestExecution>(`/story-test-executions/${id}/results`, body),
+    qaApprove: (id: string, body: { actor_user_id: string; decision: "APPROVED" | "REJECTED"; reason?: string }) =>
+      post<ApiStoryTestExecution>(`/story-test-executions/${id}/qa-approve`, body),
   },
 
   integrations: {
@@ -1330,13 +1974,65 @@ export const api = {
   // GitHub integration foundation — read-only repo scan. `access_token`
   // in `connect` is the only place a token ever appears in a request;
   // every response type here is token-free (see ApiIntegrationConnection).
+  // Use your own AI coding tool for a stage — see apps/api/app/services/coding_tool_skills.py.
+  codingTools: {
+    preview: (projectId: string, tool: ApiCodingTool, stage: string) =>
+      get<ApiSkillPack>(`/projects/${projectId}/coding-tools/skills/preview?tool=${tool}&stage=${encodeURIComponent(stage)}`),
+    install: (projectId: string, body: { tool: ApiCodingTool; stage: string; triggered_by_user_id: string }) =>
+      post<ApiInstallSkillsResponse>(`/projects/${projectId}/coding-tools/skills/install`, body),
+    sync: (projectId: string, body: { stage: string; triggered_by_user_id: string; ref?: string | null }) =>
+      post<ApiSyncStageResponse>(`/projects/${projectId}/coding-tools/sync`, body),
+    // Per-story delivery lane stages (Story LLD, Implementation Plan, Test
+    // Scenarios) — the skill files are installed once, generically, via
+    // preview/install above; these two are the genuinely per-story actions.
+    syncStoryInputs: (projectId: string, storyId: string, body: { stage: string; triggered_by_user_id: string; base_branch?: string | null }) =>
+      post<ApiSyncStoryInputsResponse>(`/projects/${projectId}/coding-tools/stories/${storyId}/sync-inputs`, body),
+    syncStoryStage: (projectId: string, storyId: string, body: { stage: string; triggered_by_user_id: string; ref?: string | null }) =>
+      post<ApiSyncStoryStageResponse>(`/projects/${projectId}/coding-tools/stories/${storyId}/sync`, body),
+    // Stories list's bulk action: for every selected story, create its
+    // delivery lane if missing and snapshot its `stage` inputs — all
+    // landing on ONE shared branch/PR, not one per story.
+    bulkPrepare: (
+      projectId: string,
+      body: { story_ids: string[]; stage: string; triggered_by_user_id: string; base_branch?: string | null },
+    ) => post<ApiBulkPrepareCodingToolResponse>(`/projects/${projectId}/coding-tools/stories/bulk-prepare`, body),
+    // Reverse direction — for every selected story, re-read
+    // docs/sdlc/stories/<slug>/<stage>.md and save it as a new version
+    // (e.g. after a human or external coding tool refined what
+    // bulkPrepare originally pushed).
+    bulkSync: (
+      projectId: string,
+      body: { story_ids: string[]; stage: string; triggered_by_user_id: string; ref?: string | null },
+    ) => post<ApiBulkSyncStoryStageResponse>(`/projects/${projectId}/coding-tools/stories/bulk-sync`, body),
+    // Implementation's own per-task input snapshot — its skill pack (stage
+    // "implementation") installs once per repo via install() above; this is
+    // the genuinely per-task action (one story can have several sibling
+    // tasks: DATABASE/BACKEND/FRONTEND).
+    syncImplementationTaskInputs: (projectId: string, taskId: string, body: { triggered_by_user_id: string; base_branch?: string | null }) =>
+      post<ApiSyncStoryInputsResponse>(`/projects/${projectId}/coding-tools/implementation-tasks/${taskId}/sync-inputs`, body),
+  },
+
   github: {
     connect: (body: ApiConnectGitHubRequest) => post<ApiIntegrationConnection>("/github/connections", body),
     listConnections: () => get<ApiIntegrationConnection[]>("/github/connections"),
     disconnect: (connectionId: string) => post<ApiIntegrationConnection>(`/github/connections/${connectionId}/disconnect`),
     listRepositoryOptions: (connectionId: string) => get<ApiGitHubRepoSummary[]>(`/github/connections/${connectionId}/repositories`),
+    // Creates a brand-new EMPTY repository on GitHub under this connection's
+    // account (project wizard's "Create a new repository"); link it to a
+    // project afterwards with saveRepository.
+    // Does a repository with this name already exist under the connection's own account?
+    remoteRepositoryExists: (connectionId: string, name: string) =>
+      get<{ exists: boolean; owner: string; name: string }>(
+        `/github/connections/${connectionId}/repositories/exists?name=${encodeURIComponent(name)}`,
+      ),
+    createRemoteRepository: (
+      connectionId: string,
+      body: { name: string; description?: string | null; private?: boolean; actor_user_id?: string | null },
+    ) => post<ApiGitHubRepoSummary>(`/github/connections/${connectionId}/repositories`, body),
     saveRepository: (body: ApiCreateRepositoryRequest) => post<ApiRepository>("/github/repositories", body),
     getRepository: (repositoryId: string) => get<ApiRepository>(`/github/repositories/${repositoryId}`),
+    setPrimaryRepository: (repositoryId: string) => post<ApiRepository>(`/github/repositories/${repositoryId}/set-primary`),
+    removeRepository: (repositoryId: string) => del(`/github/repositories/${repositoryId}`),
     listBranches: (repositoryId: string) => get<string[]>(`/github/repositories/${repositoryId}/branches`),
     getDefaultBranch: (repositoryId: string) => get<string>(`/github/repositories/${repositoryId}/default-branch`),
     getTree: (repositoryId: string, ref?: string) =>
@@ -1350,6 +2046,14 @@ export const api = {
       post<ApiRepositorySnapshot>(`/github/repositories/${repositoryId}/snapshots`, body),
     listSnapshots: (repositoryId: string) => get<ApiRepositorySnapshot[]>(`/github/repositories/${repositoryId}/snapshots`),
     listSnapshotFiles: (snapshotId: string) => get<ApiRepositoryFileIndexEntry[]>(`/github/snapshots/${snapshotId}/files`),
+    bootstrapRepository: (projectId: string, body: ApiBootstrapRepositoryRequest) =>
+      post<ApiBootstrapRepositoryResponse>(`/projects/${projectId}/github/bootstrap-repository`, body),
+    // Edit-and-commit a single file straight to the connected repository —
+    // see app/api/routes/repository_file_edit.py. Always lands on a new
+    // branch (never the repository's default branch) and opens a real PR
+    // unless body.open_pull_request is explicitly false.
+    commitFileEdit: (projectId: string, repositoryId: string, body: ApiCommitFileEditRequest) =>
+      post<ApiCommitFileEditResponse>(`/projects/${projectId}/github/repositories/${repositoryId}/commit-file`, body),
   },
 
   // Real Jira integration — see app/api/routes/jira_integration.py.
@@ -1359,12 +2063,25 @@ export const api = {
     connect: (body: ApiConnectJiraRequest) => post<ApiJiraConnection>("/jira/connections", body),
     listConnections: () => get<ApiJiraConnection[]>("/jira/connections"),
     disconnect: (connectionId: string) => post<ApiJiraConnection>(`/jira/connections/${connectionId}/disconnect`),
+    // Every Jira project this account can see — backs a project picker so a
+    // key is chosen from what actually exists rather than typed by hand.
+    listProjectOptions: (connectionId: string) => get<{ key: string; name: string }[]>(`/jira/connections/${connectionId}/projects`),
     saveProject: (body: { project_id: string; connection_id: string; jira_project_key: string }) =>
       post<ApiJiraProjectLink>("/jira/projects", body),
     pushPreview: (projectId: string) => get<ApiJiraPushPreview>(`/jira/projects/${projectId}/push-preview`),
     push: (body: { project_id: string; triggered_by_user_id: string; selections: { source_type: ApiJiraSourceType; source_key: string }[] }) =>
       post<ApiJiraPushResponse>("/jira/push", body),
     syncStatus: (projectId: string) => post<ApiJiraSyncStatusResponse>(`/jira/projects/${projectId}/sync-status`),
+    // Per-story sync — always preview before sync (see the panel in
+    // components/stories/stories-view.tsx). Bulk sync only ever touches
+    // the exact `story_ids` passed in — never an implicit "sync all".
+    storyPreview: (storyId: string) => get<ApiStoryJiraPreview>(`/jira/stories/${storyId}/preview`),
+    bulkPreviewStories: (storyIds: string[]) =>
+      post<ApiBulkStoryJiraPreviewResponse>("/jira/stories/bulk-preview", { story_ids: storyIds }),
+    syncStory: (storyId: string, body: { triggered_by_user_id: string }) =>
+      post<ApiStoryJiraSyncResult>(`/jira/stories/${storyId}/sync`, body),
+    bulkSyncStories: (body: { story_ids: string[]; triggered_by_user_id: string }) =>
+      post<ApiBulkStoryJiraSyncResponse>("/jira/stories/bulk-sync", body),
   },
 
   // Real Confluence integration — see app/api/routes/confluence_integration.py.
@@ -1380,6 +2097,14 @@ export const api = {
     publishPreview: (projectId: string) => get<ApiConfluencePublishPreview>(`/confluence/projects/${projectId}/publish-preview`),
     publish: (body: { project_id: string; triggered_by_user_id: string; artifact_types: string[] }) =>
       post<ApiConfluencePublishResponse>("/confluence/publish", body),
+    // Story-scoped (e.g. Story LLD) — see
+    // app/services/story_confluence_publish.py. Same "preview then
+    // publish exactly what's named" contract as the project-level pair
+    // above.
+    storyPublishPreview: (storyId: string) =>
+      get<ApiStoryConfluencePublishPreview>(`/confluence/stories/${storyId}/publish-preview`),
+    storyPublish: (storyId: string, body: { triggered_by_user_id: string; artifact_types: string[] }) =>
+      post<ApiConfluencePublishResponse>(`/confluence/stories/${storyId}/publish`, body),
   },
 
   ops: {
@@ -1397,16 +2122,28 @@ export const api = {
   },
 
   knowledgeSources: {
-    list: (params?: { category?: string; status?: string }) => {
+    list: (params?: { category?: string; status?: string; project_id?: string }) => {
       const qs = new URLSearchParams();
       if (params?.category) qs.set("category", params.category);
       if (params?.status) qs.set("status", params.status);
+      if (params?.project_id) qs.set("project_id", params.project_id);
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
       return get<ApiKnowledgeSource[]>(`/knowledge-sources${suffix}`);
     },
     get: (id: string) => get<ApiKnowledgeSource>(`/knowledge-sources/${id}`),
-    create: (body: { title: string; category: string; source_type: string; file_url?: string; uploaded_by_id: string }) =>
+    create: (body: { title: string; category: string; source_type: string; file_url?: string; uploaded_by_id: string; project_id?: string | null }) =>
       post<ApiKnowledgeSource>("/knowledge-sources", body),
+    // Pasted-content counterpart to upload() — no file, just text.
+    // Used by the Create Project wizard's Knowledge Base step.
+    createFromText: (body: {
+      title: string;
+      category: string;
+      content: string;
+      uploaded_by_id: string;
+      project_id?: string | null;
+      source_type?: string;
+      file_url?: string | null;
+    }) => post<ApiKnowledgeSource>("/knowledge-sources/from-text", body),
     upload: (formData: FormData) => postForm<ApiKnowledgeSource>("/knowledge-sources/upload", formData),
     chunks: (id: string) => get<ApiKnowledgeChunk[]>(`/knowledge-sources/${id}/chunks`),
     search: (query: string, params?: { limit?: number; category?: string }) => {
@@ -1446,12 +2183,27 @@ export const api = {
 
   agentRuns: {
     get: (id: string) => get<ApiAgentRun>(`/agent-runs/${id}`),
+    // project_id is optional — pass it so claude_agent_sdk's `configured`
+    // also reflects whether THIS project has a connected repository, not
+    // just the backend's global CLAUDE_AGENT_SDK_ENABLED flag.
+    listProviders: (projectId?: string) =>
+      get<ApiProviderOption[]>(`/agent-runs/providers${projectId ? `?project_id=${projectId}` : ""}`),
     start: (body: {
       project_id: string;
       workflow_node_id: string;
       action: string;
       triggered_by_user_id: string;
       input_context?: Record<string, unknown>;
+      // Force this one run to use a specific LLM backend instead of the
+      // project's default auto-selected one — see
+      // apps/api/app/schemas/agent_run.py's ProviderOverride. Omit to keep
+      // today's default (auto-detected provider / Claude Agent SDK if
+      // CLAUDE_AGENT_SDK_ENABLED and the project has a repo).
+      provider_override?: ApiProviderOverride;
+      // Force a specific model within provider_override's provider (e.g.
+      // "claude-opus-5") instead of that provider's configured default.
+      // Ignored unless provider_override is also set.
+      model_override?: string;
     }) => post<ApiAgentRun>("/agent-runs", body),
     saveToArtifact: (id: string) =>
       post<{ agent_run: ApiAgentRun; artifact_id: string; artifact_version_id: string; artifact_status: string; workflow_node_status: string }>(
@@ -1464,7 +2216,7 @@ export const api = {
   stories: {
     list: (projectId: string) => get<{ items: ApiStory[]; total: number }>(`/projects/${projectId}/stories`),
     syncFromBacklog: (projectId: string, body: { story_type: "VERTICAL" | "HORIZONTAL"; triggered_by_user_id: string }) =>
-      post<{ created: ApiStory[]; already_existed: number }>(`/projects/${projectId}/stories/sync-from-backlog`, body),
+      post<{ created: ApiStory[]; already_existed: number; parsed_count: number }>(`/projects/${projectId}/stories/sync-from-backlog`, body),
     update: (
       storyId: string,
       body: Partial<{
@@ -1491,12 +2243,52 @@ export const api = {
       post<ApiStory>(`/stories/${storyId}/assign`, { owner_user_id: ownerUserId, assigned_by_id: assignedById }),
     createLane: (storyId: string, triggeredByUserId: string) =>
       post<ApiStory>(`/stories/${storyId}/lane`, { triggered_by_user_id: triggeredByUserId }),
+    // The Stories list's "Run Story LLD" bulk button — drafts every
+    // selected story's Story LLD in one click, creating a lane and
+    // completing Story Ready along the way where needed.
+    bulkRunStoryLld: (projectId: string, body: { story_ids: string[]; triggered_by_user_id: string }) =>
+      post<ApiBulkRunStoryLldResponse>(`/projects/${projectId}/stories/bulk-run-story-lld`, body),
+    // "Approve & Unlock Next" bulk action — a real, role-checked human
+    // approval of one review gate (LLD_REVIEW / IMPLEMENTATION_PLAN /
+    // TEST_SCENARIOS) across many stories at once.
+    bulkApproveLaneNode: (projectId: string, body: { node_key: string; story_ids: string[]; triggered_by_user_id: string }) =>
+      post<ApiBulkApproveLaneNodeResponse>(`/projects/${projectId}/stories/bulk-approve-lane-node`, body),
+    // Story-wise bulk code Implementation — one real agent run per story,
+    // for that story's own next runnable task. Never creates/merges a PR.
+    bulkStartImplementation: (projectId: string, body: { story_ids: string[]; triggered_by_user_id: string }) =>
+      post<ApiBulkStartImplementationResponse>(`/projects/${projectId}/stories/bulk-start-implementation`, body),
+    // Which stories can start now, and in what order the rest unblock —
+    // derived from stories' own Dependencies text. See
+    // app/services/story_sequencing.py.
+    recommendedOrder: (projectId: string) => get<ApiStoryOrderResponse>(`/projects/${projectId}/stories/recommended-order`),
+    // sync-from-backlog never updates an already-synced story — these two
+    // are the explicit, human-reviewed way a correction made in a
+    // regenerated/re-approved backlog can still reach one.
+    backlogDiff: (storyId: string) => get<ApiStoryBacklogDiff>(`/stories/${storyId}/backlog-diff`),
+    applyBacklogDiff: (storyId: string, body: { triggered_by_user_id: string; fields?: string[] | null }) =>
+      post<ApiStory>(`/stories/${storyId}/apply-backlog-diff`, body),
     // 404s when no lane has been created yet — callers should catch
     // ApiError with status 404.
     getLane: (storyId: string) => get<ApiStoryDeliveryLane>(`/stories/${storyId}/lane`),
     // 404s when no Story LLD has been drafted yet — callers should catch
     // ApiError with status 404 and treat it as "not drafted yet."
     getLld: (storyId: string) => get<ApiStoryArtifact>(`/stories/${storyId}/lld`),
+    // 404s when no Implementation Plan has been drafted yet.
+    getImplementationPlan: (storyId: string) => get<ApiStoryArtifact>(`/stories/${storyId}/implementation-plan`),
+    // 404s when no Test Scenarios have been drafted yet.
+    getTestScenarios: (storyId: string) => get<ApiStoryArtifact>(`/stories/${storyId}/test-scenarios`),
+    // 404s until Story LLD/LLD_REVIEW is approved — see
+    // app/api/routes/stories.py's _ensure_story_implementation_tasks.
+    // Full-stack-per-story: a story can have several sequential tasks
+    // (one per area); this always resolves to whichever one is current.
+    getImplementationTask: (storyId: string) => get<ApiImplementationTask>(`/stories/${storyId}/implementation-task`),
+    // The full ordered set behind the single "current task" pointer above
+    // (e.g. DATABASE, BACKEND, FRONTEND) — for showing the whole
+    // sequence's progress, not just what's current.
+    getImplementationTasks: (storyId: string) => get<ApiImplementationTask[]>(`/stories/${storyId}/implementation-tasks`),
+    // 404s until a test run has completed for this story — see
+    // app/services/testing_agent.STORY_TEST_REPORT_ARTIFACT_TYPE.
+    getTestReport: (storyId: string) => get<ApiStoryArtifact>(`/stories/${storyId}/test-report`),
   },
 
   storyDelivery: {
@@ -1505,10 +2297,29 @@ export const api = {
       nodeId: string,
       body: { status: string; actor_user_id: string; blocked_reason?: string; assigned_user_id?: string }
     ) => patch<ApiStoryDeliveryNode>(`/delivery-lane-nodes/${nodeId}`, body),
-    draftStoryLld: (nodeId: string, triggeredByUserId: string) =>
+    draftStoryLld: (nodeId: string, triggeredByUserId: string, clarificationAnswers?: string, llm?: LlmOverride) =>
       post<{ needs_clarification: boolean; story_artifact: ApiStoryArtifact | null; node_status: string }>(
         `/delivery-lane-nodes/${nodeId}/draft-story-lld`,
-        { triggered_by_user_id: triggeredByUserId }
+        {
+          triggered_by_user_id: triggeredByUserId, clarification_answers: clarificationAnswers || undefined,
+          provider_override: llm?.providerOverride, model_override: llm?.modelOverride,
+        }
+      ),
+    draftImplementationPlan: (nodeId: string, triggeredByUserId: string, clarificationAnswers?: string, llm?: LlmOverride) =>
+      post<{ needs_clarification: boolean; story_artifact: ApiStoryArtifact | null; node_status: string }>(
+        `/delivery-lane-nodes/${nodeId}/draft-implementation-plan`,
+        {
+          triggered_by_user_id: triggeredByUserId, clarification_answers: clarificationAnswers || undefined,
+          provider_override: llm?.providerOverride, model_override: llm?.modelOverride,
+        }
+      ),
+    draftTestScenarios: (nodeId: string, triggeredByUserId: string, clarificationAnswers?: string, llm?: LlmOverride) =>
+      post<{ needs_clarification: boolean; story_artifact: ApiStoryArtifact | null; node_status: string }>(
+        `/delivery-lane-nodes/${nodeId}/draft-test-scenarios`,
+        {
+          triggered_by_user_id: triggeredByUserId, clarification_answers: clarificationAnswers || undefined,
+          provider_override: llm?.providerOverride, model_override: llm?.modelOverride,
+        }
       ),
   },
 
@@ -1541,5 +2352,28 @@ export const api = {
         triggered_by_user_id: triggeredByUserId,
         reviewer_id: reviewerId,
       }),
+  },
+
+  // Release planning from story delivery lanes — see
+  // app/api/routes/releases.py. A release only ever holds explicitly
+  // added stories (never an implicit "add every ready story").
+  releases: {
+    list: (projectId: string) => get<ApiRelease[]>(`/projects/${projectId}/releases`),
+    releaseReadyStories: (projectId: string) => get<ApiStory[]>(`/projects/${projectId}/release-ready-stories`),
+    create: (body: { project_id: string; name: string; version: string; target_date?: string; created_by_id: string }) =>
+      post<ApiRelease>("/releases", body),
+    update: (
+      releaseId: string,
+      body: Partial<{ name: string; version: string; target_date: string; release_notes: string }> & { updated_by_id: string }
+    ) => patch<ApiRelease>(`/releases/${releaseId}`, body),
+    board: (releaseId: string) => get<ApiReleaseBoard>(`/releases/${releaseId}/board`),
+    addStory: (releaseId: string, storyId: string, actorUserId: string) =>
+      post<ApiReleaseStory>(`/releases/${releaseId}/stories`, { story_id: storyId, actor_user_id: actorUserId }),
+    removeStory: (releaseId: string, storyId: string, actorUserId: string) =>
+      del<void>(`/releases/${releaseId}/stories/${storyId}`, { actor_user_id: actorUserId }),
+    generateNotes: (releaseId: string, triggeredByUserId: string) =>
+      post<ApiRelease>(`/releases/${releaseId}/generate-notes`, { triggered_by_user_id: triggeredByUserId }),
+    approvalChecklist: (releaseId: string) => get<string[]>(`/releases/${releaseId}/approval-checklist`),
+    approve: (releaseId: string, actorUserId: string) => post<ApiRelease>(`/releases/${releaseId}/approve`, { actor_user_id: actorUserId }),
   },
 };

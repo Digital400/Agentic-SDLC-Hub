@@ -35,6 +35,15 @@ from app.models.enums import (
     StoryDeliveryNodeStatus,
     SprintStatus,
     SprintStoryStatus,
+    ReleaseStatus,
+    StoryJiraSyncStatus,
+    StoryTestExecutionStatus,
+    StoryTestExecutionQaDecision,
+    CodeRunStatus,
+    CodingStandardCategory,
+    DocumentationTarget,
+    GithubSetupOption,
+    JiraSetupOption,
     PRReviewRecommendation,
     PRReviewRunStatus,
     ProjectRole,
@@ -47,6 +56,7 @@ from app.models.enums import (
     UserRole,
     WorkflowAction,
     WorkflowStatus,
+    WorkType,
 )
 from app.models.user import User
 from app.models.project import Project, ProjectMember
@@ -54,6 +64,8 @@ from app.models.workflow import WorkflowEdge, WorkflowNode
 from app.models.artifact import Artifact, ArtifactVersion
 from app.models.sprint import Sprint
 from app.models.sprint_story import SprintStory
+from app.models.release import Release
+from app.models.release_story import ReleaseStory
 from app.models.story import Story
 from app.models.story_assignee import StoryAssignee
 from app.models.story_delivery_node import StoryDeliveryNode
@@ -61,6 +73,7 @@ from app.models.story_delivery_edge import StoryDeliveryEdge
 from app.models.story_delivery_lane import StoryDeliveryLane
 from app.models.story_artifact import StoryArtifact
 from app.models.story_activity_log import StoryActivityLog
+from app.models.story_test_execution import StoryTestExecution
 from app.models.review import Review, ReviewComment
 from app.models.agent import AgentDefinition, AgentPrompt, AgentRun, AgentRunLoopEvent
 from app.models.validator import ValidatorDefinition
@@ -78,6 +91,16 @@ from app.models.knowledge import KnowledgeChunk, KnowledgeSource
 from app.models.integration import Integration
 from app.models.integration_connection import IntegrationConnection
 from app.models.repository import Repository, RepositoryFileIndex, RepositorySnapshot
+from app.models.code_run import CodeRun
+from app.models.project_engineering_setup import (
+    ProjectCodingStandard,
+    ProjectCommandConfig,
+    ProjectDocumentationConfig,
+    ProjectEngineeringSetup,
+    ProjectGuardrail,
+    ProjectJiraConfig,
+    ProjectRepositoryConfig,
+)
 from app.models.audit import AuditLog
 
 __all__ = [
@@ -86,6 +109,7 @@ __all__ = [
     "WorkflowAction",
     "ProjectStatus",
     "ProjectRole",
+    "WorkType",
     "ReviewStatus",
     "ArtifactStatus",
     "AgentPromptRole",
@@ -118,10 +142,19 @@ __all__ = [
     "StoryDeliveryEdge",
     "StoryArtifact",
     "StoryActivityLog",
+    "StoryTestExecution",
+    "StoryTestExecutionStatus",
+    "StoryTestExecutionQaDecision",
     "Sprint",
     "SprintStatus",
     "SprintStory",
     "SprintStoryStatus",
+    "Release",
+    "ReleaseStatus",
+    "ReleaseStory",
+    "StoryJiraSyncStatus",
+    "CodeRun",
+    "CodeRunStatus",
     "JiraProjectLink",
     "JiraIssueLink",
     "JiraSourceType",
@@ -158,5 +191,16 @@ __all__ = [
     "Repository",
     "RepositorySnapshot",
     "RepositoryFileIndex",
+    "ProjectEngineeringSetup",
+    "ProjectRepositoryConfig",
+    "ProjectJiraConfig",
+    "ProjectCodingStandard",
+    "ProjectGuardrail",
+    "ProjectDocumentationConfig",
+    "ProjectCommandConfig",
+    "GithubSetupOption",
+    "JiraSetupOption",
+    "DocumentationTarget",
+    "CodingStandardCategory",
     "AuditLog",
 ]

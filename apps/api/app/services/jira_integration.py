@@ -12,11 +12,14 @@ app/api/routes/jira_integration.py):
     in an exception message — every `JiraIntegrationError` raised below is
     built only from the response status code and Jira's own JSON error
     body, which never echoes back the credential that sent the request.
-  - Only four methods exist: verify_credentials, get_project (both reads),
+  - Five methods exist: verify_credentials, get_project (both reads),
     create_issue (a write — creates exactly the one issue described, never
-    more), and get_issue_status (a read, for status sync). There is no
-    update, delete, transition, or merge-equivalent method anywhere in
-    this module — enforced by construction, the same way
+    more), get_issue_status (a read, for status sync), and add_comment (a
+    write, but purely additive activity — see its own docstring for why
+    this doesn't count as the update it sounds like). There is no update,
+    delete, transition, or merge-equivalent method anywhere in this
+    module that mutates an issue's own fields or workflow status —
+    enforced by construction, the same way
     app/services/github_integration.py has no merge method.
 
 Real network calls only — no mock/heuristic fallback exists for this
@@ -63,6 +66,7 @@ class JiraProject:
 class JiraIssue:
     key: str
     url: str
+    id: str = ""
 
 
 def _auth(email: str, api_token: str) -> httpx.BasicAuth:
@@ -137,6 +141,31 @@ def get_project(
     return JiraProject(key=data["key"], name=data.get("name", data["key"]), id=data["id"])
 
 
+def list_projects(
+    base_url: str, email: str, api_token: str, *, transport: httpx.BaseTransport | None = None, max_projects: int = 200
+) -> list[JiraProject]:
+    """GET /rest/api/3/project/search — every project this account can see,
+    paginated. A read, used only to populate a project picker (see
+    app/api/routes/jira_integration.py's list_connection_projects) so a
+    project's key is chosen from what actually exists rather than typed by
+    hand. Capped at `max_projects` (default 200) for the same reason
+    github_integration.py's list_repositories caps itself."""
+    projects: list[JiraProject] = []
+    start_at = 0
+    page_size = 50
+    while len(projects) < max_projects:
+        data = _request(
+            "GET", f"/rest/api/{_API_VERSION}/project/search", base_url=base_url, email=email, api_token=api_token,
+            params={"startAt": start_at, "maxResults": page_size, "orderBy": "name"}, transport=transport,
+        ).json()
+        values = data.get("values", [])
+        projects.extend(JiraProject(key=item["key"], name=item.get("name", item["key"]), id=item["id"]) for item in values)
+        if data.get("isLast", True) or not values:
+            break
+        start_at += page_size
+    return projects[:max_projects]
+
+
 def create_issue(
     base_url: str,
     email: str,
@@ -148,13 +177,20 @@ def create_issue(
     description: str,
     parent_key: str | None = None,
     labels: list[str] | None = None,
+    priority: str | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> JiraIssue:
     """POST /rest/api/3/issue — creates exactly the one issue described.
     `parent_key` sets Jira's `parent` field, used for a Sub-task's parent
-    Story/Task or a Story's parent Epic. Never called by this codebase
-    with anything but a single, explicitly human-selected item — see
-    app/api/routes/jira_integration.py's /jira/push."""
+    Story/Task or a Story's parent Epic. `priority` is Jira's real,
+    standard field (one of Jira's 5-point scale — see
+    app/services/jira_export.py's normalize_jira_priority) — unlike Story
+    Points/Sprint (see app/services/story_jira_sync.py's module docstring
+    for why those are description text instead, never a guessed custom
+    field). Never called by this codebase with anything but a single,
+    explicitly human-selected item — see
+    app/api/routes/jira_integration.py's /jira/push and
+    /jira/stories/{id}/sync."""
     fields: dict = {
         "project": {"key": project_key},
         "summary": summary,
@@ -165,13 +201,33 @@ def create_issue(
         fields["parent"] = {"key": parent_key}
     if labels:
         fields["labels"] = labels
+    if priority:
+        fields["priority"] = {"name": priority}
 
     data = _request(
         "POST", f"/rest/api/{_API_VERSION}/issue", base_url=base_url, email=email, api_token=api_token,
         json_body={"fields": fields}, transport=transport,
     ).json()
     issue_key = data["key"]
-    return JiraIssue(key=issue_key, url=f"{base_url.rstrip('/')}/browse/{issue_key}")
+    return JiraIssue(key=issue_key, id=str(data.get("id", "")), url=f"{base_url.rstrip('/')}/browse/{issue_key}")
+
+
+def add_comment(
+    base_url: str, email: str, api_token: str, issue_key: str, body: str, *, transport: httpx.BaseTransport | None = None
+) -> None:
+    """POST /rest/api/3/issue/{key}/comment — the Done gate's "optionally
+    update Jira status" (see app/services/story_done_gate.py). This is
+    NOT the update/delete/transition/merge-equivalent call this module's
+    HARD RULE forbids — a comment never mutates the issue's own fields or
+    workflow status, it only appends activity, the same category GitHub's
+    create_issue_comment already is for PR review comments in this
+    codebase. There is still no way to flip the issue's actual status
+    field anywhere in this client — a completion comment is the honest
+    equivalent this integration can offer."""
+    _request(
+        "POST", f"/rest/api/{_API_VERSION}/issue/{issue_key}/comment", base_url=base_url, email=email, api_token=api_token,
+        json_body={"body": _to_adf(body)}, transport=transport,
+    )
 
 
 def get_issue_status(

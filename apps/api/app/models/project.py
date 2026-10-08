@@ -6,7 +6,7 @@ from sqlalchemy import Enum, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-from app.models.enums import ProjectRole, ProjectStatus
+from app.models.enums import ProjectRole, ProjectStatus, WorkType
 
 
 class Project(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -28,6 +28,17 @@ class Project(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # reproducible/explainable.
     workflow_template_id: Mapped[str] = mapped_column(String(100), nullable=False)
     workflow_template_version: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    # Selected once, at creation — decides which workflow template
+    # generate_workflow_graph builds this project's nodes from (see
+    # WorkType's own docstring). Purely informational after that; nothing
+    # re-checks it later, since the actual graph shape it produced is what
+    # everything else (GraphEngineService, etc.) operates on.
+    work_type: Mapped[WorkType] = mapped_column(
+        Enum(WorkType, native_enum=False, length=30, validate_strings=True),
+        default=WorkType.NEW_PROJECT,
+        nullable=False,
+    )
 
     # node_key of the workflow node the project is currently on (e.g.
     # "hld"). Set to the template's startNode at creation; any later update

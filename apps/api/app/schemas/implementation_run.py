@@ -7,11 +7,25 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import ImplementationRunReviewStatus, ImplementationRunStatus, PullRequestStatus
+from app.schemas.agent_run import ProviderOverride
 
 
 class StartImplementationRunRequest(BaseModel):
     implementation_task_id: uuid.UUID = Field(..., description="Existing, PENDING ImplementationTask.")
     triggered_by_user_id: uuid.UUID = Field(..., description="Existing user id — attributes this run.")
+    provider_override: ProviderOverride | None = Field(
+        default=None,
+        description=(
+            "Force this one run to use a specific LLM backend instead of the project's default "
+            "auto-selected one. 'claude_agent_sdk' requires the project to have a connected GitHub "
+            "repository (already required for Implementation itself); any other value requires that "
+            "provider's own API key to actually be configured in the backend's environment."
+        ),
+    )
+    model_override: str | None = Field(
+        default=None, max_length=200,
+        description="Force this one run to use a specific model within provider_override's provider (e.g. 'claude-opus-5'). Ignored unless provider_override is also set.",
+    )
 
 
 class ProposedFileChangeRead(BaseModel):
@@ -26,10 +40,14 @@ class PullRequestLinkRead(BaseModel):
 
     id: uuid.UUID
     project_id: uuid.UUID
-    workflow_node_id: uuid.UUID
+    workflow_node_id: uuid.UUID | None  # null for a story-scoped PR — see the model's own docstring
     implementation_task_id: uuid.UUID
     implementation_run_id: uuid.UUID
     repository_id: uuid.UUID
+    story_id: uuid.UUID | None
+    lane_id: uuid.UUID | None
+    code_run_id: uuid.UUID | None
+    jira_issue_key: str | None
     branch_name: str
     base_branch: str
     pr_number: int
@@ -47,13 +65,19 @@ class ImplementationRunRead(BaseModel):
     implementation_task_id: uuid.UUID
     repository_snapshot_id: uuid.UUID | None
     triggered_by_user_id: uuid.UUID | None
+    story_id: uuid.UUID | None
+    lane_id: uuid.UUID | None
+    story_lld_artifact_id: uuid.UUID | None
+    assigned_user_id: uuid.UUID | None
     agent_type: str
+    assigned_agent_key: str | None
     status: ImplementationRunStatus
     proposed_file_changes: list[ProposedFileChangeRead]
     diff_text: str
     explanation: str
     test_command: str
     risks: list[str]
+    pr_description: str
     used_mock: bool
     token_usage: dict | None
     cost: float | None
@@ -76,9 +100,12 @@ class ImplementationRunRead(BaseModel):
         return cls(
             id=run.id, project_id=run.project_id, implementation_task_id=run.implementation_task_id,
             repository_snapshot_id=run.repository_snapshot_id, triggered_by_user_id=run.triggered_by_user_id,
-            agent_type=run.agent_type, status=run.status,
+            story_id=run.story_id, lane_id=run.lane_id, story_lld_artifact_id=run.story_lld_artifact_id,
+            assigned_user_id=run.assigned_user_id,
+            agent_type=run.agent_type, assigned_agent_key=run.assigned_agent_key, status=run.status,
             proposed_file_changes=[ProposedFileChangeRead.model_validate(c) for c in run.proposed_file_changes],
             diff_text=run.diff_text, explanation=run.explanation, test_command=run.test_command, risks=run.risks,
+            pr_description=run.pr_description,
             used_mock=run.used_mock, token_usage=run.token_usage, cost=run.cost, error_message=run.error_message,
             started_at=run.started_at, completed_at=run.completed_at, review_status=run.review_status,
             reviewed_by_user_id=run.reviewed_by_user_id, reviewed_at=run.reviewed_at, review_comment=run.review_comment,
@@ -98,3 +125,14 @@ class CreatePullRequestRequest(BaseModel):
     base_branch: str | None = Field(
         default=None, description="Defaults to the repository's default_branch. Never itself written to."
     )
+
+
+class RegisterPullRequestRequest(BaseModel):
+    """For a task implemented outside this app (e.g. in Claude Code/Codex/
+    OpenCode/Cursor via the Implementation skill) — registers an already-
+    open GitHub PR against the task instead of generating one from an
+    ImplementationRun's own diff."""
+
+    implementation_task_id: uuid.UUID = Field(..., description="Existing ImplementationTask this PR implements.")
+    pr_number: int = Field(..., description="The already-open GitHub pull request's number, in this task's repository.")
+    triggered_by_user_id: uuid.UUID = Field(..., description="Existing user id — who is registering this PR.")

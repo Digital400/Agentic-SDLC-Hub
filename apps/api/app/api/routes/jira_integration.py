@@ -29,11 +29,20 @@ from app.models import (
     IntegrationStatus,
     JiraIssueLink,
     JiraProjectLink,
+    JiraSetupOption,
     JiraSourceType,
     Project,
+    ProjectEngineeringSetup,
+    Story,
+    StoryStatus,
     User,
 )
 from app.schemas.jira_integration import (
+    JiraProjectSummaryRead,
+    BulkPreviewStoriesToJiraRequest,
+    BulkStoryJiraPreviewResponse,
+    BulkStoryJiraSyncResponse,
+    BulkSyncStoriesToJiraRequest,
     ConnectJiraRequest,
     CreateJiraProjectLinkRequest,
     JiraConnectionRead,
@@ -45,14 +54,29 @@ from app.schemas.jira_integration import (
     JiraPushResponse,
     JiraPushResultItem,
     JiraSyncStatusResponse,
+    StoryJiraPreviewRead,
+    StoryJiraSubtaskPreviewRead,
+    StoryJiraSyncResultRead,
+    SubtaskJiraSyncResultRead,
+    SyncStoryToJiraRequest,
 )
 from app.services import jira_integration as jira_api
 from app.services.audit import record_audit_log
 from app.services.jira_integration import JiraIntegrationError
 from app.services.jira_push_preview import JiraPushItem, build_jira_push_preview
 from app.services.story_export import STORY_BACKLOG_ARTIFACT_TYPE, parse_story_backlog
+from app.services.story_jira_sync import (
+    StoryJiraPreview,
+    StoryJiraSyncResult,
+    build_story_jira_preview,
+    sync_story_to_jira,
+)
 
 router = APIRouter(prefix="/jira", tags=["jira"])
+
+# A Jira status this app treats as "done" for requirement 5's one-directional
+# status sync-back — deliberately narrow (see sync_jira_status below).
+_DONE_LIKE_JIRA_STATUSES = {"done", "closed", "resolved"}
 
 
 def _get_connection_or_404(db: Session, connection_id: uuid.UUID) -> IntegrationConnection:
@@ -74,6 +98,31 @@ def _get_jira_project_link_or_404(db: Session, project_id: uuid.UUID) -> JiraPro
     if link is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Project {project_id} has no configured Jira project yet.")
     return link
+
+
+def _check_jira_engineering_setup_allows_sync(db: Session, project_id: uuid.UUID) -> None:
+    """Project Engineering Setup rule 3 — "Jira Sync requires Jira
+    config." A project with no ProjectEngineeringSetup row is ungated
+    (rule 10); one that explicitly chose SKIP_FOR_NOW during setup is
+    blocked with a message pointing at *why*, ahead of
+    _get_jira_project_link_or_404's more generic 404 (which a real
+    JiraProjectLink might still technically satisfy in some edge case,
+    e.g. a setup skipped after a link already existed — SKIP_FOR_NOW
+    should still mean "don't sync," not just "wasn't configured yet")."""
+    setup = db.query(ProjectEngineeringSetup).filter(ProjectEngineeringSetup.project_id == project_id).first()
+    if setup is not None and setup.jira_config is not None and setup.jira_config.option == JiraSetupOption.SKIP_FOR_NOW:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Cannot sync to Jira — this project's engineering setup skipped Jira. Connect a Jira project "
+            "(Settings → Integrations → Jira, or update the engineering setup) before syncing.",
+        )
+
+
+def _get_story_or_404(db: Session, story_id: uuid.UUID) -> Story:
+    story = db.get(Story, story_id)
+    if story is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} not found")
+    return story
 
 
 def decrypt_jira_token(connection: IntegrationConnection) -> str:
@@ -179,6 +228,24 @@ def disconnect_jira(connection_id: uuid.UUID, db: Session = Depends(get_db)) -> 
     return JiraConnectionRead.from_orm_connection(connection, base_url=config.get("base_url", ""), email=config.get("email", ""))
 
 
+@router.get("/connections/{connection_id}/projects", response_model=list[JiraProjectSummaryRead])
+def list_connection_projects(connection_id: uuid.UUID, db: Session = Depends(get_db)) -> list[JiraProjectSummaryRead]:
+    """Every Jira project the connected account can see — backs the
+    project-configuration form's picker, so a project's key is chosen from
+    what actually exists rather than typed by hand (mirrors
+    app/api/routes/github_integration.py's list_connection_repositories)."""
+    connection = _get_connection_or_404(db, connection_id)
+    if connection.status != IntegrationStatus.CONNECTED:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This Jira connection isn't CONNECTED.")
+    config = _config(connection.integration)
+    token = decrypt_jira_token(connection)
+    try:
+        projects = jira_api.list_projects(config.get("base_url", ""), config.get("email", ""), token)
+    except JiraIntegrationError as exc:
+        raise _jira_error_to_http(exc) from exc
+    return [JiraProjectSummaryRead(key=p.key, name=p.name) for p in projects]
+
+
 # 2. Save a project's Jira project configuration ---------------------------------------
 
 
@@ -266,6 +333,7 @@ _TYPE_ORDER = [JiraSourceType.EPIC, JiraSourceType.STORY, JiraSourceType.IMPLEME
 @router.post("/push", response_model=JiraPushResponse)
 def push_to_jira(payload: JiraPushRequest, db: Session = Depends(get_db)) -> JiraPushResponse:
     project = _get_project_or_404(db, payload.project_id)
+    _check_jira_engineering_setup_allows_sync(db, project.id)
     jira_project_link = _get_jira_project_link_or_404(db, project.id)
     triggered_by = db.get(User, payload.triggered_by_user_id)
     if triggered_by is None:
@@ -359,7 +427,7 @@ def push_to_jira(payload: JiraPushRequest, db: Session = Depends(get_db)) -> Jir
     return JiraPushResponse(results=results)
 
 
-# 5. Sync status (requirement 8) ---------------------------------------------------------
+# 5. Sync status (requirement 8; per-story requirement 5) -------------------------------
 
 
 @router.post("/projects/{project_id}/sync-status", response_model=JiraSyncStatusResponse)
@@ -378,7 +446,147 @@ def sync_jira_status(project_id: uuid.UUID, db: Session = Depends(get_db)) -> Ji
         except JiraIntegrationError:
             continue  # one issue's status failing to sync shouldn't block the rest
 
+        # Per-story requirement 5 — "Sync Jira status back to story
+        # status". Deliberately narrow and one-directional (a read only):
+        # an arbitrary in-progress Jira workflow name (e.g. a board's own
+        # "In Review", "Ready for QA", ...) has no honest mapping onto
+        # StoryStatus's own lifecycle (PENDING/IN_SPRINT/LANE_ACTIVE/DONE),
+        # which tracks lane progress, not a kanban column. Only a
+        # "done"-like terminal Jira status ever moves a Story, and only to
+        # DONE — never invented custom-status mappings.
+        if link.source_type == JiraSourceType.STORY and link.jira_status and link.jira_status.strip().lower() in _DONE_LIKE_JIRA_STATUSES:
+            story = (
+                db.query(Story)
+                .filter(Story.project_id == project_id, Story.title == link.source_key)
+                .first()
+            )
+            if story is not None and story.status != StoryStatus.DONE:
+                story.status = StoryStatus.DONE
+
     db.commit()
     for link in links:
         db.refresh(link)
     return JiraSyncStatusResponse(links=[JiraIssueLinkRead.model_validate(link) for link in links])
+
+
+# 6. Per-story Jira sync (requirements 1-8 of the per-story spec) -----------------------
+
+
+def _to_story_preview_read(preview: StoryJiraPreview) -> StoryJiraPreviewRead:
+    return StoryJiraPreviewRead(
+        story_id=preview.story_id, summary=preview.summary, description=preview.description, priority=preview.priority,
+        story_points=preview.story_points, sprint_name=preview.sprint_name, labels=preview.labels,
+        subtasks=[
+            StoryJiraSubtaskPreviewRead(
+                implementation_task_id=uuid.UUID(s.implementation_task_id), title=s.title, description=s.description,
+                validation_errors=s.validation_errors,
+                already_linked=JiraIssueLinkRead.model_validate(s.already_linked) if s.already_linked else None,
+            )
+            for s in preview.subtasks
+        ],
+        validation_errors=preview.validation_errors,
+        already_linked=JiraIssueLinkRead.model_validate(preview.already_linked) if preview.already_linked else None,
+    )
+
+
+def _to_story_sync_result_read(story_id: uuid.UUID, result: StoryJiraSyncResult) -> StoryJiraSyncResultRead:
+    return StoryJiraSyncResultRead(
+        story_id=story_id, status=result.status, jira_issue_key=result.jira_issue_key, jira_issue_url=result.jira_issue_url,
+        errors=result.errors,
+        subtasks=[
+            SubtaskJiraSyncResultRead(
+                implementation_task_id=uuid.UUID(s.implementation_task_id), status=s.status,
+                jira_issue_key=s.jira_issue_key, jira_issue_url=s.jira_issue_url, errors=s.errors,
+            )
+            for s in result.subtasks
+        ],
+    )
+
+
+@router.get("/stories/{story_id}/preview", response_model=StoryJiraPreviewRead)
+def get_story_jira_preview(story_id: uuid.UUID, db: Session = Depends(get_db)) -> StoryJiraPreviewRead:
+    """Requirement 2 — "User must preview Jira payload before
+    creating/updating Jira issue." Read-only; never calls Jira."""
+    story = _get_story_or_404(db, story_id)
+    jira_project_link = _get_jira_project_link_or_404(db, story.project_id)
+    preview = build_story_jira_preview(db, story=story, jira_project_link=jira_project_link)
+    return _to_story_preview_read(preview)
+
+
+@router.post("/stories/bulk-preview", response_model=BulkStoryJiraPreviewResponse)
+def bulk_preview_stories_jira(payload: BulkPreviewStoriesToJiraRequest, db: Session = Depends(get_db)) -> BulkStoryJiraPreviewResponse:
+    """Requirement 4 — preview several stories at once, e.g. every
+    checkbox-selected story before a bulk-sync confirmation. Read-only;
+    never calls Jira. Each story may belong to a different project, so
+    each is resolved against its own project's Jira link independently —
+    a story whose project has none simply reports that as a validation
+    error rather than 404ing the whole batch."""
+    previews: list[StoryJiraPreviewRead] = []
+    for story_id in payload.story_ids:
+        story = _get_story_or_404(db, story_id)
+        try:
+            jira_project_link = _get_jira_project_link_or_404(db, story.project_id)
+        except HTTPException as exc:
+            previews.append(
+                StoryJiraPreviewRead(
+                    story_id=story.id, summary=story.title, description="", priority=None, story_points=story.story_points,
+                    sprint_name=None, labels=[], subtasks=[], validation_errors=[str(exc.detail)], already_linked=None,
+                )
+            )
+            continue
+        preview = build_story_jira_preview(db, story=story, jira_project_link=jira_project_link)
+        previews.append(_to_story_preview_read(preview))
+    return BulkStoryJiraPreviewResponse(previews=previews)
+
+
+@router.post("/stories/{story_id}/sync", response_model=StoryJiraSyncResultRead)
+def sync_story_jira(story_id: uuid.UUID, payload: SyncStoryToJiraRequest, db: Session = Depends(get_db)) -> StoryJiraSyncResultRead:
+    """Requirements 1/4/6 — syncs exactly this one story (never "sync
+    all" — see /stories/bulk-sync for the explicit, human-confirmed bulk
+    variant required by the stated Rule)."""
+    story = _get_story_or_404(db, story_id)
+    jira_project_link = _get_jira_project_link_or_404(db, story.project_id)
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+
+    connection = jira_project_link.connection
+    config = _config(connection.integration)
+    token = decrypt_jira_token(connection)
+
+    result = sync_story_to_jira(
+        db, story=story, jira_project_link=jira_project_link, base_url=config.get("base_url", ""),
+        email=config.get("email", ""), token=token, triggered_by=triggered_by,
+    )
+    db.commit()
+    return _to_story_sync_result_read(story.id, result)
+
+
+@router.post("/stories/bulk-sync", response_model=BulkStoryJiraSyncResponse)
+def bulk_sync_stories_jira(payload: BulkSyncStoriesToJiraRequest, db: Session = Depends(get_db)) -> BulkStoryJiraSyncResponse:
+    """Rule — "Do not sync all stories automatically unless user chooses
+    bulk sync. Bulk sync still needs preview and confirmation." This
+    endpoint only ever syncs the exact `story_ids` the caller names —
+    there is no "all stories in project" mode. The UI is expected to have
+    already shown a preview (via repeated GET .../preview calls) and
+    gotten explicit confirmation before calling this."""
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+
+    results: list[StoryJiraSyncResultRead] = []
+    for story_id in payload.story_ids:
+        story = _get_story_or_404(db, story_id)
+        jira_project_link = _get_jira_project_link_or_404(db, story.project_id)
+        connection = jira_project_link.connection
+        config = _config(connection.integration)
+        token = decrypt_jira_token(connection)
+
+        result = sync_story_to_jira(
+            db, story=story, jira_project_link=jira_project_link, base_url=config.get("base_url", ""),
+            email=config.get("email", ""), token=token, triggered_by=triggered_by,
+        )
+        results.append(_to_story_sync_result_read(story.id, result))
+
+    db.commit()
+    return BulkStoryJiraSyncResponse(results=results)

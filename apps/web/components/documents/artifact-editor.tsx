@@ -77,8 +77,18 @@ export function ArtifactEditor({
   const [banner, setBanner] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const bannerTimeout = useRef<ReturnType<typeof setTimeout>>();
+  // One DOM node per rendered section (edit and preview modes both
+  // register into this same map, keyed by section id) — lets clicking a
+  // section in SectionNav actually scroll the content pane to it, instead
+  // of only updating which section Agent Actions targets.
+  const sectionElements = useRef<Record<string, HTMLElement | null>>({});
 
   useEffect(() => () => clearTimeout(bannerTimeout.current), []);
+
+  function selectSection(id: string) {
+    setActiveSectionId(id);
+    sectionElements.current[id]?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
   function flash(message: string) {
     setBanner(message);
@@ -225,11 +235,16 @@ export function ArtifactEditor({
     }
   }
 
+  const showClarification = needsClarification && editable;
+
   return (
     // Fixed viewport height + 3 side-by-side columns only makes sense once
     // there's room for all three — below lg the section nav, content, and
     // agent/comments rail stack instead and the page scrolls normally.
-    <div className="flex flex-col lg:h-[calc(100vh-8.5rem)]">
+    // While the (tall) clarification panel is showing, the page scrolls
+    // normally instead — inside a fixed-height box it would squeeze the three
+    // columns below it down to nothing.
+    <div className={`flex flex-col ${showClarification ? "" : "lg:h-[calc(100vh-8.5rem)]"}`}>
       {/* Header + toolbar */}
       <div className="mb-4 flex flex-col gap-3 border-b border-border pb-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -399,11 +414,13 @@ export function ArtifactEditor({
           </p>
         ) : null}
 
-        {needsClarification && editable ? (
+        {showClarification ? (
           <ClarificationPanel
             projectId={doc.projectId}
             workflowNodeId={doc.workflowNodeId}
+            freeformInputKeys={doc.freeformInputKeys}
             triggeredByUserId={createdById}
+            clarificationMarkdown={joinSectionsIntoMarkdown(sections)}
             onApplied={handleAgentApplied}
           />
         ) : null}
@@ -411,12 +428,12 @@ export function ArtifactEditor({
 
       {/* Three-panel layout — column below lg, row at lg+ (see the outer
           container's comment above). */}
-      <div className="flex min-h-0 flex-1 flex-col gap-4 lg:flex-row">
+      <div className={`flex min-h-0 flex-1 flex-col gap-4 lg:flex-row ${showClarification ? "lg:h-[calc(100vh-8.5rem)] lg:min-h-[32rem]" : ""}`}>
         <aside className="max-h-56 w-full shrink-0 overflow-hidden rounded-lg border border-border lg:h-auto lg:max-h-none lg:w-56">
           <SectionNav
             sections={sections}
             activeSectionId={activeSectionId}
-            onSelectSection={setActiveSectionId}
+            onSelectSection={selectSection}
             versions={versions}
             currentVersionNumber={currentVersionNumber}
           />
@@ -424,14 +441,29 @@ export function ArtifactEditor({
 
         <main className="min-w-0 flex-1 overflow-y-auto rounded-lg border border-border p-5">
           {viewMode === "preview" ? (
-            <div className="mx-auto max-w-2xl">
-              <MarkdownPreview markdown={joinSectionsIntoMarkdown(sections)} />
+            <div className="mx-auto flex max-w-2xl flex-col gap-6">
+              {sections.map((section) => (
+                <div
+                  key={section.id}
+                  ref={(el) => {
+                    sectionElements.current[section.id] = el;
+                  }}
+                  onClick={() => setActiveSectionId(section.id)}
+                  className="scroll-mt-4"
+                >
+                  {section.isSynthetic ? null : <h2 className="mb-2 text-sm font-semibold">{section.title}</h2>}
+                  <MarkdownPreview markdown={section.contentMarkdown} />
+                </div>
+              ))}
             </div>
           ) : (
             <div className="mx-auto flex max-w-2xl flex-col gap-6">
               {sections.map((section) => (
                 <section
                   key={section.id}
+                  ref={(el) => {
+                    sectionElements.current[section.id] = el;
+                  }}
                   onFocus={() => setActiveSectionId(section.id)}
                   className="scroll-mt-4"
                 >
@@ -460,6 +492,7 @@ export function ArtifactEditor({
             documentHasRealSections={docHasRealSections}
             freeformInputKeys={doc.freeformInputKeys}
             triggeredByUserId={createdById}
+            versionKey={String(currentVersionNumber)}
             onApplied={handleAgentApplied}
           />
           <CommentsPanel comments={doc.comments} />

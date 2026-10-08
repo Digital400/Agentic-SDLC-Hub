@@ -3,9 +3,17 @@
 import { Fragment, useState } from "react";
 import Link from "next/link";
 import {
+  AlertTriangle,
   CalendarPlus,
+  CheckCircle2,
+  CheckSquare,
   ClipboardList,
+  Code2,
+  Eye,
   ExternalLink,
+  GitBranch,
+  GitCompareArrows,
+  ListOrdered,
   Loader2,
   Pencil,
   PlusCircle,
@@ -21,15 +29,53 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { api, ApiError, ApiSprint, ApiStory, ApiUser } from "@/lib/api";
+import {
+  api,
+  ApiBulkApproveLaneNodeResponse,
+  ApiBulkPrepareCodingToolResponse,
+  ApiBulkStartImplementationResponse,
+  ApiBulkSyncStoryStageResponse,
+  ApiError,
+  ApiSprint,
+  ApiStory,
+  ApiStoryBacklogDiff,
+  ApiStoryJiraPreview,
+  ApiStoryOrderResponse,
+  ApiUser,
+} from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 const MODE_HELPER_TEXT: Record<"VERTICAL" | "HORIZONTAL", string> = {
   VERTICAL: "Creates end-to-end user value stories suitable for Scrum sprint delivery.",
   HORIZONTAL: "Creates technical layer stories such as frontend, backend, database, integration, infra, testing, or documentation.",
 };
 
-function jiraBadgeVariant(status: string): "success" | "gray" {
-  return status === "Not Synced" ? "gray" : "success";
+// This app's own Jira create-state machine (Story.jira_sync_status) —
+// distinct from story.jira_status below, which is Jira's own live
+// workflow status once synced.
+const SYNC_STATUS_LABEL: Record<ApiStory["jira_sync_status"], string> = {
+  NOT_SYNCED: "Not Synced",
+  SYNC_PENDING: "Syncing…",
+  SYNCED: "Synced",
+  SYNC_FAILED: "Sync Failed",
+};
+
+// Maps the "draft, prepare & push" dropdown's stage value to the review
+// gate that must be approved to unlock the NEXT stage — Story LLD's own
+// review gate is the separate LLD_REVIEW node, while Implementation Plan
+// and Test Scenarios are each their own node (see story_delivery.py's
+// default sequence).
+const BULK_APPROVE_NODE_KEY: Record<string, string> = {
+  story_lld: "LLD_REVIEW",
+  story_implementation_plan: "IMPLEMENTATION_PLAN",
+  story_test_scenarios: "TEST_SCENARIOS",
+};
+
+function syncStatusBadgeVariant(status: ApiStory["jira_sync_status"]): "success" | "gray" | "warning" | "destructive" {
+  if (status === "SYNCED") return "success";
+  if (status === "SYNC_PENDING") return "warning";
+  if (status === "SYNC_FAILED") return "destructive";
+  return "gray";
 }
 
 function laneBadgeVariant(status: string): "gray" | "info" | "success" {
@@ -95,21 +141,117 @@ export function StoriesView({
   const [addingSprintFor, setAddingSprintFor] = useState<string | null>(null);
   const [newSprintName, setNewSprintName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Feedback for the sync action specifically — a sync that runs
+  // successfully but finds/creates nothing must never look identical to
+  // one that silently did nothing; see handleSync.
+  const [syncNotice, setSyncNotice] = useState<{ tone: "warning" | "success"; text: string } | null>(null);
+  // Requirement 2 — "User must preview Jira payload before creating/
+  // updating Jira issue": a preview is fetched and shown inline before
+  // any sync call can be confirmed, for exactly one story at a time.
+  const [previewingId, setPreviewingId] = useState<string | null>(null);
+  const [preview, setPreview] = useState<ApiStoryJiraPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  // Requirement 4/5/rule — bulk preview + bulk sync, always in that
+  // order: bulkPreviews is populated before any bulk-sync call is ever
+  // reachable.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkPreviews, setBulkPreviews] = useState<ApiStoryJiraPreview[] | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+
+  // One-click bulk "prepare for coding tool": for every selected story,
+  // create its delivery lane if missing and commit its coding-tool input
+  // snapshot — all landing on ONE shared PR to the project's GitHub repo,
+  // instead of clicking through each story's own workspace.
+  const [bulkPrepareStage, setBulkPrepareStage] = useState("story_lld");
+  const [bulkPrepareBusy, setBulkPrepareBusy] = useState(false);
+  const [bulkPrepareResult, setBulkPrepareResult] = useState<ApiBulkPrepareCodingToolResponse | null>(null);
+
+  // Reverse direction — "Pull Latest from GitHub": re-reads whatever is
+  // currently pushed for the selected stage/stories (e.g. refined by a
+  // human or an external coding tool after bulkPrepare pushed it) and
+  // saves it as each story's new version.
+  const [bulkSyncBusy, setBulkSyncBusy] = useState(false);
+  const [bulkSyncResult, setBulkSyncResult] = useState<ApiBulkSyncStoryStageResponse | null>(null);
+
+  // "Approve & Unlock Next" — a real, role-checked human approval (Tech
+  // Lead/QA/assignee, same as the single-story Approve button) of the
+  // review gate for the stage currently picked above, across every
+  // selected story at once. Never auto-approves anything on its own.
+  const [bulkApproveBusy, setBulkApproveBusy] = useState(false);
+  const [bulkApproveResult, setBulkApproveResult] = useState<ApiBulkApproveLaneNodeResponse | null>(null);
+
+  // Story-wise bulk code Implementation — one real Implementation Agent
+  // run (a real proposed diff) per selected story, for that story's own
+  // next runnable task. Never creates/merges a pull request — that stays
+  // a separate, deliberate, per-run action after a human reviews the diff.
+  const [bulkImplementBusy, setBulkImplementBusy] = useState(false);
+  const [bulkImplementResult, setBulkImplementResult] = useState<ApiBulkStartImplementationResponse | null>(null);
+
+  // Re-checking a story against a corrected/re-approved backlog —
+  // sync-from-backlog never updates an already-synced story, so this is
+  // the explicit, reviewed way a fix made there reaches it. One story's
+  // diff open at a time, same pattern as the Jira preview row above.
+  const [diffingId, setDiffingId] = useState<string | null>(null);
+  const [diff, setDiff] = useState<ApiStoryBacklogDiff | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [selectedDiffFields, setSelectedDiffFields] = useState<Set<string>>(new Set());
+  const [applyingDiff, setApplyingDiff] = useState(false);
+
+  // "Suggested implementation order" — collapsed and unfetched until opened.
+  const [orderOpen, setOrderOpen] = useState(false);
+  const [order, setOrder] = useState<ApiStoryOrderResponse | null>(null);
+  const [orderLoading, setOrderLoading] = useState(false);
+  const [orderError, setOrderError] = useState<string | null>(null);
 
   function updateStory(updated: ApiStory) {
     setStories((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
   }
 
-  async function handleSync() {
+  async function handleSync(syncMode: "VERTICAL" | "HORIZONTAL") {
     if (currentUserId === null) return;
+    setMode(syncMode);
     setSyncing(true);
     setError(null);
+    setSyncNotice(null);
     try {
       const result = await api.stories.syncFromBacklog(projectId, {
-        story_type: mode,
+        story_type: syncMode,
         triggered_by_user_id: currentUserId,
       });
-      if (result.created.length > 0) setStories((prev) => [...prev, ...result.created]);
+      // Always re-fetch the full list from the server rather than only
+      // appending `created` — this component's `stories` state can be
+      // stale relative to the database (e.g. the page was loaded before
+      // these rows existed, or another sync ran elsewhere), and an
+      // already_existed-only response has no row data to append at all.
+      // Without this, "All N stories were already synced" could still
+      // render an empty list right below it.
+      const refreshed = await api.stories.list(projectId);
+      setStories(refreshed.items);
+
+      // Never let a sync that changed nothing look identical to one that
+      // silently did nothing — the parsed_count===0 case in particular is
+      // a real drafting/formatting problem worth surfacing, not a no-op.
+      if (result.parsed_count === 0) {
+        setSyncNotice({
+          tone: "warning",
+          text:
+            "No stories were found in the approved Story Crafting document — it should contain one \"## Story: <title>\" " +
+            "section per story. If it doesn't, re-draft Story Crafting (Workflow tab) before syncing again.",
+        });
+      } else if (result.created.length === 0) {
+        setSyncNotice({
+          tone: "success",
+          text: `All ${result.already_existed} stor${result.already_existed === 1 ? "y was" : "ies were"} already synced — nothing new to add.`,
+        });
+      } else {
+        setSyncNotice({
+          tone: "success",
+          text:
+            `Synced ${result.created.length} new stor${result.created.length === 1 ? "y" : "ies"}` +
+            (result.already_existed > 0 ? ` (${result.already_existed} already existed).` : "."),
+        });
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to sync stories from the approved backlog.");
     } finally {
@@ -157,22 +299,248 @@ export function StoriesView({
     }
   }
 
-  async function handleSyncToJira(story: ApiStory) {
+  async function handleOpenPreview(story: ApiStory) {
+    if (previewingId === story.id) {
+      setPreviewingId(null);
+      setPreview(null);
+      return;
+    }
+    setPreviewingId(story.id);
+    setPreview(null);
+    setPreviewLoading(true);
+    setError(null);
+    try {
+      setPreview(await api.jira.storyPreview(story.id));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to load the Jira preview for this story.");
+      setPreviewingId(null);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  async function handleOpenDiff(story: ApiStory) {
+    if (diffingId === story.id) {
+      setDiffingId(null);
+      setDiff(null);
+      return;
+    }
+    setDiffingId(story.id);
+    setDiff(null);
+    setDiffError(null);
+    setDiffLoading(true);
+    try {
+      const result = await api.stories.backlogDiff(story.id);
+      setDiff(result);
+      setSelectedDiffFields(new Set(result.changes.map((c) => c.field)));
+    } catch (err) {
+      setDiffError(err instanceof ApiError ? err.message : "Failed to check this story against the current backlog.");
+    } finally {
+      setDiffLoading(false);
+    }
+  }
+
+  function toggleDiffField(field: string) {
+    setSelectedDiffFields((prev) => {
+      const next = new Set(prev);
+      if (next.has(field)) next.delete(field);
+      else next.add(field);
+      return next;
+    });
+  }
+
+  async function handleApplyDiff(story: ApiStory) {
+    if (currentUserId === null || selectedDiffFields.size === 0) return;
+    setApplyingDiff(true);
+    setDiffError(null);
+    try {
+      const updated = await api.stories.applyBacklogDiff(story.id, {
+        triggered_by_user_id: currentUserId,
+        fields: Array.from(selectedDiffFields),
+      });
+      updateStory(updated);
+      setDiffingId(null);
+      setDiff(null);
+    } catch (err) {
+      setDiffError(err instanceof ApiError ? err.message : "Failed to apply the selected changes.");
+    } finally {
+      setApplyingDiff(false);
+    }
+  }
+
+  async function toggleOrder() {
+    const next = !orderOpen;
+    setOrderOpen(next);
+    if (next && order === null) {
+      setOrderLoading(true);
+      setOrderError(null);
+      try {
+        setOrder(await api.stories.recommendedOrder(projectId));
+      } catch (err) {
+        setOrderError(err instanceof ApiError ? err.message : "Failed to load the recommended order.");
+      } finally {
+        setOrderLoading(false);
+      }
+    }
+  }
+
+  async function handleConfirmSyncToJira(story: ApiStory) {
     if (currentUserId === null) return;
     setBusyStoryId(story.id);
     setError(null);
     try {
-      await api.jira.push({
-        project_id: projectId,
-        triggered_by_user_id: currentUserId,
-        selections: [{ source_type: "STORY", source_key: story.title }],
-      });
+      await api.jira.syncStory(story.id, { triggered_by_user_id: currentUserId });
       const refreshed = await api.stories.list(projectId);
       setStories(refreshed.items);
+      setPreviewingId(null);
+      setPreview(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to sync this story to Jira.");
     } finally {
       setBusyStoryId(null);
+    }
+  }
+
+  function toggleSelected(storyId: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(storyId)) next.delete(storyId);
+      else next.add(storyId);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelectedIds((prev) => (prev.size === stories.length ? new Set() : new Set(stories.map((s) => s.id))));
+  }
+
+  async function handleOpenBulkPreview() {
+    if (selectedIds.size === 0) return;
+    setBulkBusy(true);
+    setBulkPreviews(null);
+    setError(null);
+    try {
+      const response = await api.jira.bulkPreviewStories(Array.from(selectedIds));
+      setBulkPreviews(response.previews);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to load the bulk Jira preview.");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function handleConfirmBulkSync() {
+    if (currentUserId === null || bulkPreviews === null) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      await api.jira.bulkSyncStories({ story_ids: Array.from(selectedIds), triggered_by_user_id: currentUserId });
+      const refreshed = await api.stories.list(projectId);
+      setStories(refreshed.items);
+      setBulkPreviews(null);
+      setSelectedIds(new Set());
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to bulk sync the selected stories to Jira.");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function runBulkPrepare(storyIds: string[], stage: string) {
+    if (storyIds.length === 0 || currentUserId === null) return;
+    setBulkPrepareBusy(true);
+    setBulkPrepareResult(null);
+    setError(null);
+    try {
+      const response = await api.codingTools.bulkPrepare(projectId, {
+        story_ids: storyIds,
+        stage,
+        triggered_by_user_id: currentUserId,
+      });
+      setBulkPrepareResult(response);
+      const refreshed = await api.stories.list(projectId);
+      setStories(refreshed.items);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to bulk-prepare the selected stories for the coding tool.");
+    } finally {
+      setBulkPrepareBusy(false);
+    }
+  }
+
+  async function handleBulkPrepareCodingTool() {
+    await runBulkPrepare(Array.from(selectedIds), bulkPrepareStage);
+  }
+
+  // One true single click: every story in the project, Story LLD stage,
+  // no need to touch the dropdown or any checkboxes first — the most
+  // commonly run of the three stages.
+  async function handleSyncAllStoryLlds() {
+    await runBulkPrepare(stories.map((s) => s.id), "story_lld");
+  }
+
+  async function handleSyncAllImplementationPlans() {
+    await runBulkPrepare(stories.map((s) => s.id), "story_implementation_plan");
+  }
+
+  async function handleBulkPullFromGitHub() {
+    if (selectedIds.size === 0 || currentUserId === null) return;
+    setBulkSyncBusy(true);
+    setBulkSyncResult(null);
+    setError(null);
+    try {
+      const response = await api.codingTools.bulkSync(projectId, {
+        story_ids: Array.from(selectedIds),
+        stage: bulkPrepareStage,
+        triggered_by_user_id: currentUserId,
+      });
+      setBulkSyncResult(response);
+      const refreshed = await api.stories.list(projectId);
+      setStories(refreshed.items);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to pull the selected stories' latest content from GitHub.");
+    } finally {
+      setBulkSyncBusy(false);
+    }
+  }
+
+  async function handleBulkApproveLaneNode() {
+    if (selectedIds.size === 0 || currentUserId === null) return;
+    setBulkApproveBusy(true);
+    setBulkApproveResult(null);
+    setError(null);
+    try {
+      const response = await api.stories.bulkApproveLaneNode(projectId, {
+        node_key: BULK_APPROVE_NODE_KEY[bulkPrepareStage] ?? "LLD_REVIEW",
+        story_ids: Array.from(selectedIds),
+        triggered_by_user_id: currentUserId,
+      });
+      setBulkApproveResult(response);
+      const refreshed = await api.stories.list(projectId);
+      setStories(refreshed.items);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to approve this stage for the selected stories.");
+    } finally {
+      setBulkApproveBusy(false);
+    }
+  }
+
+  async function handleBulkStartImplementation() {
+    if (selectedIds.size === 0 || currentUserId === null) return;
+    setBulkImplementBusy(true);
+    setBulkImplementResult(null);
+    setError(null);
+    try {
+      const response = await api.stories.bulkStartImplementation(projectId, {
+        story_ids: Array.from(selectedIds),
+        triggered_by_user_id: currentUserId,
+      });
+      setBulkImplementResult(response);
+      const refreshed = await api.stories.list(projectId);
+      setStories(refreshed.items);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to start implementation for the selected stories.");
+    } finally {
+      setBulkImplementBusy(false);
     }
   }
 
@@ -234,24 +602,379 @@ export function StoriesView({
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-2">
-          <div className="flex flex-wrap items-center gap-3">
-            <Select value={mode} onChange={(e) => setMode(e.target.value as "VERTICAL" | "HORIZONTAL")} className="w-56">
-              <option value="VERTICAL">Vertical Stories</option>
-              <option value="HORIZONTAL">Horizontal Stories</option>
-            </Select>
-            <Button onClick={handleSync} disabled={!storyCraftingApproved || syncing || currentUserId === null}>
-              {syncing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-              Sync from approved backlog
-            </Button>
-            {!storyCraftingApproved && (
-              <p className="text-xs text-muted-foreground">Story Crafting must be approved before syncing.</p>
-            )}
+          <div className="flex flex-wrap items-start gap-4">
+            <div className="flex flex-col gap-1">
+              <Button onClick={() => handleSync("VERTICAL")} disabled={!storyCraftingApproved || syncing || currentUserId === null}>
+                {syncing && mode === "VERTICAL" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                Sync Vertical Stories
+              </Button>
+              <p className="text-xs text-muted-foreground">{MODE_HELPER_TEXT.VERTICAL}</p>
+            </div>
+            <div className="flex flex-col gap-1">
+              <Button
+                variant="outline"
+                onClick={() => handleSync("HORIZONTAL")}
+                disabled={!storyCraftingApproved || syncing || currentUserId === null}
+              >
+                {syncing && mode === "HORIZONTAL" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                Sync Horizontal Stories
+              </Button>
+              <p className="text-xs text-muted-foreground">{MODE_HELPER_TEXT.HORIZONTAL}</p>
+            </div>
           </div>
-          <p className="text-xs text-muted-foreground">{MODE_HELPER_TEXT[mode]}</p>
+          {!storyCraftingApproved && <p className="text-xs text-muted-foreground">Story Crafting must be approved before syncing.</p>}
+          {syncNotice && (
+            <p className={cn("text-sm", syncNotice.tone === "warning" ? "text-amber-600 dark:text-amber-500" : "text-muted-foreground")}>
+              {syncNotice.text}
+            </p>
+          )}
         </CardContent>
       </Card>
 
       {error && <p className="text-sm text-destructive">{error}</p>}
+
+      {stories.length > 0 && jiraConnected && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-3 py-3">
+            <div className="flex items-center gap-2 text-sm">
+              <CheckSquare className="h-4 w-4 text-muted-foreground" />
+              {selectedIds.size === 0 ? "Select stories to bulk sync to Jira." : `${selectedIds.size} selected.`}
+            </div>
+            <Button
+              size="sm" variant="outline" onClick={handleOpenBulkPreview}
+              disabled={selectedIds.size === 0 || bulkBusy || currentUserId === null}
+            >
+              {bulkBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Eye className="mr-1 h-3.5 w-3.5" />}
+              Preview Bulk Sync ({selectedIds.size})
+            </Button>
+          </CardHeader>
+          {bulkPreviews && (
+            <CardContent className="flex flex-col gap-3 border-t pt-3">
+              <ul className="flex flex-col gap-1 text-xs">
+                {bulkPreviews.map((p) => {
+                  const s = stories.find((st) => st.id === p.story_id);
+                  const isValid = p.validation_errors.length === 0;
+                  return (
+                    <li key={p.story_id} className="flex items-center gap-2">
+                      {isValid ? (
+                        <Badge variant={p.already_linked ? "gray" : "success"}>{p.already_linked ? "Already synced" : "Ready"}</Badge>
+                      ) : (
+                        <Badge variant="destructive">Invalid</Badge>
+                      )}
+                      <span className="font-medium">{s?.title ?? p.summary}</span>
+                      {!isValid && <span className="text-destructive">— {p.validation_errors.join(" ")}</span>}
+                    </li>
+                  );
+                })}
+              </ul>
+              <div className="flex justify-end gap-2">
+                <Button size="sm" variant="outline" onClick={() => setBulkPreviews(null)}>
+                  Cancel
+                </Button>
+                <Button size="sm" onClick={handleConfirmBulkSync} disabled={bulkBusy || currentUserId === null}>
+                  {bulkBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="mr-1 h-3.5 w-3.5" />}
+                  Confirm &amp; Sync Selected to Jira
+                </Button>
+              </div>
+            </CardContent>
+          )}
+        </Card>
+      )}
+
+      {stories.length > 0 && (
+        <Card>
+          <CardHeader className="flex flex-col gap-3 py-3">
+            <div className="flex flex-row items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-sm">
+                <GitBranch className="h-4 w-4 text-muted-foreground" />
+                {selectedIds.size === 0
+                  ? "Select stories to draft, prepare & push to GitHub."
+                  : `${selectedIds.size} selected.`}
+              </div>
+              <div className="flex items-center gap-2">
+                <Select
+                  value={bulkPrepareStage}
+                  onChange={(e) => setBulkPrepareStage(e.target.value)}
+                  className="w-44 text-xs"
+                  aria-label="Coding tool stage"
+                >
+                  <option value="story_lld">Story LLD</option>
+                  <option value="story_implementation_plan">Implementation Plan</option>
+                  <option value="story_test_scenarios">Test Scenarios</option>
+                </Select>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleBulkPrepareCodingTool}
+                  disabled={selectedIds.size === 0 || bulkPrepareBusy || currentUserId === null}
+                >
+                  {bulkPrepareBusy ? (
+                    <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <UploadCloud className="mr-1 h-3.5 w-3.5" />
+                  )}
+                  Prepare &amp; Push to GitHub ({selectedIds.size})
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleBulkPullFromGitHub}
+                  disabled={selectedIds.size === 0 || bulkSyncBusy || currentUserId === null}
+                >
+                  {bulkSyncBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1 h-3.5 w-3.5" />}
+                  Pull Latest from GitHub ({selectedIds.size})
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleBulkApproveLaneNode}
+                  disabled={selectedIds.size === 0 || bulkApproveBusy || currentUserId === null}
+                >
+                  {bulkApproveBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <CheckSquare className="mr-1 h-3.5 w-3.5" />}
+                  Approve &amp; Unlock Next ({selectedIds.size})
+                </Button>
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              One button per stage: creates a delivery lane for any selected story that doesn&apos;t have one yet,
+              drafts the selected stage in-app if it hasn&apos;t been drafted yet (when its own preconditions already
+              allow it — e.g. Implementation Plan still waits for a human to approve LLD Review first), and pushes
+              both the finished document and its coding-tool inputs in one shared pull request for the whole batch.
+              &quot;Pull Latest from GitHub&quot; goes the other way — re-reads what&apos;s in the repo now (e.g. refined by
+              a human or an external coding tool) and saves it as each story&apos;s new version. &quot;Approve &amp; Unlock
+              Next&quot; is a real approval, same role rules as a single story (Tech Lead for LLD Review, QA/Tech Lead for
+              Test Scenarios) — it only saves clicks, it never bypasses the review.
+            </p>
+            <div className="flex items-center justify-between gap-3 border-t pt-3">
+              <p className="text-xs text-muted-foreground">
+                Or sync every story in this project&apos;s Story LLD / Implementation Plan in one click, without
+                touching the dropdown or any checkboxes above.
+              </p>
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="outline" onClick={handleSyncAllStoryLlds} disabled={stories.length === 0 || bulkPrepareBusy || currentUserId === null}>
+                  {bulkPrepareBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="mr-1 h-3.5 w-3.5" />}
+                  Sync All Story LLDs ({stories.length})
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleSyncAllImplementationPlans}
+                  disabled={stories.length === 0 || bulkPrepareBusy || currentUserId === null}
+                >
+                  {bulkPrepareBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="mr-1 h-3.5 w-3.5" />}
+                  Sync All Implementation Plans ({stories.length})
+                </Button>
+              </div>
+            </div>
+          </CardHeader>
+          {bulkSyncResult && (
+            <CardContent className="flex flex-col gap-3 border-t pt-3">
+              <p className="text-sm">{bulkSyncResult.message}</p>
+              <ul className="flex flex-col gap-1 text-xs">
+                {bulkSyncResult.results.map((r) => (
+                  <li key={r.story_id} className="flex items-center gap-2">
+                    {r.status === "synced" ? (
+                      <Badge variant="success">Synced (v{r.version_number})</Badge>
+                    ) : (
+                      <Badge variant="destructive">Skipped</Badge>
+                    )}
+                    <span className="font-medium">{r.story_title}</span>
+                    {r.status === "skipped" && r.reason && <span className="text-destructive">— {r.reason}</span>}
+                  </li>
+                ))}
+              </ul>
+              <div className="flex justify-end">
+                <Button size="sm" variant="outline" onClick={() => setBulkSyncResult(null)}>
+                  Dismiss
+                </Button>
+              </div>
+            </CardContent>
+          )}
+          {bulkApproveResult && (
+            <CardContent className="flex flex-col gap-3 border-t pt-3">
+              <p className="text-sm">{bulkApproveResult.message}</p>
+              <ul className="flex flex-col gap-1 text-xs">
+                {bulkApproveResult.results.map((r) => (
+                  <li key={r.story_id} className="flex items-center gap-2">
+                    {r.status === "approved" && <Badge variant="success">Approved</Badge>}
+                    {r.status === "already_approved" && <Badge variant="gray">Already approved</Badge>}
+                    {r.status === "skipped" && <Badge variant="destructive">Skipped</Badge>}
+                    <span className="font-medium">{r.story_title}</span>
+                    {r.status === "skipped" && r.reason && <span className="text-destructive">— {r.reason}</span>}
+                  </li>
+                ))}
+              </ul>
+              <div className="flex justify-end">
+                <Button size="sm" variant="outline" onClick={() => setBulkApproveResult(null)}>
+                  Dismiss
+                </Button>
+              </div>
+            </CardContent>
+          )}
+          {bulkPrepareResult && (
+            <CardContent className="flex flex-col gap-3 border-t pt-3">
+              <p className="text-sm">{bulkPrepareResult.message}</p>
+              <ul className="flex flex-col gap-1 text-xs">
+                {bulkPrepareResult.results.map((r) => (
+                  <li key={r.story_id} className="flex items-center gap-2">
+                    {r.status === "prepared" ? (
+                      <Badge variant="success">{r.lane_created ? "Lane created & prepared" : "Prepared"}</Badge>
+                    ) : (
+                      <Badge variant="destructive">Skipped</Badge>
+                    )}
+                    <span className="font-medium">{r.story_title}</span>
+                    {r.status === "skipped" && r.reason && <span className="text-destructive">— {r.reason}</span>}
+                  </li>
+                ))}
+              </ul>
+              {bulkPrepareResult.pull_request_url && (
+                <a
+                  href={bulkPrepareResult.pull_request_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-sm text-primary underline"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  View shared pull request
+                </a>
+              )}
+              <div className="flex justify-end">
+                <Button size="sm" variant="outline" onClick={() => setBulkPrepareResult(null)}>
+                  Dismiss
+                </Button>
+              </div>
+            </CardContent>
+          )}
+        </Card>
+      )}
+
+      {stories.length > 0 && (
+        <Card>
+          <CardHeader className="flex flex-col gap-3 py-3">
+            <div className="flex flex-row items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-sm">
+                <Code2 className="h-4 w-4 text-muted-foreground" />
+                {selectedIds.size === 0
+                  ? "Select stories to start code Implementation for each one's next task."
+                  : `${selectedIds.size} selected.`}
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleBulkStartImplementation}
+                disabled={selectedIds.size === 0 || bulkImplementBusy || currentUserId === null}
+              >
+                {bulkImplementBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Code2 className="mr-1 h-3.5 w-3.5" />}
+                Start Implementation ({selectedIds.size})
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Story-wise bulk Implementation: for each selected story, starts a real run for its own next task
+              (DATABASE, then BACKEND, then FRONTEND — never more than one task per story per click, since the next
+              one only unlocks once a human reviews and accepts the current one). Never creates or merges a pull
+              request — review each run and create its PR individually, same as today.
+            </p>
+          </CardHeader>
+          {bulkImplementResult && (
+            <CardContent className="flex flex-col gap-3 border-t pt-3">
+              <p className="text-sm">{bulkImplementResult.message}</p>
+              <ul className="flex flex-col gap-1 text-xs">
+                {bulkImplementResult.results.map((r) => (
+                  <li key={r.story_id} className="flex items-center gap-2">
+                    {r.status === "started" && <Badge variant="success">Started ({r.task_area})</Badge>}
+                    {r.status === "all_complete" && <Badge variant="gray">All tasks complete</Badge>}
+                    {r.status === "awaiting_review" && <Badge variant="warning">Awaiting review ({r.task_area})</Badge>}
+                    {r.status === "skipped" && <Badge variant="destructive">Skipped</Badge>}
+                    <span className="font-medium">{r.story_title}</span>
+                    {r.reason && <span className="text-muted-foreground">— {r.reason}</span>}
+                  </li>
+                ))}
+              </ul>
+              <div className="flex justify-end">
+                <Button size="sm" variant="outline" onClick={() => setBulkImplementResult(null)}>
+                  Dismiss
+                </Button>
+              </div>
+            </CardContent>
+          )}
+        </Card>
+      )}
+
+      {stories.length > 0 && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">Suggested implementation order</CardTitle>
+              <CardDescription>
+                Derived from each story&apos;s own Dependencies field — stories in the same group have no ordering constraint and can be
+                worked in parallel. A finished (DONE) story is left out; it&apos;s already satisfied.
+              </CardDescription>
+            </div>
+            <Button size="sm" variant="outline" onClick={toggleOrder}>
+              <ListOrdered className="mr-1.5 h-3.5 w-3.5" />
+              {orderOpen ? "Hide" : "Show order"}
+            </Button>
+          </CardHeader>
+          {orderOpen && (
+            <CardContent className="flex flex-col gap-3">
+              {orderLoading ? (
+                <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Working out the order…
+                </p>
+              ) : orderError ? (
+                <p className="text-xs text-destructive">{orderError}</p>
+              ) : order ? (
+                <>
+                  {order.waves.length === 0 && order.circular.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">Nothing left to order — every story is DONE, or there are no stories yet.</p>
+                  ) : null}
+                  {order.waves.map((wave, i) => (
+                    <div key={i} className="flex flex-col gap-1.5">
+                      <div className="text-xs font-semibold text-muted-foreground">
+                        {i === 0 ? "Can start now" : `Then (after group ${i})`}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {wave.stories.map((s) => (
+                          <span key={s.id} className="rounded-md border bg-muted/40 px-2 py-1 text-xs">
+                            {s.title}
+                            {s.estimated_review_worst_case_minutes != null && (
+                              <span className="ml-1.5 text-muted-foreground">(~{s.estimated_review_worst_case_minutes}m review)</span>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  {Object.keys(order.unresolved_dependencies).length > 0 && (
+                    <div className="flex flex-col gap-1 rounded-md border border-amber-400/60 bg-amber-50 p-2 text-xs dark:border-amber-900 dark:bg-amber-950/30">
+                      <p className="flex items-center gap-1.5 font-medium">
+                        <AlertTriangle className="h-3.5 w-3.5" /> Dependencies that didn&apos;t match a known story (likely a typo or a renamed story):
+                      </p>
+                      {Object.entries(order.unresolved_dependencies).map(([storyId, text]) => {
+                        const s = stories.find((st) => st.id === storyId);
+                        return (
+                          <p key={storyId}>
+                            {s?.title ?? storyId}: &ldquo;{text}&rdquo;
+                          </p>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {order.circular.length > 0 && (
+                    <div className="flex flex-col gap-1 rounded-md border border-destructive/60 bg-destructive/10 p-2 text-xs">
+                      <p className="flex items-center gap-1.5 font-medium text-destructive">
+                        <AlertTriangle className="h-3.5 w-3.5" /> These stories depend on each other in a cycle and have no valid order — fix
+                        one of their Dependencies fields:
+                      </p>
+                      <p>{order.circular.map((s) => s.title).join(", ")}</p>
+                    </div>
+                  )}
+                </>
+              ) : null}
+            </CardContent>
+          )}
+        </Card>
+      )}
 
       {stories.length === 0 ? (
         <EmptyState icon={ClipboardList} title="No stories yet" description="Sync from the approved backlog to get started." />
@@ -261,6 +984,17 @@ export function StoriesView({
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-8">
+                    <input
+                      type="checkbox"
+                      checked={stories.length > 0 && selectedIds.size === stories.length}
+                      ref={(el) => {
+                        if (el) el.indeterminate = selectedIds.size > 0 && selectedIds.size < stories.length;
+                      }}
+                      onChange={toggleSelectAll}
+                      aria-label="Select all stories"
+                    />
+                  </TableHead>
                   <TableHead>Story</TableHead>
                   <TableHead>Mode</TableHead>
                   <TableHead>Priority</TableHead>
@@ -268,7 +1002,7 @@ export function StoriesView({
                   <TableHead>Owner</TableHead>
                   <TableHead>Points</TableHead>
                   <TableHead>Jira</TableHead>
-                  <TableHead>Lane</TableHead>
+                  <TableHead>Lane / Workspace</TableHead>
                   <TableHead>Dependencies</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -280,8 +1014,23 @@ export function StoriesView({
                   return (
                     <Fragment key={story.id}>
                       <TableRow>
+                        <TableCell>
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(story.id)}
+                            onChange={() => toggleSelected(story.id)}
+                            aria-label={`Select ${story.title} for bulk Jira sync`}
+                          />
+                        </TableCell>
                         <TableCell className="max-w-[16rem]">
-                          <div className="truncate font-medium">{story.title}</div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate font-medium">{story.title}</span>
+                            {story.status === "DONE" && (
+                              <Badge variant="success" className="shrink-0 gap-1">
+                                <CheckCircle2 className="h-3 w-3" /> Done
+                              </Badge>
+                            )}
+                          </div>
                           <div className="truncate text-xs text-muted-foreground">{story.epic || "—"}</div>
                         </TableCell>
                         <TableCell>
@@ -314,23 +1063,46 @@ export function StoriesView({
                         </TableCell>
                         <TableCell className="text-xs">{story.story_points ?? "—"}</TableCell>
                         <TableCell>
-                          {story.jira_issue_url ? (
-                            <a
-                              href={story.jira_issue_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex items-center gap-1 text-xs font-medium text-primary underline-offset-2 hover:underline"
-                            >
-                              {story.jira_issue_key ?? story.jira_status} <ExternalLink className="h-3 w-3" />
-                            </a>
-                          ) : (
-                            <Badge variant={jiraBadgeVariant(story.jira_status)}>{story.jira_status}</Badge>
-                          )}
+                          <div className="flex flex-col gap-0.5">
+                            <Badge variant={syncStatusBadgeVariant(story.jira_sync_status)} className="w-fit">
+                              {SYNC_STATUS_LABEL[story.jira_sync_status]}
+                            </Badge>
+                            {story.jira_issue_url && (
+                              <a
+                                href={story.jira_issue_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1 text-xs font-medium text-primary underline-offset-2 hover:underline"
+                              >
+                                {story.jira_issue_key} <ExternalLink className="h-3 w-3" />
+                              </a>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell>
-                          <Badge variant={laneBadgeVariant(story.lane_status)} className="whitespace-nowrap">
-                            {story.lane_status}
-                          </Badge>
+                          <div className="flex flex-col items-start gap-1">
+                            <Badge variant={laneBadgeVariant(story.lane_status)} className="whitespace-nowrap">
+                              {story.lane_status}
+                            </Badge>
+                            {story.lane_created_at ? (
+                              <Link href={`/projects/${projectId}/stories/${story.id}/lane`}>
+                                <Button size="sm" className="h-6 px-2 text-xs">
+                                  Open story workspace
+                                </Button>
+                              </Link>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-6 px-2 text-xs"
+                                onClick={() => handleCreateLane(story.id)}
+                                disabled={busy || currentUserId === null}
+                              >
+                                {busy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <PlusCircle className="mr-1 h-3 w-3" />}
+                                Create lane
+                              </Button>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell className="max-w-[10rem] truncate text-xs text-muted-foreground" title={story.dependencies}>
                           {story.dependencies || "None."}
@@ -350,12 +1122,23 @@ export function StoriesView({
                               size="icon"
                               variant="ghost"
                               className="h-7 w-7"
-                              title={jiraConnected ? "Sync to Jira" : "Connect Jira first"}
-                              disabled={!jiraConnected || busy}
-                              onClick={() => handleSyncToJira(story)}
+                              title={jiraConnected ? "Preview Jira sync" : "Connect Jira first"}
+                              disabled={!jiraConnected}
+                              onClick={() => handleOpenPreview(story)}
                             >
-                              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="h-3.5 w-3.5" />}
+                              <Eye className="h-3.5 w-3.5" />
                             </Button>
+                            {story.jira_issue_url && (
+                              <a
+                                href={story.jira_issue_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                title="Open Jira issue"
+                                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                              >
+                                <ExternalLink className="h-3.5 w-3.5" />
+                              </a>
+                            )}
                             <Button
                               size="icon"
                               variant="ghost"
@@ -365,32 +1148,169 @@ export function StoriesView({
                             >
                               <CalendarPlus className="h-3.5 w-3.5" />
                             </Button>
-                            {story.lane_created_at ? (
-                              <Link
-                                href={`/projects/${projectId}/stories/${story.id}/lane`}
-                                className="text-xs font-medium text-primary underline-offset-2 hover:underline"
-                              >
-                                Open lane
-                              </Link>
-                            ) : (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-7 px-2 text-xs"
-                                onClick={() => handleCreateLane(story.id)}
-                                disabled={busy || currentUserId === null}
-                              >
-                                {busy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <PlusCircle className="mr-1 h-3 w-3" />}
-                                Create lane
-                              </Button>
-                            )}
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-7 w-7"
+                              title="Check against the current approved backlog"
+                              onClick={() => handleOpenDiff(story)}
+                            >
+                              <GitCompareArrows className="h-3.5 w-3.5" />
+                            </Button>
                           </div>
                         </TableCell>
                       </TableRow>
 
+                      {diffingId === story.id && (
+                        <TableRow>
+                          <TableCell colSpan={11} className="bg-muted/30">
+                            <div className="flex flex-col gap-3 py-2">
+                              {diffLoading ? (
+                                <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Comparing against the current approved backlog…
+                                </p>
+                              ) : diffError ? (
+                                <p className="text-xs text-destructive">{diffError}</p>
+                              ) : diff && !diff.found_in_backlog ? (
+                                <p className="text-xs text-muted-foreground">
+                                  &ldquo;{story.title}&rdquo; no longer appears in the current approved backlog (v{diff.source_version_number}) —
+                                  it may have been renamed or removed. Nothing to apply here; edit this story directly if needed.
+                                </p>
+                              ) : diff && diff.up_to_date ? (
+                                <p className="text-xs text-muted-foreground">
+                                  Already matches the current approved backlog (v{diff.source_version_number}).
+                                </p>
+                              ) : diff ? (
+                                <>
+                                  <p className="text-xs text-muted-foreground">
+                                    Differs from the current approved backlog (v{diff.source_version_number}). Pick what to bring in — nothing is
+                                    applied until you confirm.
+                                  </p>
+                                  {diff.lane_active && (
+                                    <p className="flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-400">
+                                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                                      This story already has a delivery lane — applying a change here does not touch it; an already-drafted LLD or
+                                      Implementation Plan may need a manual look afterward.
+                                    </p>
+                                  )}
+                                  <div className="flex flex-col gap-2">
+                                    {diff.changes.map((change) => (
+                                      <label key={change.field} className="flex items-start gap-2 rounded-md border bg-background p-2 text-xs">
+                                        <input
+                                          type="checkbox"
+                                          className="mt-0.5"
+                                          checked={selectedDiffFields.has(change.field)}
+                                          onChange={() => toggleDiffField(change.field)}
+                                        />
+                                        <div className="flex-1">
+                                          <div className="mb-1 font-medium capitalize">{change.field.replace(/_/g, " ")}</div>
+                                          <div className="grid grid-cols-2 gap-2">
+                                            <div>
+                                              <div className="mb-0.5 text-muted-foreground">Current</div>
+                                              <pre className="whitespace-pre-wrap rounded border bg-muted/40 p-1.5 font-mono">{change.current}</pre>
+                                            </div>
+                                            <div>
+                                              <div className="mb-0.5 text-muted-foreground">From the backlog</div>
+                                              <pre className="whitespace-pre-wrap rounded border bg-muted/40 p-1.5 font-mono">{change.proposed}</pre>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </label>
+                                    ))}
+                                  </div>
+                                  <div className="flex justify-end gap-2">
+                                    <Button size="sm" variant="outline" onClick={() => { setDiffingId(null); setDiff(null); }}>
+                                      Cancel
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      onClick={() => handleApplyDiff(story)}
+                                      disabled={applyingDiff || currentUserId === null || selectedDiffFields.size === 0}
+                                    >
+                                      {applyingDiff ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <GitCompareArrows className="mr-1 h-3 w-3" />}
+                                      Apply selected ({selectedDiffFields.size})
+                                    </Button>
+                                  </div>
+                                </>
+                              ) : null}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+
+                      {previewingId === story.id && (
+                        <TableRow>
+                          <TableCell colSpan={11} className="bg-muted/30">
+                            <div className="flex flex-col gap-3 py-2">
+                              {previewLoading ? (
+                                <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading Jira preview…
+                                </p>
+                              ) : preview ? (
+                                <>
+                                  <div className="grid grid-cols-2 gap-3 text-xs">
+                                    <div>
+                                      <div className="mb-1 text-muted-foreground">Summary</div>
+                                      <div className="font-medium">{preview.summary}</div>
+                                    </div>
+                                    <div>
+                                      <div className="mb-1 text-muted-foreground">Priority</div>
+                                      <div className="font-medium">{preview.priority ?? "—"}</div>
+                                    </div>
+                                    <div className="col-span-2">
+                                      <div className="mb-1 text-muted-foreground">Description (sent to Jira as-is)</div>
+                                      <pre className="whitespace-pre-wrap rounded-md border bg-background p-2 font-mono text-xs">{preview.description}</pre>
+                                    </div>
+                                    {preview.subtasks.length > 0 && (
+                                      <div className="col-span-2">
+                                        <div className="mb-1 text-muted-foreground">Subtasks (from Implementation tasks)</div>
+                                        <ul className="list-disc space-y-1 pl-4">
+                                          {preview.subtasks.map((s) => (
+                                            <li key={s.implementation_task_id}>
+                                              {s.title}
+                                              {s.already_linked && (
+                                                <span className="ml-1 text-muted-foreground">(already linked — {s.already_linked.jira_issue_key})</span>
+                                              )}
+                                              {s.validation_errors.length > 0 && (
+                                                <span className="ml-1 text-destructive">— {s.validation_errors.join(" ")}</span>
+                                              )}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    )}
+                                  </div>
+                                  {preview.already_linked ? (
+                                    <p className="text-xs text-muted-foreground">
+                                      Already linked to Jira issue {preview.already_linked.jira_issue_key} — syncing again will not
+                                      create a duplicate or edit the existing issue.
+                                    </p>
+                                  ) : preview.validation_errors.length > 0 ? (
+                                    <p className="text-xs text-destructive">{preview.validation_errors.join(" ")}</p>
+                                  ) : null}
+                                  <div className="flex justify-end gap-2">
+                                    <Button size="sm" variant="outline" onClick={() => { setPreviewingId(null); setPreview(null); }}>
+                                      Cancel
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      onClick={() => handleConfirmSyncToJira(story)}
+                                      disabled={busy || currentUserId === null || preview.validation_errors.length > 0 || !!preview.already_linked}
+                                    >
+                                      {busy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <UploadCloud className="mr-1 h-3 w-3" />}
+                                      {preview.already_linked ? "Already synced" : "Confirm & sync to Jira"}
+                                    </Button>
+                                  </div>
+                                </>
+                              ) : null}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+
                       {addingSprintFor === story.id && (
                         <TableRow>
-                          <TableCell colSpan={10} className="bg-muted/30">
+                          <TableCell colSpan={11} className="bg-muted/30">
                             <div className="flex flex-wrap items-center gap-2 py-1">
                               <span className="text-xs text-muted-foreground">Add to sprint:</span>
                               {sprints.length > 0 && (
@@ -429,7 +1349,7 @@ export function StoriesView({
 
                       {isEditing && draft && (
                         <TableRow>
-                          <TableCell colSpan={10} className="bg-muted/30">
+                          <TableCell colSpan={11} className="bg-muted/30">
                             <div className="grid grid-cols-2 gap-3 py-2">
                               <div className="col-span-2">
                                 <label className="mb-1 block text-xs text-muted-foreground">Title</label>

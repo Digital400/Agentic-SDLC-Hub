@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Integer, Text
+from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -44,7 +44,11 @@ class TestRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "test_runs"
 
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
-    workflow_node_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workflow_nodes.id", ondelete="CASCADE"), nullable=False)
+    # Null for a story-scoped run — see app/models/implementation_task.py's
+    # own workflow_node_id docstring for why (same reasoning: a
+    # StoryDeliveryNode is a different table entirely, no project-level
+    # WorkflowNode to link to).
+    workflow_node_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("workflow_nodes.id", ondelete="CASCADE"), nullable=True)
     implementation_task_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("implementation_tasks.id", ondelete="CASCADE"), nullable=False
     )
@@ -57,18 +61,27 @@ class TestRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Set only for a run inside a per-story delivery lane — see
     # app/models/story.py.
     story_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("stories.id", ondelete="CASCADE"), nullable=True)
-    # The test_report Artifact/ArtifactVersion this run produced — null
-    # only while a run is still RUNNING or if it FAILED before reaching
-    # that step.
+    lane_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("story_delivery_lanes.id", ondelete="CASCADE"), nullable=True)
+    # The test_report Artifact/ArtifactVersion this run produced (project-
+    # level runs) — null only while a run is still RUNNING, if it FAILED
+    # before reaching that step, or if it's story-scoped (see
+    # story_artifact_id below instead — a StoryArtifact, not an Artifact).
     artifact_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True)
     artifact_version_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("artifact_versions.id", ondelete="SET NULL"), nullable=True
     )
+    # The story_test_report StoryArtifact this run produced — set only for
+    # a story-scoped run (see app/services/testing_agent.STORY_TEST_REPORT_ARTIFACT_TYPE).
+    story_artifact_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("story_artifacts.id", ondelete="SET NULL"), nullable=True)
     triggered_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
     agent_type: Mapped[TestAgentType] = mapped_column(
         Enum(TestAgentType, native_enum=False, length=20, validate_strings=True), nullable=False
     )
+    # Same value as agent_type above, addressable under this name too —
+    # the story-level testing workflow spec names it explicitly as its
+    # own field (mirrors ImplementationRun.assigned_agent_key).
+    test_agent_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[TestRunStatus] = mapped_column(
         Enum(TestRunStatus, native_enum=False, length=20, validate_strings=True),
         default=TestRunStatus.PENDING,
@@ -87,6 +100,12 @@ class TestRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Always a placeholder dict — no coverage tooling exists in this
     # codebase (see class docstring / testing_agent.py).
     coverage_impact: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    # Free-text evidence references (a CI run URL, a screenshot
+    # description, etc.) — additive to, not a replacement for, the
+    # rendered report's own "Test Evidence" markdown section (the one
+    # QA_APPROVAL's evidence gate actually checks — see
+    # app/api/routes/stories.py's update_lane_node_status).
+    evidence_attachments: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
 
     used_mock: Mapped[bool] = mapped_column(default=True, nullable=False)
     token_usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -96,11 +115,13 @@ class TestRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     project: Mapped["Project"] = relationship("Project")
-    workflow_node: Mapped["WorkflowNode"] = relationship("WorkflowNode")
+    workflow_node: Mapped["WorkflowNode | None"] = relationship("WorkflowNode")
     implementation_task: Mapped["ImplementationTask"] = relationship("ImplementationTask")
     implementation_run: Mapped["ImplementationRun"] = relationship("ImplementationRun")
     pull_request_link: Mapped["PullRequestLink | None"] = relationship("PullRequestLink")
     story: Mapped["Story | None"] = relationship("Story")
+    lane: Mapped["StoryDeliveryLane | None"] = relationship("StoryDeliveryLane")
     artifact: Mapped["Artifact | None"] = relationship("Artifact")
     artifact_version: Mapped["ArtifactVersion | None"] = relationship("ArtifactVersion")
+    story_artifact: Mapped["StoryArtifact | None"] = relationship("StoryArtifact")
     triggered_by: Mapped["User | None"] = relationship("User", foreign_keys=[triggered_by_user_id])

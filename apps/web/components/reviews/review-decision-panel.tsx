@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { CheckCircle2, Plus, RotateCcw, ShieldAlert, Trash2, XCircle } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { CheckCircle2, Loader2, Plus, RotateCcw, ShieldAlert, Trash2, XCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -71,6 +71,7 @@ export function ReviewDecisionPanel({
   approveDisabled,
   approveDisabledReason,
   sectionTitles,
+  submitting,
   onDecide,
   onRequestChanges,
 }: {
@@ -83,6 +84,11 @@ export function ReviewDecisionPanel({
   /** This artifact's current section titles — populates each structured
    * comment's "link to section" dropdown (rule 2). */
   sectionTitles: string[];
+  /** True for the round-trip of a decision already in flight — disables
+   * every action here (the parent also shows a full-screen lock overlay
+   * for the same span) so a slow request can't be double-submitted or
+   * look like nothing happened. */
+  submitting: boolean;
   onDecide: (decision: Exclude<ReviewDecision, "NEEDS_CHANGES">, comment: string | null) => void;
   /** Rule 1: one or more structured comments explaining what needs to
    * change, each optionally linked to a section (rule 2). */
@@ -91,6 +97,21 @@ export function ReviewDecisionPanel({
   const [active, setActive] = useState<ReviewDecision | null>(null);
   const [comment, setComment] = useState("");
   const [structuredComments, setStructuredComments] = useState<StructuredComment[]>([EMPTY_STRUCTURED_COMMENT]);
+
+  // Keep the confirmation box (and its own "Saving…" spinner) open for the
+  // whole request instead of vanishing the instant Confirm is clicked —
+  // only clear it once the parent reports the request actually finished.
+  // Tracks the previous `submitting` value rather than closing on every
+  // `false` so this never fires on first mount.
+  const wasSubmitting = useRef(false);
+  useEffect(() => {
+    if (wasSubmitting.current && !submitting) {
+      setActive(null);
+      setComment("");
+      setStructuredComments([EMPTY_STRUCTURED_COMMENT]);
+    }
+    wasSubmitting.current = submitting;
+  }, [submitting]);
 
   const config = DECISIONS.find((d) => d.decision === active);
   let canConfirm = false;
@@ -119,7 +140,10 @@ export function ReviewDecisionPanel({
   }
 
   function confirm() {
-    if (!config || !canConfirm) return;
+    if (!config || !canConfirm || submitting) return;
+    // Closing (and resetting comment state) happens once `submitting`
+    // reports the request finished — see the effect above — not here,
+    // so the box stays open with its own spinner for the whole round-trip.
     if (config.decision === "NEEDS_CHANGES") {
       onRequestChanges(
         structuredComments
@@ -129,9 +153,6 @@ export function ReviewDecisionPanel({
     } else {
       onDecide(config.decision, comment.trim() || null);
     }
-    setActive(null);
-    setComment("");
-    setStructuredComments([EMPTY_STRUCTURED_COMMENT]);
   }
 
   return (
@@ -151,14 +172,14 @@ export function ReviewDecisionPanel({
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
               {DECISIONS.map((d) => {
                 const isApprove = d.decision === "APPROVED";
-                const itemDisabled = isApprove && approveDisabled;
+                const itemDisabled = submitting || (isApprove && approveDisabled);
                 return (
                   <Button
                     key={d.decision}
                     variant={d.buttonVariant}
                     onClick={() => startDecision(d.decision)}
                     disabled={itemDisabled}
-                    title={itemDisabled ? approveDisabledReason : undefined}
+                    title={!submitting && itemDisabled ? approveDisabledReason : undefined}
                   >
                     <d.icon className="h-4 w-4" />
                     {d.label}
@@ -230,11 +251,12 @@ export function ReviewDecisionPanel({
             )}
 
             <div className="flex justify-end gap-2">
-              <Button variant="ghost" size="sm" onClick={() => setActive(null)}>
+              <Button variant="ghost" size="sm" onClick={() => setActive(null)} disabled={submitting}>
                 Cancel
               </Button>
-              <Button variant={config.buttonVariant} size="sm" onClick={confirm} disabled={!canConfirm}>
-                {config.confirmLabel}
+              <Button variant={config.buttonVariant} size="sm" onClick={confirm} disabled={!canConfirm || submitting}>
+                {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                {submitting ? "Saving…" : config.confirmLabel}
               </Button>
             </div>
           </div>

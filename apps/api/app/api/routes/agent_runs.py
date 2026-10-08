@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.models import (
     AgentDefinition,
@@ -43,17 +44,99 @@ from app.models import (
     WorkflowNode,
     WorkflowStatus,
 )
-from app.schemas.agent_run import AgentRunCreate, AgentRunLoopEventRead, AgentRunRead, SaveAgentOutputResponse
-from app.services.ai_generation import CLARIFICATION_MARKER, AIGenerationError, generate
+from app.schemas.agent_run import AgentRunCreate, AgentRunLoopEventRead, AgentRunRead, ProviderOptionRead, SaveAgentOutputResponse
+from app.services.agent_context_builder import build_engineering_setup_context, infer_agent_context_type
+from app.services.ai_generation import CLARIFICATION_MARKER, KNOWN_CLAUDE_MODELS, AIGenerationError, generate, use_model_override, use_provider_override
 from app.services.artifact_summary import apply_summaries_to_version
 from app.services.audit import record_audit_log
 from app.services.context_builder import fetch_recent_review_comments
 from app.services.graph_engine import GraphEngineService
+from app.services.intake_text_condenser import condense_freeform_context
 from app.services.loop_engine import DEFAULT_QUALITY_THRESHOLD, LoopEngineService
 from app.services.permissions import require_can_edit_stage
 from app.services.retrieval import retrieve_relevant_chunks
+from app.services.validate_action import run_validate_action
 
 router = APIRouter(prefix="/agent-runs", tags=["agent-runs"])
+
+
+@router.get("/providers", response_model=list[ProviderOptionRead])
+def list_provider_options(project_id: uuid.UUID | None = None, db: Session = Depends(get_db)) -> list[ProviderOptionRead]:
+    """Backs the LLM dropdown next to Run Agent (see AgentRunCreate.provider_override)
+    — real configured model names and real availability, read straight off
+    this backend's own settings, instead of a static label list the user has
+    no way to tell apart from what will actually work. `project_id` is
+    optional: pass it to also resolve whether THIS project has a connected
+    repository, which is what claude_agent_sdk actually needs at generate()
+    time (see ai_generation.generate's own SDK gate); omitted, that option's
+    availability reflects only the global CLAUDE_AGENT_SDK_ENABLED flag.
+
+    Never includes a key's actual value — only whether one is set."""
+    settings = get_settings()
+
+    sdk_configured = settings.CLAUDE_AGENT_SDK_ENABLED
+    sdk_reason = None if sdk_configured else "CLAUDE_AGENT_SDK_ENABLED is off in the backend's configuration"
+    if sdk_configured and project_id is not None:
+        project = db.get(Project, project_id)
+        if project is not None:
+            from app.services.claude_agent_harness import resolve_project_repository
+
+            repository, _ = resolve_project_repository(project)
+            if repository is None:
+                sdk_configured = False
+                sdk_reason = "This project has no connected GitHub repository yet"
+
+    # The Claude model family this app actually has pricing for (see
+    # ai_generation.py's own _MODEL_PRICING_PER_MTOK comment: "models this
+    # app is expected to use") — curated suggestions for anthropic and
+    # claude_agent_sdk (same underlying model family), not a closed list:
+    # model_override still accepts any id, these are just what's offered
+    # as quick picks (e.g. "claude-opus-5" instead of the configured
+    # default "claude-sonnet-5").
+    claude_models = list(KNOWN_CLAUDE_MODELS)
+
+    def _key_option(
+        value: str, label: str, model: str, api_key: str | None, env_var: str, *, available_models: list[str] | None = None,
+    ) -> ProviderOptionRead:
+        return ProviderOptionRead(
+            value=value, label=label, model=model, configured=bool(api_key),
+            unavailable_reason=None if api_key else f"{env_var} is not set in the backend's configuration",
+            available_models=available_models or [],
+        )
+
+    return [
+        ProviderOptionRead(
+            value="claude_agent_sdk", label="Claude Code (Agent SDK, repo-grounded)", model=None,
+            configured=sdk_configured, unavailable_reason=sdk_reason, available_models=claude_models,
+        ),
+        _key_option(
+            "anthropic", "Anthropic (Claude API)", settings.AI_MODEL, settings.ANTHROPIC_API_KEY, "ANTHROPIC_API_KEY",
+            available_models=claude_models,
+        ),
+        _key_option("gemini", "Google Gemini", settings.GEMINI_MODEL, settings.GEMINI_API_KEY, "GEMINI_API_KEY"),
+        # OpenRouter's free-tier lineup changes often (see
+        # Settings.OPENROUTER_MODEL's own comment) — these two are real,
+        # verified-live ":free" coding models as of when this was last
+        # checked directly against GET https://openrouter.ai/api/v1/models
+        # (never trust a third-party blog's model-id spelling here — one
+        # fabricated-looking name, "poolside/laguna-m.1:free", previously
+        # made it in from a web search and 404'd for every real user; this
+        # app's own curated list is now sourced only from OpenRouter's own
+        # live catalog). Offered as quick picks alongside the configured
+        # default, not a guarantee either stays free forever — model_override
+        # still accepts any openrouter.ai model slug typed directly.
+        _key_option(
+            "openrouter", "OpenRouter", settings.OPENROUTER_MODEL, settings.OPENROUTER_API_KEY, "OPENROUTER_API_KEY",
+            available_models=list(dict.fromkeys([settings.OPENROUTER_MODEL, "poolside/laguna-s-2.1:free", "cohere/north-mini-code:free"])),
+        ),
+        _key_option("nvidia", "NVIDIA Build", settings.NVIDIA_MODEL, settings.NVIDIA_API_KEY, "NVIDIA_API_KEY"),
+        _key_option("huggingface", "Hugging Face", settings.HUGGINGFACE_MODEL, settings.HUGGINGFACE_API_KEY, "HUGGINGFACE_API_KEY"),
+        # No API key needed — Ollama runs locally; "configured" here just
+        # means no key is missing, not that the local server is actually up
+        # (that's checked for real at generate() time, same as every other
+        # provider's own reachability check).
+        ProviderOptionRead(value="ollama", label="Ollama (local)", model=settings.OLLAMA_MODEL, configured=True, unavailable_reason=None),
+    ]
 
 
 def _merge_optional_context(db: Session, project: Project, node: WorkflowNode, validation) -> None:
@@ -77,6 +160,32 @@ def _merge_optional_context(db: Session, project: Project, node: WorkflowNode, v
             validation.approved_artifact_content[extra_type] = artifact.current_version.content_markdown
             if artifact.current_version.agent_context_summary:
                 validation.approved_artifact_summaries[extra_type] = artifact.current_version.agent_context_summary
+
+
+def _merge_engineering_setup_context(db: Session, project: Project, node: WorkflowNode, validation) -> dict:
+    """Project Engineering Setup rule 6 — "Agents must receive coding
+    standards and guardrails in context" (plus, per node type, the
+    stack/Jira/documentation specifics — see
+    app/services/agent_context_builder.py) — for every generic
+    drafting-agent stage (Requirement Intake, HLD, Story Crafting, ...),
+    not just the bespoke Implementation Agent (see
+    app/api/routes/implementation_runs.py's own separate wiring for that
+    one). A project with no ProjectEngineeringSetup row is untouched
+    (rule 10). Returns the context snapshot (rule 5) for the caller to
+    persist on this run — empty dict when there was nothing to include."""
+    agent_type = infer_agent_context_type(node.node_key)
+    # Capped against a fraction of the node's own context budget, not the
+    # whole thing — this is one of several context blocks
+    # build_prioritized_context assembles (P0 instructions, P1 rules, P2
+    # approved-artifact summaries including this one, P3 RAG, ...), not
+    # the only thing competing for room in it.
+    budget = max(500, (node.context_token_budget or 8000) // 4)
+    result = build_engineering_setup_context(db, project=project, agent_type=agent_type, output_token_budget=budget)
+    if result.context_text:
+        validation.approved_artifact_content["project_engineering_setup"] = result.context_text
+        validation.approved_artifact_summaries["project_engineering_setup"] = result.context_text
+    return result.snapshot
+
 
 # The node status a run's action leaves the workflow node in once its
 # output is saved: draft/improve mean the agent is still producing/revising
@@ -159,6 +268,15 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
         # but the node's agent_key is only a string reference — verify it.
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No agent is configured for agent_key '{node.agent_key}'")
 
+    if payload.action == AgentPromptRole.VALIDATE:
+        # "Validate" runs the stage's validator on the current draft and
+        # reports a verdict — it has no AgentPrompt and never rewrites the
+        # document. See app/services/validate_action.py.
+        validate_run = run_validate_action(db, project=project, node=node, agent=agent, triggered_by=triggered_by)
+        db.commit()
+        db.refresh(validate_run)
+        return AgentRunRead.from_orm_run(validate_run)
+
     active_prompt = (
         db.query(AgentPrompt)
         .filter(AgentPrompt.agent_definition_id == agent.id, AgentPrompt.role == payload.action, AgentPrompt.is_active.is_(True))
@@ -189,7 +307,10 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
     record_audit_log(
         db, project_id=project.id, actor_user_id=triggered_by.id, action="agent_run.started",
         entity_type="AgentRun", entity_id=run.id,
-        extra_data={"agent_key": agent.agent_key, "workflow_node": node.node_key, "action": payload.action.value},
+        extra_data={
+            "agent_key": agent.agent_key, "workflow_node": node.node_key, "action": payload.action.value,
+            "provider_override": payload.provider_override, "model_override": payload.model_override,
+        },
     )
 
     def _fail(reason: str) -> AgentRunRead:
@@ -220,6 +341,9 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
         return _fail("Cannot run — " + "; ".join(validation.reasons) + ".")
 
     _merge_optional_context(db, project, node, validation)
+    engineering_setup_snapshot = _merge_engineering_setup_context(db, project, node, validation)
+    if engineering_setup_snapshot:
+        run.engineering_setup_context_snapshot = engineering_setup_snapshot
 
     # Retrieval-augmented context: pull whatever the Knowledge Base has that's
     # relevant to this project/stage/input/upstream-artifacts combination
@@ -227,11 +351,17 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
     # node's own rag_top_k/max_rag_tokens config. An empty result is a
     # normal outcome, not a failure — the run proceeds on project context
     # alone.
+    # Very long freeform input (e.g. a big stakeholder request) is condensed
+    # to fit its share of the context budget instead of being cut off or
+    # crowding out the project rules; run.input_context keeps the original.
+    effective_context, condensation = condense_freeform_context(
+        payload.input_context, context_token_budget=node.context_token_budget
+    )
     retrieved_chunks = retrieve_relevant_chunks(
         db,
         project=project,
         node=node,
-        freeform_context=payload.input_context,
+        freeform_context=effective_context,
         approved_inputs=validation.approved_artifact_content,
         top_k=node.rag_top_k,
         max_rag_tokens=node.max_rag_tokens,
@@ -258,6 +388,25 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
         for c in retrieved_chunks
     ]
     review_comments = fetch_recent_review_comments(db, node)
+    # IMPROVE/VALIDATE both need the artifact's own current text to act on
+    # (see ai_generation.generate's docstring: "IMPROVE — a human explicitly
+    # asked to revise this stage's own artifact"; "VALIDATE — a validator
+    # checking the full document") — without it, the model has nothing to
+    # revise/check and effectively just re-drafts from the same upstream
+    # inputs, which (absent fresh review_comments) tends to come back
+    # near-identical to what's already there. This mirrors the
+    # current_draft_content already passed by revision_agent.py and
+    # section_improve_agent.py for their own IMPROVE calls.
+    current_draft_content: str | None = None
+    if payload.action in (AgentPromptRole.IMPROVE, AgentPromptRole.VALIDATE):
+        current_artifact = (
+            db.query(Artifact)
+            .filter(Artifact.workflow_node_id == node.id, Artifact.artifact_type == node.output_artifact_type)
+            .order_by(Artifact.created_at.desc())
+            .first()
+        )
+        if current_artifact is not None and current_artifact.current_version is not None:
+            current_draft_content = current_artifact.current_version.content_markdown
     # One ValidatorDefinition per workflow stage (see
     # app/models/validator.py) — None is a normal outcome for a stage that
     # hasn't had one configured yet; run_validator falls back to a
@@ -277,67 +426,75 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
     # critical issues, repeat until quality is good enough or iterations
     # run out. VALIDATE/IMPROVE runs are already a single well-defined
     # human-triggered agent step, so they keep the direct one-shot call.
+    # provider_override (see app/services/ai_generation.py's
+    # use_provider_override) scopes to every generate() call this request
+    # makes, including the Loop Engine's multiple internal iterations below
+    # — a contextvar, not a parameter threaded through each one, since
+    # generate() has many other callers that must keep their own default
+    # behavior untouched.
     try:
-        if payload.action == AgentPromptRole.DRAFT:
-            loop_result = LoopEngineService(db).run_loop(
-                run=run,
-                project=project,
-                node=node,
-                action=payload.action,
-                active_prompt=active_prompt,
-                approved_artifact_content=validation.approved_artifact_content,
-                approved_artifact_summaries=validation.approved_artifact_summaries,
-                freeform_context=payload.input_context,
-                full_content_artifact_types=set(node.full_content_artifact_types),
-                retrieved_chunks=retrieved_chunks,
-                review_comments=review_comments,
-                validator=validator,
-                quality_threshold=validator.quality_threshold if validator else DEFAULT_QUALITY_THRESHOLD,
-            )
-            result_content = loop_result.content_markdown
-            result_needs_clarification = loop_result.needs_clarification
-            result_used_mock = loop_result.used_mock
-            token_usage = {
-                "prompt_tokens": loop_result.prompt_tokens,
-                "completion_tokens": loop_result.completion_tokens,
-                "total_tokens": loop_result.total_tokens,
-            }
-            cost = loop_result.cost
-            estimated_context_tokens = loop_result.estimated_context_tokens
-            token_budget_report = loop_result.token_budget_report
-            extra_audit_data = {
-                "loop_status": loop_result.loop_status.value,
-                "loop_iterations": loop_result.iterations_run,
-                "loop_quality_score": loop_result.quality_score,
-                "approval_recommendation": loop_result.validation_result.get("approval_recommendation"),
-            }
-        else:
-            result = generate(
-                project=project,
-                node=node,
-                action=payload.action,
-                active_prompt=active_prompt,
-                approved_artifact_content=validation.approved_artifact_content,
-                approved_artifact_summaries=validation.approved_artifact_summaries,
-                freeform_context=payload.input_context,
-                context_token_budget=node.context_token_budget,
-                output_token_budget=node.output_token_budget,
-                full_content_artifact_types=set(node.full_content_artifact_types),
-                retrieved_chunks=retrieved_chunks,
-                review_comments=review_comments,
-            )
-            result_content = result.content_markdown
-            result_needs_clarification = result.needs_clarification
-            result_used_mock = result.used_mock
-            token_usage = {
-                "prompt_tokens": result.prompt_tokens,
-                "completion_tokens": result.completion_tokens,
-                "total_tokens": result.total_tokens,
-            }
-            cost = result.cost
-            estimated_context_tokens = result.estimated_context_tokens
-            token_budget_report = result.token_budget_report
-            extra_audit_data = {}
+        with use_provider_override(payload.provider_override), use_model_override(payload.model_override):
+            if payload.action == AgentPromptRole.DRAFT:
+                loop_result = LoopEngineService(db).run_loop(
+                    run=run,
+                    project=project,
+                    node=node,
+                    action=payload.action,
+                    active_prompt=active_prompt,
+                    approved_artifact_content=validation.approved_artifact_content,
+                    approved_artifact_summaries=validation.approved_artifact_summaries,
+                    freeform_context=effective_context,
+                    full_content_artifact_types=set(node.full_content_artifact_types),
+                    retrieved_chunks=retrieved_chunks,
+                    review_comments=review_comments,
+                    validator=validator,
+                    quality_threshold=validator.quality_threshold if validator else DEFAULT_QUALITY_THRESHOLD,
+                )
+                result_content = loop_result.content_markdown
+                result_needs_clarification = loop_result.needs_clarification
+                result_used_mock = loop_result.used_mock
+                token_usage = {
+                    "prompt_tokens": loop_result.prompt_tokens,
+                    "completion_tokens": loop_result.completion_tokens,
+                    "total_tokens": loop_result.total_tokens,
+                }
+                cost = loop_result.cost
+                estimated_context_tokens = loop_result.estimated_context_tokens
+                token_budget_report = loop_result.token_budget_report
+                extra_audit_data = {
+                    "loop_status": loop_result.loop_status.value,
+                    "loop_iterations": loop_result.iterations_run,
+                    "loop_quality_score": loop_result.quality_score,
+                    "approval_recommendation": loop_result.validation_result.get("approval_recommendation"),
+                }
+            else:
+                result = generate(
+                    project=project,
+                    node=node,
+                    action=payload.action,
+                    active_prompt=active_prompt,
+                    approved_artifact_content=validation.approved_artifact_content,
+                    approved_artifact_summaries=validation.approved_artifact_summaries,
+                    freeform_context=effective_context,
+                    context_token_budget=node.context_token_budget,
+                    output_token_budget=node.output_token_budget,
+                    full_content_artifact_types=set(node.full_content_artifact_types),
+                    retrieved_chunks=retrieved_chunks,
+                    review_comments=review_comments,
+                    current_draft_content=current_draft_content,
+                )
+                result_content = result.content_markdown
+                result_needs_clarification = result.needs_clarification
+                result_used_mock = result.used_mock
+                token_usage = {
+                    "prompt_tokens": result.prompt_tokens,
+                    "completion_tokens": result.completion_tokens,
+                    "total_tokens": result.total_tokens,
+                }
+                cost = result.cost
+                estimated_context_tokens = result.estimated_context_tokens
+                token_budget_report = result.token_budget_report
+                extra_audit_data = {}
     except AIGenerationError as exc:
         graph_engine.mark_failed(node)
         return _fail(f"AI generation failed: {exc}")
@@ -346,6 +503,8 @@ def start_agent_run(payload: AgentRunCreate, db: Session = Depends(get_db)) -> A
     run.token_usage = token_usage
     run.cost = cost
     run.estimated_context_tokens = estimated_context_tokens
+    if condensation.condensed:
+        token_budget_report = {**(token_budget_report or {}), "input_condensation": condensation.to_dict()}
     run.token_budget_report = token_budget_report
     run.status = AgentRunStatus.COMPLETED
     run.completed_at = datetime.now(timezone.utc)

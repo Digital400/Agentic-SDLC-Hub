@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ExternalLink } from "lucide-react";
 
+import { MarkdownPreview } from "@/components/documents/markdown-preview";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatRelativeTime, formatSnakeCase } from "@/lib/format";
 import type { ArtifactDocument } from "@/lib/types";
@@ -57,7 +58,7 @@ export function ArtifactPreview({ artifact }: { artifact: ArtifactDocument }) {
           {artifact.sections.map((section) => (
             <div key={section.id}>
               <h3 className="mb-1.5 text-sm font-semibold">{section.title}</h3>
-              <p className="whitespace-pre-wrap text-sm text-muted-foreground">{section.contentMarkdown}</p>
+              <MarkdownPreview markdown={section.contentMarkdown} />
             </div>
           ))}
         </CardContent>

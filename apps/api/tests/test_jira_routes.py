@@ -318,3 +318,34 @@ def test_no_jira_token_ever_appears_in_any_response_or_audit_log(db, project, ac
 
     dump = str([preview.model_dump(), push_response.model_dump(), sync_response.model_dump(), [row.extra_data for row in db.query(AuditLog).all()]])
     assert REAL_TOKEN not in dump
+
+
+# --- list_connection_projects (picker) ----------------------------------------------------
+
+
+def test_list_connection_projects_returns_the_picker_options(db, actor, monkeypatch):
+    _mock_jira(monkeypatch)
+    connection = connect_jira(
+        ConnectJiraRequest(base_url="https://example.atlassian.net", email="suru@example.com", api_token=REAL_TOKEN, connected_by_id=actor.id),
+        db,
+    )
+    monkeypatch.setattr(
+        jira_routes.jira_api, "list_projects",
+        lambda base_url, email, token, **kw: [JiraProject(key="LOYAL", name="Loyalty Portal", id="1")],
+    )
+
+    projects = jira_routes.list_connection_projects(connection.id, db)
+
+    assert len(projects) == 1 and projects[0].key == "LOYAL" and projects[0].name == "Loyalty Portal"
+
+
+def test_list_connection_projects_rejects_a_disconnected_connection(db, actor, monkeypatch):
+    _mock_jira(monkeypatch)
+    connection = connect_jira(
+        ConnectJiraRequest(base_url="https://example.atlassian.net", email="suru@example.com", api_token=REAL_TOKEN, connected_by_id=actor.id),
+        db,
+    )
+    jira_routes.disconnect_jira(connection.id, db)
+    with pytest.raises(HTTPException) as exc:
+        jira_routes.list_connection_projects(connection.id, db)
+    assert exc.value.status_code == 409

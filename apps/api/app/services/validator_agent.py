@@ -21,6 +21,7 @@ slip or a provider outage.
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -262,6 +263,29 @@ def _run_real_validator(*, stage_name: str, criteria: list[str], content_markdow
 # --- Entry point -----------------------------------------------------------------------
 
 
+def _story_backlog_review_time_issues(content_markdown: str) -> list[str]:
+    """Deterministic, not LLM-judged — the same "a story's PR must be
+    reviewable by one human" rule app/services/review_time.py already
+    enforces for a repository-synced backlog (see
+    stage_document_sync.py), applied here too so the in-app Story
+    Crafting Draft/Improve loop actually enforces it, not just the
+    external coding-tool path. Before this, a drafting agent's own
+    self-reported "5 / 15 / 30" was never checked against anything — a
+    story with ten unrelated acceptance criteria could claim a small
+    number and nothing caught it. Only runs on content that's actually
+    shaped like a story backlog (real "## Story:" blocks) — a no-op, zero
+    cost, for every other stage's validator call."""
+    from app.services.review_time import review_time_problems
+    from app.services.story_export import parse_story_backlog
+
+    if not re.search(r"^##\s*Story:\s*", content_markdown, re.MULTILINE):
+        return []
+    problems: list[str] = []
+    for story in parse_story_backlog(content_markdown):
+        problems += review_time_problems(story.title, story.estimated_pr_review_time)
+    return problems
+
+
 def run_validator(
     *, validator: "ValidatorDefinition | None", stage_name: str, content_markdown: str
 ) -> ValidatorResult:
@@ -274,14 +298,30 @@ def run_validator(
 
     Real AI when configured; the deterministic heuristic otherwise, or if
     the real call errors or returns unparseable JSON (logged, not raised —
-    a validation step must never fail the run over a bad response)."""
+    a validation step must never fail the run over a bad response).
+
+    A deterministic review-time check is layered on top of either path
+    for story-backlog content (see _story_backlog_review_time_issues) —
+    its findings become real critical_issues, which
+    app/services/loop_engine.py's own loop already feeds back as
+    validation_feedback into the next draft attempt (up to
+    DEFAULT_MAX_ITERATIONS times), so an oversized story is now actually
+    forced to split, not just asked to."""
     criteria = validator.criteria if validator else []
 
     if get_active_provider() == "mock":
-        return _run_heuristic_validator(content_markdown=content_markdown, criteria=criteria)
+        result = _run_heuristic_validator(content_markdown=content_markdown, criteria=criteria)
+    else:
+        try:
+            result = _run_real_validator(stage_name=stage_name, criteria=criteria, content_markdown=content_markdown)
+        except (AIGenerationError, json.JSONDecodeError, ValueError, TypeError, AttributeError) as exc:
+            logger.warning("Real-AI validator failed (%s); falling back to heuristic validation.", exc)
+            result = _run_heuristic_validator(content_markdown=content_markdown, criteria=criteria)
 
-    try:
-        return _run_real_validator(stage_name=stage_name, criteria=criteria, content_markdown=content_markdown)
-    except (AIGenerationError, json.JSONDecodeError, ValueError, TypeError, AttributeError) as exc:
-        logger.warning("Real-AI validator failed (%s); falling back to heuristic validation.", exc)
-        return _run_heuristic_validator(content_markdown=content_markdown, criteria=criteria)
+    review_time_issues = _story_backlog_review_time_issues(content_markdown)
+    if review_time_issues:
+        result.critical_issues = [*result.critical_issues, *review_time_issues]
+        if result.approval_recommendation == "APPROVE":
+            result.approval_recommendation = "REVISE"
+
+    return result

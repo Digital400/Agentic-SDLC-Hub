@@ -5,7 +5,7 @@ import { ImplementationPlanView } from "@/components/implementation-plan/impleme
 import { PageHeader } from "@/components/layout/page-header";
 import { WorkspaceTabs } from "@/components/projects/workspace-tabs";
 import { api, ApiError } from "@/lib/api";
-import { toImplementationTask, toProject, toWorkflowNode } from "@/lib/mappers";
+import { toGithubRepositoryItem, toImplementationTask, toProject, toWorkflowNode } from "@/lib/mappers";
 
 export default async function ImplementationPlanPage({ params }: { params: { projectId: string } }) {
   let project;
@@ -16,14 +16,15 @@ export default async function ImplementationPlanPage({ params }: { params: { pro
     throw err;
   }
 
-  const [apiTasks, apiNodes, apiReviews, users, githubRepository] = await Promise.all([
+  const [apiTasks, apiNodes, apiReviews, users, apiRepositories] = await Promise.all([
     api.projects.implementationTasks(project.id),
     api.projects.workflowNodes(project.id),
     api.reviews.listAll(),
     api.users.list(),
-    api.projects.githubRepository(project.id),
+    api.projects.githubRepositories(project.id),
   ]);
 
+  const repositories = apiRepositories.map(toGithubRepositoryItem);
   const nodes = apiNodes.map(toWorkflowNode);
   const node = nodes.find((n) => n.nodeKey === "implementation_planning") ?? null;
   const tasks = apiTasks.map(toImplementationTask);
@@ -51,7 +52,8 @@ export default async function ImplementationPlanPage({ params }: { params: { pro
         pendingReviewId={pendingReview?.id ?? null}
         currentUserId={currentUserId}
         reviewers={reviewers}
-        hasRepository={githubRepository !== null}
+        hasRepository={repositories.length > 0}
+        repositories={repositories}
       />
     </div>
   );

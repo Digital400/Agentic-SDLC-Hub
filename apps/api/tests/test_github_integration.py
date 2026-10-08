@@ -14,13 +14,17 @@ import pytest
 
 from app.api.routes.github_integration import (
     connect_github,
+    create_remote_repository,
+    remote_repository_exists,
     create_repository,
     create_repository_snapshot,
     disconnect_github,
     list_connection_repositories,
+    remove_repository,
+    set_primary_repository,
 )
-from app.models import AuditLog, Integration, IntegrationConnection, IntegrationProvider, IntegrationStatus, RepositoryFileIndex
-from app.schemas.github_integration import ConnectGitHubRequest, CreateRepositoryRequest, CreateSnapshotRequest
+from app.models import AuditLog, Integration, IntegrationConnection, IntegrationProvider, IntegrationStatus, Repository, RepositoryFileIndex
+from app.schemas.github_integration import ConnectGitHubRequest, CreateRemoteRepositoryRequest, CreateRepositoryRequest, CreateSnapshotRequest
 from app.services import github_integration as github_api
 from app.services.github_integration import (
     MAX_PREVIEWABLE_FILE_SIZE_BYTES,
@@ -541,3 +545,133 @@ def test_pull_request_and_comment_methods_never_leak_the_token():
     with pytest.raises(GitHubIntegrationError) as exc_info:
         create_issue_comment(REAL_TOKEN, "octocat", "hello-world", 7, body="x", transport=_transport(handler))
     assert REAL_TOKEN not in str(exc_info.value)
+
+
+# --- Multi-repo support: is_primary, set_primary_repository, remove_repository ------------
+
+
+def _connect_and_create_repo(db, actor, project, monkeypatch, *, owner: str, name: str):
+    monkeypatch.setattr(github_api, "verify_token", lambda token, **kwargs: GitHubUser(login="octocat", scopes=["repo"]))
+    connection = connect_github(ConnectGitHubRequest(access_token=REAL_TOKEN, connected_by_id=actor.id), db)
+    monkeypatch.setattr(
+        github_api, "get_repository",
+        lambda token, o, r, **kwargs: GitHubRepo(default_branch="main", description=None, html_url="https://x", is_private=False),
+    )
+    return create_repository(CreateRepositoryRequest(project_id=project.id, connection_id=connection.id, owner=owner, name=name), db)
+
+
+def test_first_repository_connected_to_a_project_becomes_primary_automatically(db, project, actor, monkeypatch):
+    repo = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="backend")
+    assert repo.is_primary is True
+
+
+def test_second_repository_does_not_disturb_the_existing_primary(db, project, actor, monkeypatch):
+    first = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="backend")
+    second = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="frontend")
+
+    assert first.is_primary is True
+    assert second.is_primary is False
+
+
+def test_set_primary_repository_unsets_every_sibling_in_the_same_project(db, project, actor, monkeypatch):
+    first = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="backend")
+    second = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="frontend")
+
+    result = set_primary_repository(second.id, db)
+
+    assert result.is_primary is True
+    refreshed_first = db.get(Repository, first.id)
+    assert refreshed_first.is_primary is False
+
+
+def test_removing_the_primary_repository_promotes_the_most_recent_remaining_one(db, project, actor, monkeypatch):
+    first = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="backend")
+    second = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="frontend")
+    assert first.is_primary is True
+
+    remove_repository(first.id, db)
+
+    refreshed_second = db.get(Repository, second.id)
+    assert refreshed_second.is_primary is True
+    assert db.get(Repository, first.id) is None
+
+
+def test_removing_a_non_primary_repository_leaves_the_primary_untouched(db, project, actor, monkeypatch):
+    first = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="backend")
+    second = _connect_and_create_repo(db, actor, project, monkeypatch, owner="octocat", name="frontend")
+
+    remove_repository(second.id, db)
+
+    refreshed_first = db.get(Repository, first.id)
+    assert refreshed_first.is_primary is True
+
+
+# --- create_repository (project wizard's "Create a new repository") ----------------------
+
+
+def test_create_repository_posts_an_empty_private_repo_by_default():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"], seen["path"], seen["body"] = request.method, request.url.path, json.loads(request.content)
+        return httpx.Response(201, json={
+            "owner": {"login": "octocat"}, "name": "new-app", "full_name": "octocat/new-app",
+            "default_branch": "main", "description": None, "private": True,
+            "html_url": "https://github.com/octocat/new-app",
+        })
+
+    repo = github_api.create_repository(REAL_TOKEN, "new-app", transport=_transport(handler))
+
+    assert (seen["method"], seen["path"]) == ("POST", "/user/repos")
+    assert seen["body"] == {"name": "new-app", "private": True, "auto_init": False}
+    assert repo.full_name == "octocat/new-app" and repo.is_private is True
+
+
+def test_create_remote_repository_route_returns_summary_and_audits(db, actor, monkeypatch):
+    monkeypatch.setattr(github_api, "verify_token", lambda token, **kwargs: GitHubUser(login="octocat", scopes=["repo"]))
+    connection = connect_github(ConnectGitHubRequest(access_token=REAL_TOKEN, connected_by_id=actor.id), db)
+    monkeypatch.setattr(
+        github_api, "create_repository",
+        lambda token, name, **kwargs: GitHubRepoSummary(
+            owner="octocat", name=name, full_name=f"octocat/{name}", default_branch="main",
+            description=None, is_private=True, html_url=f"https://github.com/octocat/{name}",
+        ),
+    )
+
+    result = create_remote_repository(connection.id, CreateRemoteRepositoryRequest(name="new-app", actor_user_id=actor.id), db)
+
+    assert result.full_name == "octocat/new-app"
+    assert db.query(AuditLog).filter(AuditLog.action == "github.repository_created").count() == 1
+    assert REAL_TOKEN not in str(db.query(AuditLog).all()[-1].extra_data)
+
+
+def test_create_remote_repository_name_taken_is_a_409(db, actor, monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(github_api, "verify_token", lambda token, **kwargs: GitHubUser(login="octocat", scopes=["repo"]))
+    connection = connect_github(ConnectGitHubRequest(access_token=REAL_TOKEN, connected_by_id=actor.id), db)
+
+    def boom(token, name, **kwargs):
+        raise GitHubIntegrationError("GitHub API returned 422: name already exists on this account", status_code=422)
+
+    monkeypatch.setattr(github_api, "create_repository", boom)
+    with pytest.raises(HTTPException) as exc:
+        create_remote_repository(connection.id, CreateRemoteRepositoryRequest(name="dup"), db)
+    assert exc.value.status_code == 409
+
+
+def test_remote_repository_exists_true_and_false(db, actor, monkeypatch):
+    monkeypatch.setattr(github_api, "verify_token", lambda token, **kwargs: GitHubUser(login="octocat", scopes=["repo"]))
+    connection = connect_github(ConnectGitHubRequest(access_token=REAL_TOKEN, connected_by_id=actor.id), db)
+
+    monkeypatch.setattr(
+        github_api, "get_repository",
+        lambda token, owner, repo, **kwargs: GitHubRepo(default_branch="main", description=None, html_url="u", is_private=True),
+    )
+    assert remote_repository_exists(connection.id, "taken", db)["exists"] is True
+
+    def missing(token, owner, repo, **kwargs):
+        raise GitHubIntegrationError("GitHub API returned 404: Not Found", status_code=404)
+
+    monkeypatch.setattr(github_api, "get_repository", missing)
+    assert remote_repository_exists(connection.id, "free", db) == {"exists": False, "owner": "octocat", "name": "free"}

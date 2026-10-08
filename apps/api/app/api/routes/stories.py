@@ -16,12 +16,14 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.api.routes.implementation_runs import start_implementation_run
 from app.core.database import get_db
 from app.models import (
     Artifact,
     ArtifactStatus,
     ImplementationTask,
     ImplementationTaskArea,
+    ImplementationTaskStatus,
     JiraIssueLink,
     JiraSourceType,
     Project,
@@ -40,16 +42,36 @@ from app.models import (
     UserRole,
     WorkflowNode,
 )
+from app.schemas.implementation_run import StartImplementationRunRequest
+from app.schemas.implementation_task import ImplementationTaskRead
 from app.schemas.story import (
+    ApplyStoryBacklogDiffRequest,
     AssignStoryOwnerRequest,
+    BulkApproveLaneNodeRequest,
+    BulkApproveLaneNodeResponse,
+    BulkApproveLaneNodeStoryResult,
+    BulkRunStoryLldRequest,
+    BulkStartImplementationRequest,
+    BulkStartImplementationResponse,
+    BulkStartImplementationStoryResult,
+    BulkRunStoryLldResponse,
+    BulkRunStoryLldStoryResult,
     CreateStoryLaneRequest,
+    DraftStoryImplementationPlanRequest,
+    DraftStoryImplementationPlanResponse,
     DraftStoryLldRequest,
     DraftStoryLldResponse,
+    DraftStoryTestScenariosRequest,
+    DraftStoryTestScenariosResponse,
     StoryArtifactRead,
+    StoryBacklogDiffRead,
     StoryCreate,
     StoryDeliveryLaneRead,
     StoryDeliveryNodeRead,
+    StoryFieldChange,
     StoryListResponse,
+    StoryOrderResponse,
+    StoryOrderWave,
     StoryRead,
     StoryUpdate,
     SyncStoriesFromBacklogRequest,
@@ -57,11 +79,27 @@ from app.schemas.story import (
     UpdateLaneNodeStatusRequest,
 )
 from app.services.audit import record_audit_log
-from app.services.implementation_planner import AREA_TO_AGENT_TYPE, _infer_area
+from app.services.implementation_planner import AREA_TO_AGENT_TYPE, _infer_area, infer_story_task_areas
+from app.services.markdown_sections import find_section
 from app.services.permissions import require_can_edit_stage
+from app.services.review_time import parse_review_time
 from app.services.story_delivery import StoryDeliveryError, advance_lane, create_story_delivery_lane
+from app.services.story_done_gate import evaluate_story_done_gate
+from app.services.story_jira_sync import try_post_story_done_comment
 from app.services.story_export import parse_story_backlog
+from app.services.story_sequencing import compute_story_order
+from app.services.story_implementation_plan_agent import (
+    STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE,
+    StoryImplementationPlanError,
+    run_story_implementation_plan_agent,
+)
+from app.services.story_test_scenarios_agent import (
+    STORY_TEST_SCENARIOS_ARTIFACT_TYPE,
+    StoryTestScenariosError,
+    run_story_test_scenarios_agent,
+)
 from app.services.story_lld_agent import STORY_LLD_ARTIFACT_TYPE, StoryLldError, run_story_lld_agent
+from app.services.testing_agent import STORY_TEST_REPORT_ARTIFACT_TYPE
 
 router = APIRouter(tags=["stories"])
 
@@ -81,6 +119,21 @@ _AREA_TO_SUGGESTED_ROLE: dict[str, str] = {
 def _suggest_owner_role(*, feature: str, title: str, user_story: str) -> str:
     area = _infer_area(f"{feature} {title} {user_story}")
     return _AREA_TO_SUGGESTED_ROLE.get(area, "DEVELOPER")
+
+
+def _clip(value: str, max_length: int) -> str:
+    """Defense in depth for sync-from-backlog: parse_story_backlog's
+    field regex has already been hardened against the one real failure
+    mode found (a bulleted "- **Label:**" field format bleeding an entire
+    story block into one field — see story_export.py's _FIELD_RE
+    comment), but this route still shouldn't let any future
+    drafting/parsing quirk turn into a bare psycopg2
+    StringDataRightTruncation 500 on a VARCHAR column. Truncating here is
+    silent by design for the same reason app/services/ai_generation.py's
+    truncation warning is NOT duplicated here — a stray 300-character
+    "Epic" is a cosmetic, human-editable annoyance (PATCH /stories/{id}
+    fixes it), not a lost story worth surfacing as an error."""
+    return value if len(value) <= max_length else value[: max_length - 1].rstrip() + "…"
 
 
 def _parse_story_points(raw: str) -> int | None:
@@ -152,7 +205,7 @@ def _story_to_read(db: Session, story: Story) -> StoryRead:
             "lane_status": _lane_status_label(story),
             "jira_status": jira_status,
             "jira_issue_key": (jira_link.jira_issue_key if jira_link is not None else story.jira_issue_key),
-            "jira_issue_url": jira_link.jira_issue_url if jira_link is not None else None,
+            "jira_issue_url": jira_link.jira_issue_url if jira_link is not None else story.jira_issue_url,
         }
     )
 
@@ -169,6 +222,38 @@ def _get_story_or_404(db: Session, story_id: uuid.UUID) -> Story:
     if story is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} not found")
     return story
+
+
+def _fields_from_parsed(parsed_story) -> dict:
+    """Every Story column that comes straight from a parsed backlog entry
+    (app/services/story_export.py's Story dataclass) — shared by
+    sync_stories_from_backlog (building a brand-new row) and
+    get_story_backlog_diff/apply_story_backlog_diff (comparing against and
+    correcting an already-synced one), so the two paths can never silently
+    drift apart on how a field is derived (e.g. Story Points Estimate's
+    text parsed into story_points) the way app/services/story_lld_agent.py's
+    own HLD lookup once did against its own duplicate."""
+    suggested_owner_role = parsed_story.suggested_owner_role.strip().upper() or _suggest_owner_role(
+        feature=parsed_story.feature, title=parsed_story.title, user_story=parsed_story.user_story
+    )
+    return {
+        "epic": _clip(parsed_story.epic, 255),
+        "feature": _clip(parsed_story.feature, 255),
+        "user_story": parsed_story.user_story,
+        "priority": _clip(parsed_story.priority, 50),
+        "dependencies": parsed_story.dependencies,
+        "acceptance_criteria": parsed_story.acceptance_criteria,
+        "definition_of_done": parsed_story.definition_of_done,
+        "suggested_owner_role": _clip(suggested_owner_role, 50),
+        "story_points": _parse_story_points(parsed_story.story_points_estimate),
+        "estimated_pr_review_time": _clip(parsed_story.estimated_pr_review_time, 120),
+        "estimated_review_worst_case_minutes": parse_review_time(parsed_story.estimated_pr_review_time).worst_case_minutes,
+        "business_value": parsed_story.business_value,
+        "technical_areas": parsed_story.technical_areas,
+        "jira_issue_type": _clip(parsed_story.jira_issue_type, 50),
+        "suggested_subtasks": parsed_story.suggested_subtasks,
+        "release_readiness_criteria": parsed_story.release_readiness_criteria,
+    }
 
 
 def _get_approved_story_crafting_artifact(db: Session, project: Project) -> Artifact:
@@ -222,26 +307,9 @@ def sync_stories_from_backlog(
             source_artifact_version_id=artifact.current_version_id,
             story_type=payload.story_type,
             status=StoryStatus.PENDING,
-            epic=parsed_story.epic,
-            feature=parsed_story.feature,
-            title=parsed_story.title,
-            user_story=parsed_story.user_story,
-            priority=parsed_story.priority,
-            dependencies=parsed_story.dependencies,
-            acceptance_criteria=parsed_story.acceptance_criteria,
-            definition_of_done=parsed_story.definition_of_done,
-            # Prefer the agent's own "Suggested Owner Role" field; only
-            # fall back to the keyword heuristic when the agent didn't
-            # state one (an older-format backlog, or a malformed story).
-            suggested_owner_role=parsed_story.suggested_owner_role.strip().upper()
-            or _suggest_owner_role(feature=parsed_story.feature, title=parsed_story.title, user_story=parsed_story.user_story),
-            story_points=_parse_story_points(parsed_story.story_points_estimate),
-            business_value=parsed_story.business_value,
-            technical_areas=parsed_story.technical_areas,
-            jira_issue_type=parsed_story.jira_issue_type,
-            suggested_subtasks=parsed_story.suggested_subtasks,
-            release_readiness_criteria=parsed_story.release_readiness_criteria,
+            title=_clip(parsed_story.title, 500),
             created_by_id=triggered_by.id,
+            **_fields_from_parsed(parsed_story),
         )
         db.add(row)
         db.flush()
@@ -256,7 +324,9 @@ def sync_stories_from_backlog(
     db.commit()
     for row in created:
         db.refresh(row)
-    return SyncStoriesResponse(created=[_story_to_read(db, r) for r in created], already_existed=already_existed)
+    return SyncStoriesResponse(
+        created=[_story_to_read(db, r) for r in created], already_existed=already_existed, parsed_count=len(parsed)
+    )
 
 
 @router.post("/stories", response_model=StoryRead, status_code=status.HTTP_201_CREATED)
@@ -312,6 +382,122 @@ def list_stories(project_id: uuid.UUID, db: Session = Depends(get_db)) -> StoryL
     return StoryListResponse(items=[_story_to_read(db, s) for s in stories], total=len(stories))
 
 
+@router.get("/projects/{project_id}/stories/recommended-order", response_model=StoryOrderResponse)
+def get_recommended_story_order(project_id: uuid.UUID, db: Session = Depends(get_db)) -> StoryOrderResponse:
+    """Which stories can start now, and in what order the rest unblock —
+    derived purely from stories' own Dependencies text (see
+    app/services/story_sequencing.py). Says nothing about a story this
+    project doesn't have; a dependency naming an unknown title is reported
+    under unresolved_dependencies rather than guessed at."""
+    _get_project_or_404(db, project_id)
+    stories = db.query(Story).filter(Story.project_id == project_id).all()
+    result = compute_story_order(stories)
+    return StoryOrderResponse(
+        waves=[StoryOrderWave(stories=[_story_to_read(db, s) for s in wave]) for wave in result.waves],
+        unresolved_dependencies={uuid.UUID(sid): text for sid, text in result.unresolved_dependencies.items()},
+        circular=[_story_to_read(db, s) for s in result.circular],
+    )
+
+
+# --- Re-checking a story against a corrected/regenerated backlog ---------------------------
+#
+# sync-from-backlog (above) is deliberately additive-only — it never
+# touches a Story that's already been synced, so a human's or a lane's
+# in-progress work on it is never silently overwritten by a later backlog
+# regeneration. That's the right default, but it means a real mistake
+# caught in the backlog (the wrong scope stated, a wrong dependency, ...)
+# has no way back into an already-synced Story short of hand-editing it via
+# PATCH. These two routes are that way back: show exactly what changed
+# between the story and the CURRENT approved backlog, and apply only the
+# fields a human chooses — never automatically, and the lane (if one
+# already exists) is never touched by this, only the Story row's own
+# fields are.
+
+
+def _parsed_entry_for_story(db: Session, story: Story) -> tuple[Artifact, "object | None"]:
+    project = _get_project_or_404(db, story.project_id)
+    artifact = _get_approved_story_crafting_artifact(db, project)
+    parsed = next(
+        (p for p in parse_story_backlog(artifact.current_version.content_markdown) if p.title.strip().lower() == story.title.strip().lower()),
+        None,
+    )
+    return artifact, parsed
+
+
+def _stringify(value) -> str:
+    if isinstance(value, list):
+        return "\n".join(f"- {item}" for item in value) if value else "(none)"
+    if value is None:
+        return "(none)"
+    return str(value)
+
+
+@router.get("/stories/{story_id}/backlog-diff", response_model=StoryBacklogDiffRead)
+def get_story_backlog_diff(story_id: uuid.UUID, db: Session = Depends(get_db)) -> StoryBacklogDiffRead:
+    """Compares this already-synced story against its entry in the
+    CURRENT approved story_backlog — e.g. after Story Crafting was
+    re-run/corrected and re-approved. Read-only; see
+    apply_story_backlog_diff to actually bring a change in."""
+    story = _get_story_or_404(db, story_id)
+    artifact, parsed = _parsed_entry_for_story(db, story)
+    lane_active = story.delivery_lane is not None
+
+    if parsed is None:
+        return StoryBacklogDiffRead(
+            story_id=story.id, found_in_backlog=False, source_version_number=artifact.current_version.version_number,
+            changes=[], up_to_date=False, lane_active=lane_active,
+        )
+
+    proposed = _fields_from_parsed(parsed)
+    changes = [
+        StoryFieldChange(field=field_name, current=_stringify(getattr(story, field_name)), proposed=_stringify(new_value))
+        for field_name, new_value in proposed.items()
+        if getattr(story, field_name) != new_value
+    ]
+    return StoryBacklogDiffRead(
+        story_id=story.id, found_in_backlog=True, source_version_number=artifact.current_version.version_number,
+        changes=changes, up_to_date=not changes, lane_active=lane_active,
+    )
+
+
+@router.post("/stories/{story_id}/apply-backlog-diff", response_model=StoryRead)
+def apply_story_backlog_diff(story_id: uuid.UUID, payload: ApplyStoryBacklogDiffRequest, db: Session = Depends(get_db)) -> StoryRead:
+    story = _get_story_or_404(db, story_id)
+    actor = db.get(User, payload.triggered_by_user_id)
+    if actor is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+    require_can_edit_stage(actor, "story_crafting")
+
+    artifact, parsed = _parsed_entry_for_story(db, story)
+    if parsed is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"'{story.title}' was not found in the current approved backlog (v{artifact.current_version.version_number}).")
+
+    proposed = _fields_from_parsed(parsed)
+    field_names = payload.fields if payload.fields is not None else list(proposed.keys())
+    unknown = [f for f in field_names if f not in proposed]
+    if unknown:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown field(s): {', '.join(unknown)}.")
+
+    applied = [f for f in field_names if getattr(story, f) != proposed[f]]
+    for f in applied:
+        setattr(story, f, proposed[f])
+    if applied:
+        story.source_artifact_version_id = artifact.current_version_id
+        db.flush()
+        _log_story_activity(
+            db, story=story, action="story.corrected_from_backlog", actor=actor,
+            details={"fields": applied, "source_version": artifact.current_version.version_number},
+        )
+        record_audit_log(
+            db, project_id=story.project_id, actor_user_id=actor.id, action="story.corrected_from_backlog",
+            entity_type="Story", entity_id=story.id,
+            extra_data={"fields": applied, "source_version": artifact.current_version.version_number},
+        )
+        db.commit()
+        db.refresh(story)
+    return _story_to_read(db, story)
+
+
 @router.patch("/stories/{story_id}", response_model=StoryRead)
 def update_story(story_id: uuid.UUID, payload: StoryUpdate, db: Session = Depends(get_db)) -> StoryRead:
     """Edits a story's own copied fields. Owner assignment is deliberately
@@ -326,7 +512,8 @@ def update_story(story_id: uuid.UUID, payload: StoryUpdate, db: Session = Depend
     changed_fields: list[str] = []
     for field_name in (
         "title", "description", "user_story", "priority", "dependencies", "acceptance_criteria", "definition_of_done",
-        "suggested_owner_role", "story_points", "business_value", "technical_areas", "jira_issue_type",
+        "suggested_owner_role", "story_points", "estimated_pr_review_time", "estimated_review_worst_case_minutes",
+        "business_value", "technical_areas", "jira_issue_type",
         "jira_issue_key", "suggested_subtasks", "release_readiness_criteria",
     ):
         value = getattr(payload, field_name)
@@ -383,39 +570,84 @@ def assign_story_owner(story_id: uuid.UUID, payload: AssignStoryOwnerRequest, db
     return _story_to_read(db, story)
 
 
-def _ensure_story_implementation_task(db: Session, *, story: Story, created_by: User) -> ImplementationTask:
-    """Story-level implementation workflow — this story's one
-    ImplementationTask (see app/models/implementation_task.py: rule "one
-    run is always exactly one story" holds structurally because this is
-    the only task ever created for this story, and ImplementationTask.story_id
-    is a single nullable FK, never a collection). Idempotent: called every
-    time IMPLEMENTATION unlocks, but only ever creates the row once.
+def _ensure_story_implementation_tasks(db: Session, *, story: Story, created_by: User) -> list[ImplementationTask]:
+    """Story-level implementation workflow — full-stack-per-story: one
+    ImplementationTask per area the story's own approved Implementation
+    Plan actually calls for (DATABASE/BACKEND/FRONTEND, in that order —
+    see infer_story_task_areas), not one best-guess area for the whole
+    story. Idempotent: called every time IMPLEMENTATION unlocks, but only
+    ever creates the row set once — a later call just returns the
+    existing ones, in order.
 
-    `workflow_node_id`/`artifact_id`/`artifact_version_id` are left null —
-    there is no project-level WorkflowNode/Artifact/ArtifactVersion for a
-    StoryDeliveryNode to link to; every consumer of those three either
-    null-checks (app/services/repo_context_builder.py) or doesn't touch
-    them for a story-scoped task."""
-    existing = db.query(ImplementationTask).filter(ImplementationTask.story_id == story.id).first()
-    if existing is not None:
+    Falls back to the single-heuristic-area task this used to always
+    create when the plan has no identifiable per-area section content
+    (e.g. it doesn't follow the expected heading structure, or hasn't
+    been drafted at all yet) — a story is never left with zero tasks.
+
+    `workflow_node_id`/`artifact_id`/`artifact_version_id` are left null
+    on every task — there is no project-level WorkflowNode/Artifact/
+    ArtifactVersion for a StoryDeliveryNode to link to; every consumer of
+    those three either null-checks (app/services/repo_context_builder.py)
+    or doesn't touch them for a story-scoped task."""
+    existing = db.query(ImplementationTask).filter(ImplementationTask.story_id == story.id).order_by(ImplementationTask.order_index).all()
+    if existing:
         return existing
 
-    area = ImplementationTaskArea(_infer_area(f"{story.feature} {story.title} {story.user_story}"))
-    task = ImplementationTask(
-        project_id=story.project_id,
-        story_id=story.id,
-        title=story.title,
-        description=story.user_story or story.description,
-        linked_story=story.title,
-        area=area,
-        acceptance_criteria=story.acceptance_criteria,
-        assigned_agent_type=AREA_TO_AGENT_TYPE.get(area.value, AREA_TO_AGENT_TYPE["BACKEND"]),
-        order_index=0,
+    plan_artifact = (
+        db.query(StoryArtifact)
+        .filter(StoryArtifact.story_id == story.id, StoryArtifact.artifact_type == STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE)
+        .order_by(StoryArtifact.version_number.desc())
+        .first()
     )
-    db.add(task)
+    areas = infer_story_task_areas(plan_artifact.content_markdown) if plan_artifact is not None else []
+    if not areas:
+        areas = [ImplementationTaskArea(_infer_area(f"{story.feature} {story.title} {story.user_story}"))]
+
+    tasks: list[ImplementationTask] = []
+    for index, area in enumerate(areas):
+        task = ImplementationTask(
+            project_id=story.project_id,
+            story_id=story.id,
+            # A single-area story keeps the plain story title (today's
+            # exact behavior, unchanged); a multi-area one gets the area
+            # appended so its several tasks are distinguishable at a
+            # glance everywhere a task title is shown.
+            title=story.title if len(areas) == 1 else f"{story.title} — {area.value.title()}",
+            description=story.user_story or story.description,
+            linked_story=story.title,
+            area=area,
+            acceptance_criteria=story.acceptance_criteria,
+            assigned_agent_type=AREA_TO_AGENT_TYPE.get(area.value, AREA_TO_AGENT_TYPE["BACKEND"]),
+            order_index=index,
+        )
+        db.add(task)
+        tasks.append(task)
     db.flush()
-    _log_story_activity(db, story=story, action="implementation_task.created", actor=created_by, details={"task_id": str(task.id)})
-    return task
+    _log_story_activity(
+        db, story=story, action="implementation_task.created", actor=created_by,
+        details={"task_ids": [str(t.id) for t in tasks], "areas": [a.value for a in areas]},
+    )
+    return tasks
+
+
+def _current_story_task(tasks: list[ImplementationTask]) -> ImplementationTask:
+    """Which of a story's (possibly several, sequential) ImplementationTasks
+    is "the" one to work on right now: the first not-yet-COMPLETED task in
+    order (see ImplementationTaskStatus — set COMPLETED once a run against
+    it is Accepted, in review_implementation_run), or the last task once
+    every one of them is done. This is what every existing single-task
+    UI/endpoint (the story lane's Implementation tab, PR Review, Testing)
+    keeps reading — a story with three sequential tasks walks a user
+    through DATABASE, then BACKEND, then FRONTEND automatically, with no
+    change needed to any of those three tabs: by the time all tasks are
+    COMPLETED, "the current task" naturally resolves to the last one,
+    whose accepted run's PR is the SAME shared PR every earlier task's
+    run already pushed onto (see implementation_runs.py's
+    _get_open_task_pull_request)."""
+    for task in tasks:
+        if task.status != ImplementationTaskStatus.COMPLETED:
+            return task
+    return tasks[-1]
 
 
 @router.post("/stories/{story_id}/lane", response_model=StoryRead, status_code=status.HTTP_201_CREATED)
@@ -489,6 +721,24 @@ def list_lane_nodes(lane_id: uuid.UUID, db: Session = Depends(get_db)) -> list[S
     )
 
 
+_QA_APPROVAL_REQUIRED_EVIDENCE_SECTION = "Test Evidence"
+
+
+def _require_test_evidence(test_report: StoryArtifact | None) -> str | None:
+    """Requirement 6 — structural check only (the heading exists and has
+    real content), same limitation app/services/graph_engine.py's
+    validate_evidence_requirement discloses for the project-level
+    equivalent: it does not verify the substance of what's written there."""
+    if test_report is None:
+        return "Cannot grant QA Approval — no test report has been generated for this story yet."
+    section = find_section(test_report.content_markdown, _QA_APPROVAL_REQUIRED_EVIDENCE_SECTION)
+    if section is None:
+        return f"Cannot grant QA Approval — the test report has no '{_QA_APPROVAL_REQUIRED_EVIDENCE_SECTION}' section."
+    if not section["content"].strip():
+        return f"Cannot grant QA Approval — the '{_QA_APPROVAL_REQUIRED_EVIDENCE_SECTION}' section is present but empty."
+    return None
+
+
 @router.patch("/delivery-lane-nodes/{node_id}", response_model=StoryDeliveryNodeRead)
 def update_lane_node_status(
     node_id: uuid.UUID, payload: UpdateLaneNodeStatusRequest, db: Session = Depends(get_db)
@@ -526,6 +776,97 @@ def update_lane_node_status(
             status.HTTP_403_FORBIDDEN, f"Role {actor.role.value} may not approve Story LLD (LLD_REVIEW) — Tech Lead only."
         )
 
+    # Story-level testing workflow, requirement 6 — "QA Approval requires
+    # test evidence." QA_APPROVAL is the dedicated review-gate node right
+    # after TESTING (mirrors LLD_REVIEW's own role gate above); completing
+    # it requires both a QA (or Admin) actor AND a non-empty "Test
+    # Evidence" section in the latest story_test_report StoryArtifact —
+    # the same structural check GraphEngineService.validate_evidence_requirement
+    # already does for the project-level testing stage, applied here to a
+    # StoryArtifact instead of an ArtifactVersion.
+    if node.node_key == "QA_APPROVAL" and new_status == StoryDeliveryNodeStatus.COMPLETED:
+        if actor.role not in (UserRole.QA, UserRole.ADMIN):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"Role {actor.role.value} may not grant QA Approval — QA only.")
+        test_report = (
+            db.query(StoryArtifact)
+            .filter(StoryArtifact.story_id == node.lane.story_id, StoryArtifact.artifact_type == STORY_TEST_REPORT_ARTIFACT_TYPE)
+            .order_by(StoryArtifact.version_number.desc())
+            .first()
+        )
+        evidence_error = _require_test_evidence(test_report)
+        if evidence_error:
+            raise HTTPException(status.HTTP_409_CONFLICT, evidence_error)
+
+    # Story Implementation Plan Agent, rule 4 — "Implementation cannot
+    # start before this plan is approved or accepted by assigned user."
+    # Unlike LLD_REVIEW/QA_APPROVAL, this stage's review is its own node
+    # (not a separate one right after it) — completing IMPLEMENTATION_PLAN
+    # IS acceptance. Gated to whoever the node is assigned to (if set) or
+    # a Tech Lead/Admin (the role this node is advisory-assigned to — see
+    # _NODE_ASSIGNED_ROLE["IMPLEMENTATION_PLAN"] in
+    # app/services/story_delivery.py); a real plan must exist to accept
+    # (an empty/undrafted stage can't be "approved"). "Request Changes" is
+    # not a separate action — it's this same endpoint with status=BLOCKED
+    # and a blocked_reason, exactly like every other node's rejection path.
+    if node.node_key == "IMPLEMENTATION_PLAN" and new_status == StoryDeliveryNodeStatus.COMPLETED:
+        is_assignee = node.assigned_user_id is not None and node.assigned_user_id == actor.id
+        if not is_assignee and actor.role not in (UserRole.TECH_LEAD, UserRole.ADMIN):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                f"Role {actor.role.value} may not accept this Implementation Plan — only its assigned user or a Tech Lead may.",
+            )
+        plan_artifact = (
+            db.query(StoryArtifact)
+            .filter(StoryArtifact.story_id == node.lane.story_id, StoryArtifact.artifact_type == STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE)
+            .order_by(StoryArtifact.version_number.desc())
+            .first()
+        )
+        if plan_artifact is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Cannot accept — no Implementation Plan has been drafted for this story yet.")
+
+    # Story Test Scenario Agent, rule 3 — "QA or Tech Lead can
+    # review/approve test scenarios." Same review-is-this-node's-own-
+    # completion pattern as IMPLEMENTATION_PLAN above, but role-only (no
+    # assignee override — the rule names two roles, not "or whoever it's
+    # assigned to"); "Request Changes" is likewise the same endpoint with
+    # status=BLOCKED.
+    if node.node_key == "TEST_SCENARIOS" and new_status == StoryDeliveryNodeStatus.COMPLETED and actor.role not in (UserRole.QA, UserRole.TECH_LEAD, UserRole.ADMIN):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, f"Role {actor.role.value} may not approve these Test Scenarios — QA or Tech Lead only."
+        )
+
+    # GitHub PR Review Agent, UI rule 4 — "Add button: Mark Human Review
+    # Complete." HUMAN_CODE_REVIEW is the lane's real, external-to-this-app
+    # GitHub PR review gate (see pr_review_run.py's docstring); completing
+    # it via this same generic endpoint IS that button. Same role gate as
+    # LLD_REVIEW above — Tech Lead (or Admin) only.
+    if node.node_key == "HUMAN_CODE_REVIEW" and new_status == StoryDeliveryNodeStatus.COMPLETED and actor.role not in (UserRole.TECH_LEAD, UserRole.ADMIN):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, f"Role {actor.role.value} may not mark Human Code Review complete — Tech Lead only."
+        )
+
+    # HARDENING FIX — "Human approval is required before final Done."
+    # RELEASE_READY is this lane's terminal node; completing it is what
+    # marks the story DONE (see advance_lane below). Until now nothing
+    # gated who could complete it — any actor, any role, could mark a
+    # story DONE with a single PATCH. Fixed the same way as every other
+    # review gate in this lane (LLD_REVIEW/QA_APPROVAL above): only the
+    # role this node is already advisory-assigned to
+    # (_NODE_ASSIGNED_ROLE["RELEASE_READY"] = PRODUCT_OWNER, see
+    # app/services/story_delivery.py) or Admin may complete it.
+    if node.node_key == "RELEASE_READY" and new_status == StoryDeliveryNodeStatus.COMPLETED and actor.role not in (UserRole.PRODUCT_OWNER, UserRole.ADMIN):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, f"Role {actor.role.value} may not mark this story Done (RELEASE_READY) — Product Owner only."
+        )
+
+    # Final Done gate — see app/services/story_done_gate.py. Re-checks all
+    # 9 conditions directly against their source of truth, one last time,
+    # rather than trusting the lane's own node sequence alone.
+    if node.node_key == "RELEASE_READY" and new_status == StoryDeliveryNodeStatus.COMPLETED:
+        unmet = evaluate_story_done_gate(db, story=db.get(Story, node.lane.story_id), lane=node.lane)
+        if unmet:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Cannot mark this story Done yet: " + "; ".join(unmet))
+
     if payload.assigned_user_id is not None:
         assigned_user = db.get(User, payload.assigned_user_id)
         if assigned_user is None:
@@ -547,6 +888,22 @@ def update_lane_node_status(
         db, story=story, action="story_lane_node.status_changed", actor=actor, lane_id=lane.id, node_id=node.id,
         details={"node_key": node.node_key, "from": previous_status.value, "to": new_status.value},
     )
+    if node.node_key == "IMPLEMENTATION_PLAN":
+        if new_status == StoryDeliveryNodeStatus.COMPLETED:
+            _log_story_activity(db, story=story, action="story_implementation_plan.accepted", actor=actor, lane_id=lane.id, node_id=node.id)
+        elif new_status == StoryDeliveryNodeStatus.BLOCKED:
+            _log_story_activity(
+                db, story=story, action="story_implementation_plan.changes_requested", actor=actor, lane_id=lane.id, node_id=node.id,
+                details={"reason": payload.blocked_reason},
+            )
+    if node.node_key == "TEST_SCENARIOS":
+        if new_status == StoryDeliveryNodeStatus.COMPLETED:
+            _log_story_activity(db, story=story, action="story_test_scenarios.approved", actor=actor, lane_id=lane.id, node_id=node.id)
+        elif new_status == StoryDeliveryNodeStatus.BLOCKED:
+            _log_story_activity(
+                db, story=story, action="story_test_scenarios.changes_requested", actor=actor, lane_id=lane.id, node_id=node.id,
+                details={"reason": payload.blocked_reason},
+            )
 
     if new_status == StoryDeliveryNodeStatus.COMPLETED:
         unlocked = advance_lane(db, lane=lane, completed_node=node)
@@ -557,14 +914,30 @@ def update_lane_node_status(
             )
             # Story-level implementation workflow — the moment
             # IMPLEMENTATION unlocks (i.e. Story LLD/LLD_REVIEW just
-            # approved), ensure this story has its one ImplementationTask
+            # approved), ensure this story has its full-stack task set
             # ready for POST /implementation-runs to act on. Idempotent:
-            # a story only ever gets exactly one.
+            # a story only ever gets this set created once.
             if unlocked.node_key == "IMPLEMENTATION":
-                _ensure_story_implementation_task(db, story=story, created_by=actor)
+                _ensure_story_implementation_tasks(db, story=story, created_by=actor)
         elif lane.status == StoryDeliveryLaneStatus.COMPLETED:
+            # Final Done gate side effects — see app/services/story_done_gate.py.
+            # "Update Story Lane status to DONE" is StoryDeliveryLaneStatus
+            # .COMPLETED above — this lane model's own terminal status,
+            # reused rather than adding a second, functionally-identical
+            # enum value.
             story.status = StoryStatus.DONE
             _log_story_activity(db, story=story, action="story_lane.completed", actor=actor, lane_id=lane.id)
+            record_audit_log(
+                db, project_id=story.project_id, actor_user_id=actor.id, action="story.done",
+                entity_type="Story", entity_id=story.id,
+                extra_data={"lane_id": str(lane.id), "jira_issue_key": story.jira_issue_key},
+            )
+            # Optional — best-effort, never blocks marking the story DONE
+            # (see try_post_story_done_comment's own docstring for why a
+            # comment, not a real status write, is this integration's
+            # honest ceiling).
+            if try_post_story_done_comment(db, story=story):
+                _log_story_activity(db, story=story, action="story.jira_done_comment_posted", actor=actor, lane_id=lane.id)
 
     db.commit()
     db.refresh(node)
@@ -587,7 +960,10 @@ def draft_story_lld(node_id: uuid.UUID, payload: DraftStoryLldRequest, db: Sessi
     require_can_edit_stage(triggered_by, "story_lld")
 
     try:
-        result = run_story_lld_agent(db, node=node, triggered_by=triggered_by)
+        result = run_story_lld_agent(
+            db, node=node, triggered_by=triggered_by, clarification_answers=payload.clarification_answers,
+            provider_override=payload.provider_override, model_override=payload.model_override,
+        )
     except StoryLldError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
@@ -620,6 +996,438 @@ def get_story_lld(story_id: uuid.UUID, db: Session = Depends(get_db)) -> StoryAr
     )
     if artifact is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} has no Story LLD drafted yet.")
+    return artifact
+
+
+@router.post("/projects/{project_id}/stories/bulk-run-story-lld", response_model=BulkRunStoryLldResponse)
+def bulk_run_story_lld(project_id: uuid.UUID, payload: BulkRunStoryLldRequest, db: Session = Depends(get_db)) -> BulkRunStoryLldResponse:
+    """The Stories list's "Run Story LLD" bulk button — draft every
+    selected story's Story LLD in one click instead of opening each
+    story's own workspace. For each story: create its delivery lane if
+    missing, auto-complete Story Ready if that's the only thing still
+    blocking STORY_LLD (it has no review gate of its own — see
+    update_lane_node_status, any actor may complete it), then draft the
+    Story LLD by calling the exact same run_story_lld_agent draft_story_lld
+    uses. One story's failure never stops the batch — every outcome is
+    recorded in `results`, and anything still needing a human (a failed
+    precondition, or an agent clarification question) is echoed again in
+    `remaining` so nothing is missed in the full list."""
+    project = _get_project_or_404(db, project_id)
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+
+    results: list[BulkRunStoryLldStoryResult] = []
+    for story_id in payload.story_ids:
+        story = db.get(Story, story_id)
+        if story is None or story.project_id != project.id:
+            results.append(
+                BulkRunStoryLldStoryResult(story_id=story_id, story_title="(unknown)", status="skipped", reason="Story not found in this project.")
+            )
+            continue
+
+        lane_created = False
+        if story.delivery_lane is None:
+            try:
+                create_story_lane(story.id, CreateStoryLaneRequest(triggered_by_user_id=triggered_by.id), db)
+            except HTTPException as exc:
+                results.append(
+                    BulkRunStoryLldStoryResult(story_id=story.id, story_title=story.title, status="skipped", reason=str(exc.detail))
+                )
+                continue
+            db.refresh(story)
+            lane_created = True
+
+        lane = story.delivery_lane
+        node = next((n for n in lane.nodes if n.node_key == "STORY_LLD"), None)
+        if node is None:
+            results.append(
+                BulkRunStoryLldStoryResult(
+                    story_id=story.id, story_title=story.title, status="skipped", lane_created=lane_created,
+                    reason="This story's delivery lane has no Story LLD node.",
+                )
+            )
+            continue
+
+        if node.status == StoryDeliveryNodeStatus.LOCKED:
+            story_ready = next((n for n in lane.nodes if n.node_key == "STORY_READY"), None)
+            if story_ready is not None and story_ready.status != StoryDeliveryNodeStatus.COMPLETED:
+                try:
+                    update_lane_node_status(
+                        story_ready.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=triggered_by.id), db,
+                    )
+                except HTTPException as exc:
+                    results.append(
+                        BulkRunStoryLldStoryResult(
+                            story_id=story.id, story_title=story.title, status="skipped", reason=str(exc.detail), lane_created=lane_created,
+                        )
+                    )
+                    continue
+                db.refresh(node)
+
+        outcome: BulkRunStoryLldStoryResult
+        if node.status == StoryDeliveryNodeStatus.COMPLETED:
+            outcome = BulkRunStoryLldStoryResult(story_id=story.id, story_title=story.title, status="already_drafted", lane_created=lane_created)
+        elif node.status == StoryDeliveryNodeStatus.IN_PROGRESS:
+            outcome = BulkRunStoryLldStoryResult(
+                story_id=story.id, story_title=story.title, status="needs_clarification", lane_created=lane_created,
+                reason="A previous attempt needs clarification answers before it can continue — open this story's workspace to answer them.",
+            )
+        elif node.status == StoryDeliveryNodeStatus.LOCKED:
+            outcome = BulkRunStoryLldStoryResult(
+                story_id=story.id, story_title=story.title, status="skipped", lane_created=lane_created,
+                reason="Story LLD is still locked — Story Ready must complete first.",
+            )
+        else:
+            try:
+                result = run_story_lld_agent(db, node=node, triggered_by=triggered_by)
+            except StoryLldError as exc:
+                outcome = BulkRunStoryLldStoryResult(story_id=story.id, story_title=story.title, status="skipped", reason=str(exc), lane_created=lane_created)
+            else:
+                _log_story_activity(
+                    db, story=story, action="story_lld.drafted", actor=triggered_by, lane_id=lane.id, node_id=node.id,
+                    details={"needs_clarification": result.needs_clarification, "used_mock": result.agent_run_used_mock, "bulk": True},
+                )
+                if result.needs_clarification:
+                    outcome = BulkRunStoryLldStoryResult(
+                        story_id=story.id, story_title=story.title, status="needs_clarification", lane_created=lane_created,
+                        reason="The agent needs clarification before it can finish this story's Story LLD.",
+                    )
+                else:
+                    outcome = BulkRunStoryLldStoryResult(story_id=story.id, story_title=story.title, status="drafted", lane_created=lane_created)
+
+        results.append(outcome)
+        db.commit()
+
+    remaining = [r for r in results if r.status in ("needs_clarification", "skipped")]
+    drafted_count = sum(1 for r in results if r.status == "drafted")
+    already_count = sum(1 for r in results if r.status == "already_drafted")
+    message = f"Drafted {drafted_count} Story LLD(s); {already_count} already had one."
+    if remaining:
+        message += f" {len(remaining)} stor{'y' if len(remaining) == 1 else 'ies'} still need your attention."
+    return BulkRunStoryLldResponse(results=results, remaining=remaining, message=message)
+
+
+# The only three review gates this bulk action may touch — matches exactly
+# the stages the Stories list's "draft, prepare & push" dropdown already
+# covers (Story LLD -> LLD_REVIEW, Implementation Plan -> its own node,
+# Test Scenarios -> its own node). Deliberately excludes every other gate
+# (HUMAN_CODE_REVIEW, QA_APPROVAL, RELEASE_READY, STORY_READY) — those
+# stay single-story actions for now, not exposed as a bulk shortcut here.
+_BULK_APPROVABLE_NODE_KEYS = {"LLD_REVIEW", "IMPLEMENTATION_PLAN", "TEST_SCENARIOS"}
+
+
+@router.post("/projects/{project_id}/stories/bulk-approve-lane-node", response_model=BulkApproveLaneNodeResponse)
+def bulk_approve_lane_node(project_id: uuid.UUID, payload: BulkApproveLaneNodeRequest, db: Session = Depends(get_db)) -> BulkApproveLaneNodeResponse:
+    """The Stories list's "Approve & Unlock Next" bulk action. For every
+    selected story, approves `payload.node_key` (completes it) exactly the
+    way a human would via PATCH /delivery-lane-nodes/{id} for one story —
+    this calls that exact same update_lane_node_status function per story,
+    so every role check (Tech Lead for LLD_REVIEW, assignee/Tech Lead for
+    IMPLEMENTATION_PLAN, QA/Tech Lead for TEST_SCENARIOS) and every
+    precondition (e.g. a plan must actually be drafted before it can be
+    accepted) still applies unchanged, per story. This is a convenience
+    for clicking the same approval many times, never a bypass of it: if
+    the caller's role isn't allowed to approve this gate, every single
+    story in the batch is reported "skipped" with that real reason — never
+    silently approved anyway."""
+    project = _get_project_or_404(db, project_id)
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+    if payload.node_key not in _BULK_APPROVABLE_NODE_KEYS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"'{payload.node_key}' cannot be bulk-approved here — only {', '.join(sorted(_BULK_APPROVABLE_NODE_KEYS))} are supported.",
+        )
+
+    results: list[BulkApproveLaneNodeStoryResult] = []
+    for story_id in payload.story_ids:
+        story = db.query(Story).filter(Story.id == story_id, Story.project_id == project.id).first()
+        if story is None:
+            results.append(BulkApproveLaneNodeStoryResult(story_id=story_id, story_title="(not found)", status="skipped", reason=f"Story {story_id} not found in this project."))
+            continue
+        lane = story.delivery_lane
+        if lane is None:
+            results.append(BulkApproveLaneNodeStoryResult(story_id=story.id, story_title=story.title, status="skipped", reason="This story has no delivery lane yet."))
+            continue
+        node = next((n for n in lane.nodes if n.node_key == payload.node_key), None)
+        if node is None:
+            results.append(
+                BulkApproveLaneNodeStoryResult(story_id=story.id, story_title=story.title, status="skipped", reason=f"This story's delivery lane has no {payload.node_key} stage.")
+            )
+            continue
+        if node.status == StoryDeliveryNodeStatus.COMPLETED:
+            results.append(BulkApproveLaneNodeStoryResult(story_id=story.id, story_title=story.title, status="already_approved"))
+            continue
+        if node.status == StoryDeliveryNodeStatus.LOCKED:
+            results.append(
+                BulkApproveLaneNodeStoryResult(story_id=story.id, story_title=story.title, status="skipped", reason=f"{payload.node_key} is still locked — its predecessor must complete first.")
+            )
+            continue
+
+        try:
+            update_lane_node_status(node.id, UpdateLaneNodeStatusRequest(status="COMPLETED", actor_user_id=triggered_by.id), db)
+        except HTTPException as exc:
+            results.append(BulkApproveLaneNodeStoryResult(story_id=story.id, story_title=story.title, status="skipped", reason=str(exc.detail)))
+            continue
+        results.append(BulkApproveLaneNodeStoryResult(story_id=story.id, story_title=story.title, status="approved"))
+
+    approved_count = sum(1 for r in results if r.status == "approved")
+    already_count = sum(1 for r in results if r.status == "already_approved")
+    skipped_count = sum(1 for r in results if r.status == "skipped")
+    message = f"Approved {approved_count}; {already_count} already approved."
+    if skipped_count:
+        message += f" {skipped_count} skipped — see each story's own reason above."
+    return BulkApproveLaneNodeResponse(results=results, message=message)
+
+
+@router.post("/projects/{project_id}/stories/bulk-start-implementation", response_model=BulkStartImplementationResponse)
+def bulk_start_implementation(project_id: uuid.UUID, payload: BulkStartImplementationRequest, db: Session = Depends(get_db)) -> BulkStartImplementationResponse:
+    """Story-wise bulk code Implementation. For every selected story,
+    starts a real Implementation Agent run (a real proposed diff, same as
+    the single-task "Start Implementation Run" button) for that story's
+    own NEXT runnable task — calling start_implementation_run exactly as
+    the single-task route does, so every precondition (LLD approved,
+    Implementation Plan accepted, repository connected, strict DATABASE ->
+    BACKEND -> FRONTEND ordering within a story) applies unchanged.
+
+    Deliberately stops at ONE task per story per call: a story's own tasks
+    only unlock the next one once the current one's run is reviewed and
+    Accepted (a human action — see review_implementation_run), so running
+    further ahead isn't possible without bypassing that review, which this
+    action does not do. It also never creates or merges a pull request —
+    that stays a separate, deliberate, per-run action after a human has
+    reviewed the proposed diff.
+    """
+    project = _get_project_or_404(db, project_id)
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+
+    results: list[BulkStartImplementationStoryResult] = []
+    for story_id in payload.story_ids:
+        story = db.query(Story).filter(Story.id == story_id, Story.project_id == project.id).first()
+        if story is None:
+            results.append(BulkStartImplementationStoryResult(story_id=story_id, story_title="(not found)", status="skipped", reason=f"Story {story_id} not found in this project."))
+            continue
+
+        tasks = (
+            db.query(ImplementationTask)
+            .filter(ImplementationTask.story_id == story.id)
+            .order_by(ImplementationTask.order_index)
+            .all()
+        )
+        if not tasks:
+            results.append(
+                BulkStartImplementationStoryResult(
+                    story_id=story.id, story_title=story.title, status="skipped",
+                    reason="This story has no implementation tasks yet — its Implementation Plan must be accepted first.",
+                )
+            )
+            continue
+
+        next_task = next((t for t in tasks if t.status != ImplementationTaskStatus.COMPLETED), None)
+        if next_task is None:
+            results.append(BulkStartImplementationStoryResult(story_id=story.id, story_title=story.title, status="all_complete"))
+            continue
+        if next_task.status == ImplementationTaskStatus.IN_PROGRESS:
+            results.append(
+                BulkStartImplementationStoryResult(
+                    story_id=story.id, story_title=story.title, status="awaiting_review", task_area=next_task.area.value, task_title=next_task.title,
+                    reason=f"The {next_task.area.value} task already has a run awaiting human review — review and accept it before starting the next one.",
+                )
+            )
+            continue
+
+        try:
+            run = start_implementation_run(
+                StartImplementationRunRequest(
+                    implementation_task_id=next_task.id, triggered_by_user_id=triggered_by.id,
+                    provider_override=payload.provider_override, model_override=payload.model_override,
+                ),
+                db,
+            )
+        except HTTPException as exc:
+            results.append(
+                BulkStartImplementationStoryResult(story_id=story.id, story_title=story.title, status="skipped", task_area=next_task.area.value, task_title=next_task.title, reason=str(exc.detail))
+            )
+            continue
+
+        results.append(
+            BulkStartImplementationStoryResult(
+                story_id=story.id, story_title=story.title, status="started", task_area=next_task.area.value, task_title=next_task.title,
+                implementation_run_id=run.id, run_status=run.status.value,
+            )
+        )
+
+    started_count = sum(1 for r in results if r.status == "started")
+    message = f"Started {started_count} implementation run(s)."
+    remaining = sum(1 for r in results if r.status in ("awaiting_review", "skipped"))
+    if remaining:
+        message += f" {remaining} stor{'y' if remaining == 1 else 'ies'} still need your attention — see above."
+    return BulkStartImplementationResponse(results=results, message=message)
+
+
+@router.post("/delivery-lane-nodes/{node_id}/draft-implementation-plan", response_model=DraftStoryImplementationPlanResponse)
+def draft_story_implementation_plan(
+    node_id: uuid.UUID, payload: DraftStoryImplementationPlanRequest, db: Session = Depends(get_db)
+) -> DraftStoryImplementationPlanResponse:
+    """Drafts the IMPLEMENTATION_PLAN node's real output. See
+    app/services/story_implementation_plan_agent.py for the preconditions
+    and the 12-section output shape. Drafting never completes the node —
+    see update_lane_node_status's IMPLEMENTATION_PLAN branch for the
+    separate Accept/Request Changes action."""
+    node = db.get(StoryDeliveryNode, node_id)
+    if node is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Delivery lane node {node_id} not found")
+    if node.node_key != "IMPLEMENTATION_PLAN":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Node {node_id} is '{node.node_key}', not IMPLEMENTATION_PLAN.")
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+    require_can_edit_stage(triggered_by, "story_implementation_plan")
+
+    try:
+        result = run_story_implementation_plan_agent(
+            db, node=node, triggered_by=triggered_by, clarification_answers=payload.clarification_answers,
+            provider_override=payload.provider_override, model_override=payload.model_override,
+        )
+    except StoryImplementationPlanError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    lane = node.lane
+    story = db.get(Story, lane.story_id)
+    _log_story_activity(
+        db, story=story, action="story_implementation_plan.drafted", actor=triggered_by, lane_id=lane.id, node_id=node.id,
+        details={"needs_clarification": result.needs_clarification, "used_mock": result.agent_run_used_mock},
+    )
+
+    db.commit()
+    db.refresh(node)
+    return DraftStoryImplementationPlanResponse(
+        needs_clarification=result.needs_clarification,
+        story_artifact=StoryArtifactRead.model_validate(result.story_artifact) if result.story_artifact else None,
+        node_status=node.status.value,
+    )
+
+
+@router.get("/stories/{story_id}/implementation-plan", response_model=StoryArtifactRead)
+def get_story_implementation_plan(story_id: uuid.UUID, db: Session = Depends(get_db)) -> StoryArtifact:
+    """The latest STORY_IMPLEMENTATION_PLAN StoryArtifact for this story,
+    if one has been drafted yet."""
+    story = _get_story_or_404(db, story_id)
+    artifact = (
+        db.query(StoryArtifact)
+        .filter(StoryArtifact.story_id == story.id, StoryArtifact.artifact_type == STORY_IMPLEMENTATION_PLAN_ARTIFACT_TYPE)
+        .order_by(StoryArtifact.version_number.desc())
+        .first()
+    )
+    if artifact is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} has no Implementation Plan drafted yet.")
+    return artifact
+
+
+@router.post("/delivery-lane-nodes/{node_id}/draft-test-scenarios", response_model=DraftStoryTestScenariosResponse)
+def draft_story_test_scenarios(
+    node_id: uuid.UUID, payload: DraftStoryTestScenariosRequest, db: Session = Depends(get_db)
+) -> DraftStoryTestScenariosResponse:
+    """Drafts the TEST_SCENARIOS node's real output. See
+    app/services/story_test_scenarios_agent.py for the preconditions and
+    the 10-section output shape. Drafting never completes the node —
+    see update_lane_node_status's TEST_SCENARIOS branch for the separate
+    review/approve action."""
+    node = db.get(StoryDeliveryNode, node_id)
+    if node is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Delivery lane node {node_id} not found")
+    if node.node_key != "TEST_SCENARIOS":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Node {node_id} is '{node.node_key}', not TEST_SCENARIOS.")
+    triggered_by = db.get(User, payload.triggered_by_user_id)
+    if triggered_by is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"triggered_by_user_id {payload.triggered_by_user_id} does not match an existing user")
+    require_can_edit_stage(triggered_by, "story_test_scenarios")
+
+    try:
+        result = run_story_test_scenarios_agent(
+            db, node=node, triggered_by=triggered_by, clarification_answers=payload.clarification_answers,
+            provider_override=payload.provider_override, model_override=payload.model_override,
+        )
+    except StoryTestScenariosError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    lane = node.lane
+    story = db.get(Story, lane.story_id)
+    _log_story_activity(
+        db, story=story, action="story_test_scenarios.drafted", actor=triggered_by, lane_id=lane.id, node_id=node.id,
+        details={"needs_clarification": result.needs_clarification, "used_mock": result.agent_run_used_mock},
+    )
+
+    db.commit()
+    db.refresh(node)
+    return DraftStoryTestScenariosResponse(
+        needs_clarification=result.needs_clarification,
+        story_artifact=StoryArtifactRead.model_validate(result.story_artifact) if result.story_artifact else None,
+        node_status=node.status.value,
+    )
+
+
+@router.get("/stories/{story_id}/test-scenarios", response_model=StoryArtifactRead)
+def get_story_test_scenarios(story_id: uuid.UUID, db: Session = Depends(get_db)) -> StoryArtifact:
+    """The latest STORY_TEST_SCENARIOS StoryArtifact for this story, if
+    one has been drafted yet."""
+    story = _get_story_or_404(db, story_id)
+    artifact = (
+        db.query(StoryArtifact)
+        .filter(StoryArtifact.story_id == story.id, StoryArtifact.artifact_type == STORY_TEST_SCENARIOS_ARTIFACT_TYPE)
+        .order_by(StoryArtifact.version_number.desc())
+        .first()
+    )
+    if artifact is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} has no Test Scenarios drafted yet.")
+    return artifact
+
+
+@router.get("/stories/{story_id}/implementation-task", response_model=ImplementationTaskRead)
+def get_story_implementation_task(story_id: uuid.UUID, db: Session = Depends(get_db)) -> ImplementationTask:
+    """The story's CURRENT implementation task — see _current_story_task.
+    A story can have several (full-stack-per-story — see
+    _ensure_story_implementation_tasks), sequential ones; this always
+    resolves to whichever one a human should be looking at right now, so
+    every existing single-task consumer (the story lane's Implementation
+    tab, PR Review, Testing) keeps working unmodified, walking through
+    DATABASE -> BACKEND -> FRONTEND automatically as each is Accepted.
+    Use GET .../implementation-tasks (plural) for the full ordered set."""
+    story = _get_story_or_404(db, story_id)
+    tasks = db.query(ImplementationTask).filter(ImplementationTask.story_id == story.id).order_by(ImplementationTask.order_index).all()
+    if not tasks:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} has no implementation task yet.")
+    return _current_story_task(tasks)
+
+
+@router.get("/stories/{story_id}/implementation-tasks", response_model=list[ImplementationTaskRead])
+def get_story_implementation_tasks(story_id: uuid.UUID, db: Session = Depends(get_db)) -> list[ImplementationTask]:
+    """Every one of this story's ImplementationTasks, in run order — the
+    full-stack breakdown behind the single "current task" pointer above
+    (e.g. DATABASE, BACKEND, FRONTEND) — for a UI that wants to show the
+    whole sequence's progress, not just what's current."""
+    story = _get_story_or_404(db, story_id)
+    return db.query(ImplementationTask).filter(ImplementationTask.story_id == story.id).order_by(ImplementationTask.order_index).all()
+
+
+@router.get("/stories/{story_id}/test-report", response_model=StoryArtifactRead)
+def get_story_test_report(story_id: uuid.UUID, db: Session = Depends(get_db)) -> StoryArtifact:
+    """Story-level testing workflow, requirement 7 — the latest
+    story_test_report StoryArtifact for this story, if one has been
+    generated yet (see app/services/testing_agent.STORY_TEST_REPORT_ARTIFACT_TYPE)."""
+    story = _get_story_or_404(db, story_id)
+    artifact = (
+        db.query(StoryArtifact)
+        .filter(StoryArtifact.story_id == story.id, StoryArtifact.artifact_type == STORY_TEST_REPORT_ARTIFACT_TYPE)
+        .order_by(StoryArtifact.version_number.desc())
+        .first()
+    )
+    if artifact is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Story {story_id} has no test report yet.")
     return artifact
 
 
