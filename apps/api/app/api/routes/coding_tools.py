@@ -20,11 +20,14 @@ from sqlalchemy.orm import Session
 from app.api.routes.github_integration import _github_error_to_http, decrypt_repository_token
 from app.api.routes.stories import create_story_lane, update_lane_node_status
 from app.core.database import get_db
-from app.models import ImplementationTask, Project, Repository, Story, StoryArtifact, StoryDeliveryNodeStatus, User, WorkflowNode
+from app.models import ImplementationTask, ImplementationTaskStatus, Project, Repository, Story, StoryArtifact, StoryDeliveryNodeStatus, User, WorkflowNode
 from app.schemas.coding_tools import (
     BulkPrepareCodingToolRequest,
     BulkPrepareCodingToolResponse,
     BulkPrepareCodingToolStoryResult,
+    BulkPrepareImplementationRequest,
+    BulkPrepareImplementationResponse,
+    BulkPrepareImplementationStoryResult,
     BulkSyncStoryStageRequest,
     BulkSyncStoryStageResponse,
     BulkSyncStoryStageStoryResult,
@@ -854,6 +857,144 @@ def sync_implementation_task_inputs(
     return SyncStoryInputsResponse(
         branch_name=branch_name, base_branch=base_branch, pull_request_url=pull_request_url, committed=[file.path],
         not_ready=snapshot.not_ready, message=message,
+    )
+
+
+def _next_runnable_implementation_task(db: Session, story: Story) -> ImplementationTask | None:
+    """The first task (lowest order_index) this story hasn't completed yet
+    — same "DATABASE -> BACKEND -> FRONTEND, one at a time" selection
+    app/api/routes/stories.py's bulk_start_implementation uses, reused
+    here for the skill-push equivalent. Returns None when every task is
+    already COMPLETED (nothing left to prepare)."""
+    tasks = db.query(ImplementationTask).filter(ImplementationTask.story_id == story.id).order_by(ImplementationTask.order_index).all()
+    return next((t for t in tasks if t.status != ImplementationTaskStatus.COMPLETED), None)
+
+
+@router.post("/stories/bulk-prepare-implementation", response_model=BulkPrepareImplementationResponse, status_code=status.HTTP_201_CREATED)
+def bulk_prepare_implementation(
+    project_id: uuid.UUID, payload: BulkPrepareImplementationRequest, db: Session = Depends(get_db)
+) -> BulkPrepareImplementationResponse:
+    """The Stories list's "Prepare Implementation for coding tool" bulk
+    action — the code-Implementation counterpart to bulk_prepare_coding_tool,
+    but it NEVER calls the in-app Implementation Agent. For every selected
+    story, pushes its own next runnable task's input snapshot (exactly
+    sync_implementation_task_inputs' own snapshot) so a connected coding
+    tool can write the real code — the resulting PR is registered back via
+    the existing register_pull_request route, same as today's single-task
+    flow. Every story's file lands in ONE shared branch/PR."""
+    project = _project_or_404(db, project_id)
+    user = _user_or_400(db, payload.triggered_by_user_id)
+    require_can_edit_repository_file(user)
+    repository = _primary_repository(db, project_id)
+    base_branch = payload.base_branch or repository.default_branch
+    if not base_branch:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No base_branch given and this repository has no known default branch.")
+
+    token = decrypt_repository_token(repository)
+    owner, name = repository.owner, repository.name
+    try:
+        branches = github_api.list_branches(token, owner, name)
+    except GitHubIntegrationError as exc:
+        raise _github_error_to_http(exc) from exc
+    if not branches:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This repository is empty — add skills to it first (Add via pull request), which makes its first commit.",
+        )
+    if base_branch not in branches:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"The branch '{base_branch}' does not exist in {owner}/{name}.")
+
+    from app.services.implementation_skill import build_implementation_task_input_snapshot
+
+    results: list[BulkPrepareImplementationStoryResult] = []
+    to_write: list[tuple] = []
+
+    for story_id in payload.story_ids:
+        story = db.query(Story).filter(Story.id == story_id, Story.project_id == project_id).first()
+        if story is None:
+            results.append(BulkPrepareImplementationStoryResult(story_id=story_id, story_title="(not found)", status="skipped", reason=f"Story {story_id} not found in this project."))
+            continue
+
+        next_task = _next_runnable_implementation_task(db, story)
+        if next_task is None:
+            results.append(BulkPrepareImplementationStoryResult(story_id=story.id, story_title=story.title, status="all_complete"))
+            continue
+
+        snapshot = build_implementation_task_input_snapshot(db, project=project, story=story, task=next_task)
+        f = snapshot.file
+        try:
+            current = github_api.read_file(token, owner, name, f.path, base_branch)
+        except GitHubIntegrationError as exc:
+            if exc.status_code != 404:
+                raise _github_error_to_http(exc) from exc
+            to_write.append((f, None))
+        else:
+            if current.content != f.content:
+                to_write.append((f, current.sha))
+
+        results.append(
+            BulkPrepareImplementationStoryResult(
+                story_id=story.id, story_title=story.title, status="prepared", task_area=next_task.area.value, task_title=next_task.title,
+                not_ready=snapshot.not_ready,
+            )
+        )
+
+    prepared_count = sum(1 for r in results if r.status == "prepared")
+    if not to_write:
+        return BulkPrepareImplementationResponse(
+            branch_name=None, base_branch=base_branch, pull_request_url=None, results=results,
+            message=f"Nothing to sync — every prepared story's next task input already matches what's on {base_branch}."
+            if prepared_count
+            else "No story was prepared — see each story's own status above.",
+        )
+
+    branch_name = new_branch_name("bulk-sync-inputs", "implementation")
+    committed: list[str] = []
+    try:
+        github_api.create_branch(token, owner, name, new_branch=branch_name, base_ref=base_branch)
+        for f, existing_sha in to_write:
+            github_api.create_or_update_file(
+                token, owner, name, f.path, content=f.content, message=f"Bulk sync implementation inputs: {f.path}",
+                branch=branch_name, sha=existing_sha,
+            )
+            committed.append(f.path)
+    except GitHubIntegrationError as exc:
+        record_audit_log(
+            db, project_id=project.id, actor_user_id=user.id, action="coding_tool_skills.bulk_sync_implementation_inputs_failed", entity_type="Repository",
+            entity_id=repository.id, extra_data={"branch_name": branch_name, "committed": committed, "error": str(exc)},
+        )
+        db.commit()
+        raise _github_error_to_http(exc) from exc
+
+    pull_request_url: str | None = None
+    try:
+        pr = github_api.create_pull_request(
+            token, owner, name,
+            title=f"Bulk sync implementation inputs for {prepared_count} stor{'y' if prepared_count == 1 else 'ies'}",
+            head=branch_name, base=base_branch,
+            body="Refreshes each story's next task's input snapshot for:\n\n"
+            + "\n".join(f"- {r.story_title} ({r.task_area})" for r in results if r.status == "prepared")
+            + "\n\n_Generated by Agentic SDLC Hub._",
+        )
+        pull_request_url = pr.html_url
+    except GitHubIntegrationError as exc:
+        record_audit_log(
+            db, project_id=project.id, actor_user_id=user.id, action="coding_tool_skills.bulk_sync_implementation_inputs_pr_failed", entity_type="Repository",
+            entity_id=repository.id, extra_data={"branch_name": branch_name, "error": str(exc)},
+        )
+        db.commit()
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Files were committed to {branch_name}, but the pull request could not be opened: {exc}") from exc
+
+    record_audit_log(
+        db, project_id=project.id, actor_user_id=user.id, action="coding_tool_skills.bulk_sync_implementation_inputs", entity_type="Repository",
+        entity_id=repository.id,
+        extra_data={"branch_name": branch_name, "committed": committed, "pull_request_url": pull_request_url, "story_count": prepared_count},
+    )
+    db.commit()
+    return BulkPrepareImplementationResponse(
+        branch_name=branch_name, base_branch=base_branch, pull_request_url=pull_request_url, results=results,
+        message=f"Opened one pull request with {len(committed)} file(s) across {prepared_count} stor{'y' if prepared_count == 1 else 'ies'}. "
+        "Merge it, then run each story's `/implementation` command and register the resulting PR.",
     )
 
 
