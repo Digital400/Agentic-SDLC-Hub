@@ -33,7 +33,7 @@ import {
   api,
   ApiBulkApproveLaneNodeResponse,
   ApiBulkPrepareCodingToolResponse,
-  ApiBulkStartImplementationResponse,
+  ApiBulkPrepareImplementationResponse,
   ApiBulkSyncStoryStageResponse,
   ApiError,
   ApiSprint,
@@ -185,7 +185,7 @@ export function StoriesView({
   // next runnable task. Never creates/merges a pull request — that stays
   // a separate, deliberate, per-run action after a human reviews the diff.
   const [bulkImplementBusy, setBulkImplementBusy] = useState(false);
-  const [bulkImplementResult, setBulkImplementResult] = useState<ApiBulkStartImplementationResponse | null>(null);
+  const [bulkImplementResult, setBulkImplementResult] = useState<ApiBulkPrepareImplementationResponse | null>(null);
 
   // Re-checking a story against a corrected/re-approved backlog —
   // sync-from-backlog never updates an already-synced story, so this is
@@ -377,7 +377,15 @@ export function StoriesView({
       try {
         setOrder(await api.stories.recommendedOrder(projectId));
       } catch (err) {
-        setOrderError(err instanceof ApiError ? err.message : "Failed to load the recommended order.");
+        if (err instanceof ApiError) {
+          setOrderError(err.message);
+        } else {
+          // A plain fetch/network failure (not an ApiError — e.g. the API
+          // server was unreachable or restarting) carries its own message;
+          // surface it instead of a generic string so this is debuggable
+          // without opening devtools.
+          setOrderError(`Failed to load the recommended order: ${err instanceof Error ? err.message : String(err)}`);
+        }
       } finally {
         setOrderLoading(false);
       }
@@ -524,13 +532,13 @@ export function StoriesView({
     }
   }
 
-  async function handleBulkStartImplementation() {
+  async function handleBulkPrepareImplementation() {
     if (selectedIds.size === 0 || currentUserId === null) return;
     setBulkImplementBusy(true);
     setBulkImplementResult(null);
     setError(null);
     try {
-      const response = await api.stories.bulkStartImplementation(projectId, {
+      const response = await api.codingTools.bulkPrepareImplementation(projectId, {
         story_ids: Array.from(selectedIds),
         triggered_by_user_id: currentUserId,
       });
@@ -538,7 +546,7 @@ export function StoriesView({
       const refreshed = await api.stories.list(projectId);
       setStories(refreshed.items);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Failed to start implementation for the selected stories.");
+      setError(err instanceof ApiError ? err.message : "Failed to prepare implementation for the selected stories.");
     } finally {
       setBulkImplementBusy(false);
     }
@@ -855,24 +863,25 @@ export function StoriesView({
               <div className="flex items-center gap-2 text-sm">
                 <Code2 className="h-4 w-4 text-muted-foreground" />
                 {selectedIds.size === 0
-                  ? "Select stories to start code Implementation for each one's next task."
+                  ? "Select stories to prepare Implementation for your coding tool."
                   : `${selectedIds.size} selected.`}
               </div>
               <Button
                 size="sm"
                 variant="outline"
-                onClick={handleBulkStartImplementation}
+                onClick={handleBulkPrepareImplementation}
                 disabled={selectedIds.size === 0 || bulkImplementBusy || currentUserId === null}
               >
                 {bulkImplementBusy ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Code2 className="mr-1 h-3.5 w-3.5" />}
-                Start Implementation ({selectedIds.size})
+                Prepare Implementation ({selectedIds.size})
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
-              Story-wise bulk Implementation: for each selected story, starts a real run for its own next task
-              (DATABASE, then BACKEND, then FRONTEND — never more than one task per story per click, since the next
-              one only unlocks once a human reviews and accepts the current one). Never creates or merges a pull
-              request — review each run and create its PR individually, same as today.
+              Story-wise bulk Implementation prep: for each selected story, pushes its own next task&apos;s (DATABASE,
+              then BACKEND, then FRONTEND) input snapshot to GitHub in one shared pull request — same skill-file
+              pattern as Story LLD/Implementation Plan/Test Scenarios. This never calls the in-app Implementation
+              Agent; your connected coding tool writes the real code, then you register the resulting PR, same as
+              today&apos;s single-task flow.
             </p>
           </CardHeader>
           {bulkImplementResult && (
@@ -881,15 +890,25 @@ export function StoriesView({
               <ul className="flex flex-col gap-1 text-xs">
                 {bulkImplementResult.results.map((r) => (
                   <li key={r.story_id} className="flex items-center gap-2">
-                    {r.status === "started" && <Badge variant="success">Started ({r.task_area})</Badge>}
+                    {r.status === "prepared" && <Badge variant="success">Prepared ({r.task_area})</Badge>}
                     {r.status === "all_complete" && <Badge variant="gray">All tasks complete</Badge>}
-                    {r.status === "awaiting_review" && <Badge variant="warning">Awaiting review ({r.task_area})</Badge>}
                     {r.status === "skipped" && <Badge variant="destructive">Skipped</Badge>}
                     <span className="font-medium">{r.story_title}</span>
                     {r.reason && <span className="text-muted-foreground">— {r.reason}</span>}
                   </li>
                 ))}
               </ul>
+              {bulkImplementResult.pull_request_url && (
+                <a
+                  href={bulkImplementResult.pull_request_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-sm text-primary underline"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  View shared pull request
+                </a>
+              )}
               <div className="flex justify-end">
                 <Button size="sm" variant="outline" onClick={() => setBulkImplementResult(null)}>
                   Dismiss

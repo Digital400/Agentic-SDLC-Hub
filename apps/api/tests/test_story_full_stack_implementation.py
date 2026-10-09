@@ -114,7 +114,7 @@ def _add_repository(db, project):
     )
     db.add(connection)
     db.flush()
-    repository = Repository(project=project, connection=connection, owner="octocat", name="hello-world", default_branch="main")
+    repository = Repository(project=project, connection=connection, owner="octocat", name="hello-world", default_branch="main", is_primary=True)
     db.add(repository)
     db.flush()
     snapshot = RepositorySnapshot(repository=repository, ref="main", commit_sha="abc123", file_count=1, truncated=False)
@@ -467,3 +467,74 @@ def test_bulk_start_implementation_skips_a_story_with_no_tasks_without_failing_t
     assert by_id[story_a.id].status == "started"
     assert by_id[bare_story.id].status == "skipped"
     assert by_id[bare_story.id].reason is not None
+
+
+# --- "Prepare Implementation for coding tool" bulk action (skill-push, no in-app agent) ------
+
+
+def test_bulk_prepare_implementation_pushes_each_story_next_task_input_in_one_shared_pr(db, project, actor):
+    """Never calls the in-app Implementation Agent — only pushes each
+    selected story's own next runnable task's input snapshot, all in one
+    shared branch/PR, same pattern as the other three stages' bulk-prepare."""
+    from unittest.mock import patch
+
+    import app.api.routes.coding_tools as coding_tools_routes
+    from app.api.routes.coding_tools import bulk_prepare_implementation
+    from app.schemas.coding_tools import BulkPrepareImplementationRequest
+    from tests.test_story_coding_tool_sync import _not_found
+
+    _add_repository(db, project)
+    story_a = _story_with_plan(db, project, actor, plan_markdown=BACKEND_ONLY_PLAN, title="Story A")
+    story_b = _story_with_plan(db, project, actor, plan_markdown=FULL_STACK_PLAN, title="Story B")
+    database_task_b = _tasks(db, story_b)[0]
+    _run_and_accept(db, database_task_b, actor)  # story_b's next task is now BACKEND
+
+    with patch.object(coding_tools_routes, "decrypt_repository_token", lambda repo: "tok"), \
+         patch("app.services.github_integration.list_branches", lambda token, o, r, **kw: ["main"]), \
+         patch("app.services.github_integration.read_file", _not_found), \
+         patch("app.services.github_integration.create_branch") as create_branch, \
+         patch("app.services.github_integration.create_or_update_file") as create_file, \
+         patch("app.services.github_integration.create_pull_request") as create_pr:
+        class PR:
+            html_url = "https://github.com/octocat/hello-world/pull/21"
+
+        create_pr.return_value = PR()
+
+        result = bulk_prepare_implementation(
+            project.id, BulkPrepareImplementationRequest(story_ids=[story_a.id, story_b.id], triggered_by_user_id=actor.id), db,
+        )
+
+    from app.services.story_coding_tool_sync import story_slug
+
+    assert create_branch.call_count == 1  # one shared branch, not two
+    assert create_pr.call_count == 1  # one shared PR, not two
+    by_id = {r.story_id: r for r in result.results}
+    assert by_id[story_a.id].status == "prepared" and by_id[story_a.id].task_area == "BACKEND"
+    assert by_id[story_b.id].status == "prepared" and by_id[story_b.id].task_area == "BACKEND"
+    written_paths = [call.args[3] for call in create_file.call_args_list]
+    slug_a, slug_b = story_slug(story_a.title), story_slug(story_b.title)
+    assert f"docs/sdlc/stories/{slug_a}/inputs/implementation/backend-task-context.md" in written_paths
+    assert f"docs/sdlc/stories/{slug_b}/inputs/implementation/backend-task-context.md" in written_paths
+
+
+def test_bulk_prepare_implementation_reports_all_complete_without_pushing_anything(db, project, actor):
+    from unittest.mock import patch
+
+    import app.api.routes.coding_tools as coding_tools_routes
+    from app.api.routes.coding_tools import bulk_prepare_implementation
+    from app.schemas.coding_tools import BulkPrepareImplementationRequest
+
+    _add_repository(db, project)
+    story = _story_with_plan(db, project, actor, plan_markdown=BACKEND_ONLY_PLAN)
+    task = _tasks(db, story)[0]
+    _run_and_accept(db, task, actor)
+
+    with patch.object(coding_tools_routes, "decrypt_repository_token", lambda repo: "tok"), \
+         patch("app.services.github_integration.list_branches", lambda token, o, r, **kw: ["main"]), \
+         patch("app.services.github_integration.create_branch") as create_branch, \
+         patch("app.services.github_integration.create_pull_request") as create_pr:
+        result = bulk_prepare_implementation(project.id, BulkPrepareImplementationRequest(story_ids=[story.id], triggered_by_user_id=actor.id), db)
+
+    assert result.results[0].status == "all_complete"
+    assert create_branch.call_count == 0
+    assert create_pr.call_count == 0

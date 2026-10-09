@@ -1586,6 +1586,29 @@ export interface ApiBulkPrepareCodingToolResponse {
   message: string;
 }
 
+// The Stories list's "Prepare Implementation for coding tool" bulk action
+// — never calls the in-app Implementation Agent; only pushes each
+// selected story's own next runnable task's input snapshot so a
+// connected coding tool can write the real code. See
+// app/api/routes/coding_tools.py's bulk_prepare_implementation.
+export interface ApiBulkPrepareImplementationStoryResult {
+  story_id: string;
+  story_title: string;
+  status: "prepared" | "all_complete" | "skipped";
+  task_area: string | null;
+  task_title: string | null;
+  not_ready: string[];
+  reason: string | null;
+}
+
+export interface ApiBulkPrepareImplementationResponse {
+  branch_name: string | null;
+  base_branch: string;
+  pull_request_url: string | null;
+  results: ApiBulkPrepareImplementationStoryResult[];
+  message: string;
+}
+
 // The Stories list's "Run Story LLD" bulk button — drafts every selected
 // story's Story LLD in one click. See app/api/routes/stories.py's
 // bulk_run_story_lld.
@@ -2004,6 +2027,14 @@ export const api = {
       projectId: string,
       body: { story_ids: string[]; stage: string; triggered_by_user_id: string; ref?: string | null },
     ) => post<ApiBulkSyncStoryStageResponse>(`/projects/${projectId}/coding-tools/stories/bulk-sync`, body),
+    // Story-wise bulk code Implementation prep — never calls the in-app
+    // Implementation Agent; pushes each selected story's own next
+    // runnable task's input snapshot for a connected coding tool to
+    // implement, all in one shared PR.
+    bulkPrepareImplementation: (
+      projectId: string,
+      body: { story_ids: string[]; triggered_by_user_id: string; base_branch?: string | null },
+    ) => post<ApiBulkPrepareImplementationResponse>(`/projects/${projectId}/coding-tools/stories/bulk-prepare-implementation`, body),
     // Implementation's own per-task input snapshot — its skill pack (stage
     // "implementation") installs once per repo via install() above; this is
     // the genuinely per-task action (one story can have several sibling

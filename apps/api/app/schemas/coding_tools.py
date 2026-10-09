@@ -123,6 +123,42 @@ class SyncImplementationTaskInputsRequest(BaseModel):
     base_branch: str | None = Field(default=None, description="Defaults to the repository's default branch.")
 
 
+class BulkPrepareImplementationRequest(BaseModel):
+    """The Stories list's "Prepare Implementation for coding tool" bulk
+    action — story-wise, same spirit as BulkPrepareCodingToolRequest but
+    for code Implementation: for every selected story, pushes its own
+    NEXT runnable task's input snapshot (same skill-file pattern Story
+    LLD/Implementation Plan/Test Scenarios already use) so a connected
+    coding tool can write the real code — this never calls the in-app
+    Implementation Agent itself. All stories' files land in ONE shared
+    branch/PR. See app/api/routes/coding_tools.py's
+    bulk_prepare_implementation."""
+
+    story_ids: list[uuid.UUID] = Field(..., min_length=1)
+    triggered_by_user_id: uuid.UUID
+    base_branch: str | None = Field(default=None, description="Defaults to the repository's default branch.")
+
+
+class BulkPrepareImplementationStoryResult(BaseModel):
+    story_id: uuid.UUID
+    story_title: str
+    status: Literal["prepared", "all_complete", "skipped"]
+    task_area: str | None = None
+    task_title: str | None = None
+    # Display names of upstream documents not ready yet (e.g. ["Story LLD"])
+    # — the snapshot is still committed as a placeholder; non-blocking.
+    not_ready: list[str] = Field(default_factory=list)
+    reason: str | None = None
+
+
+class BulkPrepareImplementationResponse(BaseModel):
+    branch_name: str | None
+    base_branch: str
+    pull_request_url: str | None
+    results: list[BulkPrepareImplementationStoryResult]
+    message: str
+
+
 class SyncStoryStageRequest(BaseModel):
     stage: str
     triggered_by_user_id: uuid.UUID
